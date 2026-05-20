@@ -126,8 +126,6 @@ When extending opcode coverage, please:
 
 MIT. See `LICENSE`.
 
-If you prefer GPL-2.0 (matching Wireshark's own license), that's fine too — the dissector doesn't statically link any Wireshark internals, so license choice is independent.
-
 ## Acknowledgments
 
 Built from observed traffic captures. Opcode coverage cross-checked against publicly available Siemens product literature (BACnet ALN Manual 125-3020, public SSA disclosures, vendor data sheets). The Siemens APOGEE protocol family is proprietary to Siemens; this dissector is a third-party analytical tool and is not affiliated with or endorsed by Siemens.
