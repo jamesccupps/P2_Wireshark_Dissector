@@ -1,6 +1,6 @@
 # Siemens APOGEE P2 Wireshark Dissector
 
-A Lua dissector for Wireshark that decodes the Siemens APOGEE P2 building-automation protocol — the proprietary management/data protocol spoken between Desigo CC supervisors and APOGEE PXC field panels. Decodes TCP/5033, TCP/5034, and the UDP/10001 multicast presence beacon into a navigable protocol tree with routing-header breakouts, opcode-level dispatch, and per-opcode value/string extraction.
+A Lua dissector for Wireshark that decodes the Siemens APOGEE P2 building-automation protocol — the management/data protocol spoken between Desigo CC or Insight supervisors and APOGEE PXC field panels. Decodes TCP/5033, TCP/5034, and the UDP/10001 multicast presence beacon into a navigable protocol tree with routing-header breakouts, opcode-level dispatch, and per-opcode value/string extraction.
 
 ## What it does
 
