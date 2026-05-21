@@ -1,10 +1,12 @@
--- p2.lua — Wireshark dissector for Siemens P2 (Apogee Ethernet) protocol
+-- p2.lua — Wireshark dissector for Siemens APOGEE P2 (Apogee Ethernet)
 --
--- Drop into Wireshark's plugin folder and restart Wireshark. Decodes
--- TCP/5033 (DCC<->PXC) and TCP/5034 (PXC->DCC) traffic into a navigable
--- protocol tree, plus the UDP/10001 multicast presence beacon. Click a
--- packet, see the routing header, opcode, and (for reads/COVs) device/
--- point/value broken out.
+-- Decodes TCP/5033 (Siemens-default P2 port per white paper 149-1006)
+-- and the UDP/10001 multicast presence beacon into a navigable protocol
+-- tree: routing header, opcode, and (for reads/COVs) device / point /
+-- value broken out.
+--
+-- Non-default port: use Wireshark's Decode As... to map your site's
+-- port to the P2 dissector. See README for details.
 --
 -- Plugin folder location:
 --   Help -> About Wireshark -> Folders -> "Personal Lua Plugins"
