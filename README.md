@@ -1,10 +1,10 @@
 # Siemens APOGEE P2 Wireshark Dissector
 
-A Lua dissector for Wireshark that decodes the Siemens APOGEE P2 building-automation protocol — the management/data protocol spoken between Desigo CC or Insight supervisors and APOGEE PXC field panels. Decodes TCP/5033, TCP/5034, and the UDP/10001 multicast presence beacon into a navigable protocol tree with routing-header breakouts, opcode-level dispatch, and per-opcode value/string extraction.
+A Lua dissector for Wireshark that decodes the Siemens APOGEE P2 building-automation protocol — the management/data protocol spoken between Desigo CC or Insight supervisors and APOGEE PXC field panels. Decodes TCP/5033 into a navigable protocol tree with routing-header breakouts, opcode-level dispatch, and per-opcode value/string extraction.
 
 ## What it does
 
-Click a packet on TCP/5033, TCP/5034, or UDP/10001 and get:
+Click a packet on TCP/5033 and get:
 
 - **Frame header** — total length, message type (DATA / HEARTBEAT / CONNECT / ANNOUNCE / inter-panel ANNOUNCE), sequence counter
 - **Routing header** — direction byte, BLN (Building Local Network) name, destination panel name, source panel name
@@ -37,8 +37,6 @@ Verify by opening any capture containing TCP/5033 traffic — the Protocol colum
 | Port | Protocol | Direction | Description |
 |---|---|---|---|
 | TCP/5033 | P2 (DATA / HEARTBEAT / CONNECT / ANNOUNCE) | supervisor ↔ panel | Main control channel |
-| TCP/5034 | P2 (push-write / COV) | panel → supervisor | Change-of-value pushes |
-| UDP/10001 | P2 multicast beacon | panel → 233.89.188.1 + 255.255.255.255 | Presence announcement, ~10.5s cadence |
 
 If your environment uses non-standard ports, edit the `DissectorTable.get("tcp.port"):add(...)` calls at the bottom of `p2.lua` and reload.
 
@@ -66,7 +64,7 @@ If your environment uses non-standard ports, edit the `DissectorTable.get("tcp.p
 - **PPCL editor:** `0x4100`, `0x4103`, `0x4104`, `0x4106`
 - **Alarm pair:** `0x0508` (PXC→DCC), `0x0509` (DCC→PXC)
 - **BarePings:** `0x0951`, `0x0954`–`0x0956`, `0x0959`
-- **Error codes:** 37-entry catalog covering common (`0x0002` not_found, `0x0003` E3, `0x00AC` not_supported, `0x0E11` already_exists, etc.) and vendor-documented codes from Siemens BACnet ALN Manual 125-3020 Appendix C
+- **Error codes:** 37-entry catalog covering common (`0x0002` not_found, `0x0003` E3, `0x00AC` not_supported, `0x0E11` already_exists, etc.)
 
 ### Value-block decode
 
@@ -87,11 +85,10 @@ The `[#COM stale]` flag is the device-level comm-fault indicator. PXCs return ca
 Some observations that may be useful when reading captures or extending the dissector:
 
 - **Routing-header name ordering is destination-first** across all message types (slot 2 = destination, slot 4 = source). The IdentifyBlock body's first TLV agrees with slot 4.
-- **Node names are case-insensitive on the wire** but display is case-preserving — same name can appear as `NODE8` from one client and `node8` from another.
+- **Node names are case-insensitive on the wire** but display is case-preserving — same name can appear as `NODE99` from one client and `node99` from another.
 - **Mode C connections** carry operational opcodes inside `0x2E`/`0x2F` framing without ever transitioning to `0x33`/`0x34`. The dissector detects this by checking whether the first two bytes after the routing header are `0x4640` (IdentifyBlock — handshake) or something else (operational opcode riding inside handshake framing).
 - **PPCL editor opcodes** (`0x4100`/`0x4103`/`0x4104`/`0x4106`) append a 9-byte SYST scope footer (`01 00 04 SYST 23 3F FF FF FF`) after the opcode-specific payload. Stripping the footer causes the panel to reject the request.
 - **The 0x46xx replication-ops range** is a mixed bag: `0x4634` is the documented routing-table announce, `0x4636` is `ReplChanges` (BLN-wide peer-table push using sub-opcode `0x462D` records), and the gap opcodes `0x4641`–`0x464C` carry replication-related operations whose exact semantics are not all publicly documented. The dissector surfaces name strings from bodies where it can and labels what it knows.
-- **Multicast beacon payload is invariant** at `01 00 00 00` across all observed traffic. The beacon is dual-emitted to both `233.89.188.1` and `255.255.255.255` with sub-millisecond delta. Cadence is ~10.5s.
 
 ## Unknowns and limitations
 
