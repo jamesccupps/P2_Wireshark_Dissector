@@ -1,16 +1,36 @@
-# Siemens APOGEE P2 Wireshark Dissector
+# Siemens APOGEE P2 (Protocol II) Wireshark Dissector
 
-A Lua dissector for Wireshark that decodes the Siemens APOGEE P2 building-automation protocol over TCP/5033 and the UDP/10001 multicast presence beacon.
+A Lua dissector for Wireshark that decodes the Siemens APOGEE **P2** (Protocol II)
+building-automation protocol over TCP. Built and validated from wire captures; the
+opcode names are the protocol's authoritative AP2 function-code vocabulary.
+
+> **v2.1 — wire-verified rebuild.** Opcode names corrected to the full authoritative
+> set; the framing model fixed (the opcode is read only on request frames, at its true
+> variable offset); accurate body decoders for the common operations; per-opcode
+> *expected-body schema* notes; and the old UDP/10001 "multicast presence beacon"
+> decoder **removed** (it was a misattribution of unrelated gateway traffic — see
+> *Correctness notes*).
 
 ## What it does
 
 Click a P2 packet and get:
 
-- **Frame header** — total length, message type (DATA / HEARTBEAT / CONNECT / ANNOUNCE / inter-panel ANNOUNCE), sequence counter
-- **Routing header** — direction byte, BLN name, destination panel, source panel
-- **Opcode** — labelled against a catalog of 100+ known opcodes
-- **Per-opcode body decode** — point reads (device / point / float / units / comm-status), alarms, schedules, identify, sysinfo, routing table, replication ops, value updates
-- **Multicast beacon** — UDP/10001 payload sanity-check against the invariant `01 00 00 00`
+- **Frame header** — total length, message class, sequence, direction
+- **Routing slots** — the four NUL-terminated ASCII slots `[BLN, dst-node, BLN, src-node]`
+- **Opcode** — the 2-byte AP2 function code, labelled against the full authoritative
+  name set; an opcode that isn't a defined function code shows as `unknown_0x….`
+- **Per-opcode body** — wire-verified decoders for the common operations:
+  - **COV value push** (`0x0274`) — point name, present value (`f32` BE), and the
+    10-byte condition/priority block split into its named fields
+    (priority, control status, out-of-service / failed / proof / disabled / commanded
+    flags, alarm state, alarm priority)
+  - **Node-name-table replication** (`0x4634`) — the roster digest: each node name
+    plus its version (change generation)
+  - **CONNECT / ANNOUNCE / keepalive** (`0x4640`) — node / site / BLN identity
+  - **Scope tag + command priority**, **error codes**, and a generic TLV / value walk
+    for everything else
+- **Expected-body schema** — for ~440 opcodes, a `[struct-derived]` note listing the
+  fields the body is expected to contain (see *Schema notes* below)
 
 ## Install
 
@@ -20,42 +40,78 @@ Click a P2 packet and get:
 2. Drop `p2.lua` into that folder
 3. **Analyze → Reload Lua Plugins** (`Ctrl+Shift+L`) or restart Wireshark
 
-The Protocol column should show `P2` on any TCP/5033 traffic.
+The Protocol column shows `P2` on TCP/5033 and TCP/5034 traffic. You can also load it
+ad hoc: `tshark -X lua_script:p2.lua -r capture.pcapng`.
 
-## Port
+## Ports
 
-P2's default transport is **TCP/5033** (Siemens white paper 149-1006). The port is configurable per site; if your captures use a different port, use Wireshark's **Analyze → Decode As...** to map it to the `P2` dissector.
+- **TCP/5033** is the canonical, default P2 port — every field panel (and the
+  supervisor) listens here for inbound P2.
+- **TCP/5034** is, in some deployments, a second supervisor-side listener carrying the
+  panel→supervisor push/announce (reverse) channel. It is optional and
+  deployment-specific; the protocol on it is identical to 5033.
+
+The dissector binds both. For any other port, use **Analyze → Decode As…** to map it to
+`P2`. Frame semantics derive from the frame's contents and direction, never from the TCP
+port it arrived on.
+
+## Coverage at a glance
+
+- **Message classes** — a session-control band, `0x29` / `0x2A` (peer session
+  carriers), `0x2E` CONNECT, `0x2F` ANNOUNCE (all carry the `EBLN_PING 0x4640` identity
+  exchange), and a data band, `0x33` (legacy) / `0x34` (modern).
+- **Opcodes** — the complete authoritative AP2 function-code set is named. The common
+  operations are byte-decoded; the rest show their name + expected-body schema + a
+  generic body walk.
+- **Errors** — `0x0003` not_found, `0x00AC` not_supported, `0x0002` out_of_scope,
+  `0x0E11` already_exists, `0x0E15` not_commandable.
+- **Values** — big-endian `f32`; the COV condition/priority block decoded field by field.
+
+## Correctness notes
+
+- **The opcode is present only on request/push frames (direction `0x00`)**, and it sits
+  at a *variable* offset (immediately after the four NUL-terminated routing slots). The
+  dissector scans the four NULs rather than assuming a fixed offset — reading the
+  post-slot bytes off a success/error response would fabricate phantom opcodes.
+- **There is no multicast "presence beacon."** Earlier versions decoded UDP/10001 to
+  `233.89.188.1` as a Siemens P2 beacon; that traffic is actually unrelated
+  gateway/heartbeat multicast, not P2. The real, *optional* Ethernet-BLN availability
+  multicast is `234.5.6.7:8` and is **disabled by default** — a peer-liveness heartbeat,
+  not a discovery mechanism. The decoder has been removed to avoid false positives.
+- Routing-slot ordering is destination-first within the request direction; the BLN-name
+  slot is the membership/admission key.
+
+## Schema notes
+
+For opcodes whose request body is defined by the AP2 type system, the dissector shows
+an **expected-body schema** — the field list the body *should* contain. This is a
+struct-derived aid, **not** a guaranteed byte layout: P2's body encoding uses TLV
+framing, scope tags, and field widths that are only fully pinned for the wire-verified
+opcodes. As live captures confirm an opcode's exact layout, its schema note is upgraded
+to a real, byte-level field decode (as already done for COV, the replication roster, and
+the identity exchange). Treat un-upgraded schema fields as expectations, not decoded
+bytes.
 
 ## Useful tshark one-liner
 
-Identify Siemens PXC field panels in any capture without decoding payloads — PXCs (Nucleus NET RTOS) emit `TTL=64` with `window=16000` exactly; everything else looks different:
+Heuristic to spot Siemens PXC field panels in a capture without decoding payloads — PXCs
+(Nucleus NET RTOS) characteristically emit `TTL=64` with a small fixed TCP window:
 
 ```bash
 tshark -r capture.pcapng -Y "tcp.flags.syn==1" \
     -T fields -e ip.src -e ip.ttl -e tcp.window_size_value | sort -u
 ```
 
-## Coverage at a glance
-
-- **Message types:** `0x29` inter-panel ANNOUNCE, `0x2E` CONNECT, `0x2F` ANNOUNCE, `0x33` DATA, `0x34` HEARTBEAT
-- **Opcodes** (categories): system info / identity, replication ops (0x46xx), reads, property writes, object lifecycle, point enumeration, schedule ops, PPCL editor, alarm pair, BarePings
-- **Errors:** 37-entry catalog from Siemens BACnet ALN Manual 125-3020 Appendix C
-- **Value blocks:** marker, sentinel, comm-status (live vs `[#COM stale]`), data-type, big-endian f32, units
-
-## Notes
-
-- Routing-header name ordering is destination-first across all message types.
-- BLN names are case-sensitive ASCII; node names are case-insensitive on the wire (display preserves case).
-- Mode C connections carry operational opcodes inside `0x2E` / `0x2F` framing without ever transitioning to `0x33` / `0x34`.
-- Multicast beacon (UDP/10001) is dual-emitted to `233.89.188.1` and `255.255.255.255` at ~10.5 s cadence; payload invariant.
-- Opcodes labelled `unknown_0xNNNN` are candidates for further analysis — see CONTRIBUTING.md.
-
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests for new opcode coverage, body-decode improvements, and edge-case fixes welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests welcome — especially captures that
+let an expected-body schema be promoted to a verified byte decoder (a point in alarm or
+held under command, a node-name-table change, a large upload), new bespoke body
+decoders, and edge-case fixes.
 
 ## License
 
 MIT. See `LICENSE`.
 
-This dissector is a third-party analytical tool built from observed traffic. It is not affiliated with or endorsed by Siemens.
+This dissector is a third-party analytical tool built from observed traffic for owner-
+operators of their own equipment. It is not affiliated with or endorsed by Siemens.
