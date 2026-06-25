@@ -1,1365 +1,1308 @@
--- p2.lua — Wireshark dissector for Siemens APOGEE P2 (Apogee Ethernet)
+-- p2.lua — Siemens APOGEE P2 (Protocol II) Wireshark dissector
+-- Version: 2.1  (2026-06-24)  -- wire-verified rebuild + per-opcode body schema
 --
--- Decodes TCP/5033 (Siemens-default P2 port per white paper 149-1006)
--- and the UDP/10001 multicast presence beacon into a navigable protocol
--- tree: routing header, opcode, and (for reads/COVs) device / point /
--- value broken out.
+-- Changelog
+--   2.1  Per-opcode EXPECTED BODY SCHEMA for every defined function code, derived
+--        from the AP2 ASDU type structures and shown as a "[schema: struct-derived,
+--        not byte-verified]" note under the body. The actual bytes are still parsed
+--        by the wire-verified bespoke decoders (COV / node roster / identity) and a
+--        generic TLV/scope/value walk. The schema tells you what fields the body
+--        SHOULD contain; byte-level splitting is upgraded per opcode as live captures
+--        confirm it. (Field-by-field byte decode is NOT auto-generated, because the
+--        struct->wire mapping is non-trivial — TLV framing, scope tags, and unproven
+--        enum widths — so a generated split would be confidently wrong for most ops.)
+--   2.0  Wire-verified rebuild: authoritative AP2_Function_Code names; removed the
+--        UDP/10001 233.89.188.1 "presence beacon" (misattribution); opcode read at
+--        the variable post-slot offset and only on dir==0x00 (no phantom opcodes);
+--        0x29-0x2F session-control band incl. 0x2A; COV/roster/identity decoders;
+--        length-prefix reassembly + multi-PDU.
+--   1.x  Original public version (behavioral opcode guesses; UDP beacon decoder).
 --
--- Non-default port: use Wireshark's Decode As... to map your site's
--- port to the P2 dissector. See README for details.
---
--- Plugin folder location:
---   Help -> About Wireshark -> Folders -> "Personal Lua Plugins"
---   Typical paths:
---     Windows: %APPDATA%\Wireshark\plugins\
---     Linux:   ~/.local/lib/wireshark/plugins/
---     macOS:   ~/.local/lib/wireshark/plugins/
---
--- Reload without restarting: Analyze -> Reload Lua Plugins (Ctrl+Shift+L)
---
--- Coverage notes:
---   * Mode C connections — operational opcodes carried inside 0x2E/0x2F
---     framing (no transition to 0x33/0x34 ever) are dispatched to the
---     opcode handler. Detection rule: first 2 bytes after routing header
---     != 0x4640 -> operational opcode; else -> IdentifyBlock.
---   * Routing-header name ordering is destination-first across ALL message
---     types (DATA, HEARTBEAT, CONNECT, ANNOUNCE). Field labels reflect
---     that.
---   * Comm-status byte (live vs stale-cache) and data-type byte are
---     surfaced from the value block — the 0x00/0x01 byte at value-block
---     offset +6 is the device-comm-fault flag.
---   * Multicast presence beacon decoder bound to UDP/10001 — payload
---     should always be 4 bytes 01 00 00 00. Dual-emitted to multicast
---     233.89.188.1 and broadcast 255.255.255.255 (sub-millisecond delta);
---     cadence ~10.5s.
---   * Schedule operations (0x098C-F, 0x5020/22), PPCL editor opcodes
---     (0x4100/03/04/06), property-write split (0x0240/0x4222 with
---     0x0E15 wrong-write-opcode error), and alarm pair (0x0508/0x0509)
---     all dispatched and decoded.
---
--- Anything tagged "unknown_opcode" in the dissector output is a candidate
--- for further protocol analysis. Add new opcodes to OPCODES below as
--- they're identified.
+-- Frame (big-endian): u32 total_len | u32 msg_type | u32 sequence | u8 direction |
+--   four NUL-terminated ASCII routing slots [BLN, dst, BLN, src] |
+--   (only when direction==0x00) u16 AP2 function code | body
+-- Opcode is at a VARIABLE offset (after the 4 NULs) and present ONLY on dir==0x00.
+-- There is NO multicast "presence beacon"; the real optional availability multicast
+-- is 234.5.6.7:8 (off by default), not a discovery beacon.
 
-local p2  = Proto("p2",        "Siemens P2 (Apogee Ethernet)")
-local p2b = Proto("p2_beacon", "Siemens P2 Multicast Beacon")
+local p2 = Proto("p2", "Siemens APOGEE P2 (Protocol II)")
 
-------------------------------------------------------------------------
--- Constants
-------------------------------------------------------------------------
-
-local MSG_TYPES = {
-    [0x29] = "ANNOUNCE-inter-panel (inter-panel post-restart BLN re-establishment)",
-    [0x2E] = "CONNECT (legacy handshake; carries Mode C ops)",
-    [0x2F] = "ANNOUNCE (modern dialect; supervisor-bound)",
-    [0x33] = "DATA (legacy dialect)",
-    [0x34] = "HEARTBEAT (modern dialect / session maintenance)",
+------------------------------------------------------------------------ value strings
+local MSG_CLASS = {
+  [0x33]="data (legacy dialect)", [0x34]="data (modern dialect)",
+  [0x29]="session carrier", [0x2A]="peer-session carrier",
+  [0x2E]="CONNECT (session establish)", [0x2F]="ANNOUNCE (presence)",
 }
-
-local DIR_BYTES = {
-    [0x00] = "Request",
-    [0x01] = "Success Response",
-    [0x05] = "Error Response (typically body `00 00 03` for unrecognized opcode)",
+local DIR = { [0x00]="request / push", [0x01]="success response", [0x05]="error response" }
+local ERRORS = {
+  [0x0003]="not_found", [0x00AC]="not_supported (E172)", [0x0002]="out_of_scope",
+  [0x0E11]="already_exists", [0x0E15]="not_commandable", [0x0009]="error_0009",
 }
-
--- Big-endian u16 opcode that follows the routing header in DATA/HEARTBEAT
--- frames (and Mode C 0x2E/0x2F frames carrying operational ops).
+local PRIORITY = {
+  [0x00]="NONE (read)", [0x01]="tec_ovrd", [0x05]="PDL", [0x0A]="host_2",
+  [0x0F]="host_3", [0x14]="host_4", [0x19]="host_5", [0x1E]="host_6",
+  [0x20]="EMER", [0x22]="SMOKE", [0x23]="OPER",
+}
 local OPCODES = {
-    -- System info / identity
-    [0x0100] = "GetRevString (legacy sysinfo)",
-    [0x010C] = "SysInfoCompact (model/firmware/build-date)",
-    [0x4640] = "Identify (handshake or 10s mid-session refresh)",
-    [0x4634] = "RoutingTable (BLN topology announce; legitimate replication-table operation)",
-
-    -- 0x46xx replication-ops range. The opcodes in this range carry the
-    -- supervisor's BLN-wide peer-table push and related topology
-    -- operations. Most have minimal public documentation; the
-    -- annotations below reflect observed wire-level behavior only.
-    [0x462D] = "RecordSet (sub-opcode observed inside 0x4636 ReplChanges body — wraps each <peer-name, peer-IP> entry with SYST-scope sentinel)",
-    [0x4633] = "Undocumented success-response (body 51B-several-hundred B; content not fully decoded)",
-    [0x4635] = "Undocumented success-response (body 51B-several-hundred B; content not fully decoded)",
-    [0x4636] = "ReplChanges (CPI 0x1604) — supervisor->panel BLN-wide peer-table push; body carries <name TLV, IP> records using sub-opcode 0x462D",
-    [0x4641] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4642] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4643] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4644] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4645] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4646] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4647] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4648] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x4649] = "0x46xx — undocumented (semantics not publicly documented)",
-    [0x464A] = "Replication op (peer-name write to BLN peer table)",
-    [0x464B] = "Replication op (same class as 0x464A)",
-    [0x464C] = "Replication op (same class as 0x464A)",
-    [0x464D] = "Topology query (response carries BLN peer inventory)",
-    [0x464E] = "Undocumented success-response",
-    [0x464F] = "Undocumented success-response",
-    [0x4650] = "Undocumented success-response",
-
-    -- Status / system probes. 0x0050 / 0x0606 / 0x5354 / 0x098B all have
-    -- constant body bytes.
-    [0x0050] = "StatusQuery (14B fixed body; response includes a system identity string after the SYST scope footer)",
-    [0x0606] = "Ping (14B body; panel name appears in routing header)",
-    [0x5354] = "Status probe (14B constant body; always errors 0x0003; semantics unknown)",
-
-    -- Reads
-    [0x0220] = "ReadShort (modern dialect, compact; small + 273B preallocated descriptor-fetch)",
-    [0x0271] = "ReadExtended (legacy dialect)",
-    [0x0272] = "ReadExtended-MetaOnly (no value sentinel)",
-    [0x0273] = "WriteNoValue / PointExistenceProbe (Desigo UI browse — 500x more common than alarm-ack use)",
-    [0x0274] = "ValuePush (5033 push-write / 5034 COV — direction-dependent)",
-
-    -- Bare-opcode session pings (PXC->DCC, 2 bytes total, panel-specific)
-    [0x0951] = "BarePing 0951 (panel-specific 2-byte keepalive)",
-    [0x0954] = "BarePing 0954 (panel-specific 2-byte keepalive)",
-    [0x0955] = "BarePing 0955 (panel-specific 2-byte keepalive)",
-    [0x0956] = "BarePing 0956 (panel-specific 2-byte keepalive)",
-    [0x0959] = "BarePing 0959 (panel-specific 2-byte keepalive)",
-
-    -- Writes / SYST property ops
-    [0x0240] = "WriteWithQuality — 5034 NONE-device virtual writes; 5033 SYST attempts error 0x0E15 (Desigo retries with 0x4222)",
-    [0x0241] = "PropertyEcho / DefaultPropertyResolve (SYST) — echoes (dev,pt) for fully-qualified targets; fills MODE/etc. into empty 2nd-TLV for object-only probes",
-    [0x0244] = "ScopedQuery (SYST-restricted read variant; returns 0x0002 out-of-scope)",
-    [0x0245] = "TestProbe (always errors; not a real op)",
-    [0x0291] = "SYST property op (probable write — 01 00 c8 [type] [f32] value marker)",
-    [0x0294] = "SYST read variant — small (53B sep=0x00) and large (222B preallocated sep=0x01) forms",
-    [0x0295] = "SYST-scoped read (sibling of 0x0294; plant-equipment status registers)",
-    [0x02A8] = "SYST property op (probable write w/ priority trailer 50 00; otherwise like 0x0291)",
-
-    -- Object lifecycle (02xx)
-    [0x0203] = "ObjectLifecycle 0x0203 (probe; carries name + initial-value f32)",
-    [0x0204] = "CreateObject (returns 0x0E11 if exists; carries name + initial-value f32)",
-    [0x0260] = "ObjectLifecycle 0x0260 (probe variant; carries f32=1.0 default-value)",
-    [0x0263] = "ObjectLifecycle 0x0263 (probable delete; ACK-only response, no per-object data)",
-
-    -- Routing / node queries
-    [0x0368] = "NodeRoutingQuery",
-
-    -- Multi-state label catalog
-    [0x040A] = "MultiStateLabelCatalog (state-set fetch)",
-
-    -- Alarms
-    [0x0508] = "AlarmReport (PXC->DCC, full alarm record)",
-    [0x0509] = "AlarmAck (DCC->PXC, acknowledge alarm)",
-    [0x0541] = "Probable working opcode (62B dir=1 response with `55 AA FF` sentinel body on bare invocation; state-dependent — subsequent calls from same peer session return 0x0003; probable pollable / get-next pattern)",
-    [0x0549] = "Probable SetActiveSupervisor (appears in normal Desigo-CC-to-panel mid-session traffic; embeds supervisor canonical name in SYST-scoped body; not in spec opcode tables)",
-    [0x0561] = "Undocumented success-response cluster",
-    [0x0562] = "Undocumented success-response (same class as 0x0561)",
-    [0x0563] = "Undocumented success-response (same class as 0x0561)",
-
-    -- Point enumeration (09xx — three distinct request shapes)
-    [0x0981] = "EnumeratePoints (cursor-based, all panel points)",
-    [0x0982] = "EnumerateTrended (cursor-based + timestamps)",
-    [0x0983] = "EnumerateVariant (mostly 0x00AC)",
-    [0x0984] = "EnumerateVariant (mostly 0x00AC)",
-    [0x0985] = "EnumeratePrograms (PPCL source dump)",
-    [0x0986] = "EnumerateFLN (FLN device list, two cursor formats)",
-    [0x0987] = "EnumerateVariant (mostly 0x00AC)",
-    [0x0988] = "EnumerateMulti (multi-string filter)",
-    [0x0989] = "EnumerateVariant (mostly 0x00AC)",
-    [0x099F] = "GetPortConfig (5B body 09 9F 00 04 XX; 6 indices walked: 0xFF, 0x00..0x04)",
-
-    -- Schedule operations (09xx — Mode C)
-    [0x0961] = "AnalogPointQuery (legacy)",
-    [0x0964] = "TitleAnalogQuery (value + units + limits)",
-    [0x0965] = "NodeDiscoveryEnumerate",
-    [0x0966] = "ShortQuery (probe; mostly errors)",
-    [0x0969] = "ScheduleObjectList",
-    [0x0971] = "EnhancedPointRead (desc + value + units + min/max + type)",
-    [0x0974] = "MultistatePointEnumerate (state-set-aware)",
-    [0x0975] = "NodeDiscoveryWithLines",
-    [0x0976] = "DeviceAllSubpointsRead (per-device f32 dump; observed Mode-C requests went unanswered)",
-    [0x0979] = "ShortVariant (cross-opcode lookup)",
-    [0x098B] = "Enumerate (newer-firmware probe; constant body 09 8B 00 01 00 FA 00 00; always errors 0x0003 on observed firmware)",
-    [0x098C] = "ScheduleSetpointTable",
-    [0x098D] = "ScheduleEntries (weekly schedule with BACnet dates)",
-    [0x098E] = "ScheduleGainConfig (PID/gain rows)",
-    [0x098F] = "ScheduleDeadband (single f32)",
-
-    -- Newer-firmware / capability probes (mostly errors on legacy)
-    [0x09A3] = "Newer-firmware enumerate (often 0x00AC)",
-    [0x09A7] = "Newer-firmware enumerate (often 0x00AC)",
-    [0x09AB] = "Newer-firmware enumerate (often 0x00AC)",
-    [0x09BB] = "Newer-firmware enumerate (often 0x00AC)",
-    [0x09C3] = "Newer-firmware enumerate (often 0x00AC)",
-    [0x400F] = "Capability probe (0x00AC on this firmware)",
-    [0x4010] = "Capability probe (0x00AC on this firmware)",
-    [0x4011] = "Capability probe (0x00AC on this firmware)",
-    [0x4133] = "Capability probe (0x00AC on this firmware)",
-    [0x4500] = "TestProbe (always errors)",
-
-    -- PPCL editor. 0x4100 / 0x4103 request bodies append a 9-byte SYST scope
-    -- footer (`01 00 04 SYST 23 3F FF FF FF`) after their opcode-specific
-    -- payload — strip it and the panel rejects the request.
-    [0x4100] = "PPCL LineWrite/Create (5-byte zero gap before SYST footer)",
-    [0x4103] = "PPCL ProgramEnableHint (00 01 7F FF mode/scope; SYST footer adjacent)",
-    [0x4104] = "PPCL LineRead/Delete (line-number + length/mode u16s)",
-    [0x4106] = "PPCL ClearTracebits (refresh; modifies runtime state)",
-
-    -- Bulk property
-    [0x4200] = "PropertyQuery (small ~30-40B browse OR 222B preallocated deep-read)",
-    [0x4220] = "BulkProperty variant (222B preallocated; '00 10' selector at sentinel — single corpus sample)",
-    [0x4221] = "BulkPropertyRead (constant 273-byte preallocated request)",
-    [0x4222] = "BulkPropertyWrite (canonical SYST setpoint write opcode)",
-
-    -- Schedule property writes
-    [0x5003] = "ScheduleObjectInfoQuery",
-    [0x5020] = "ScheduleEntryWrite",
-    [0x5022] = "ScheduleSlotInit (allocate-then-write pair)",
-    [0x5038] = "ObjectDisplayLabels (cursor enumerate name->label)",
+  [0x0031] = "AP2_GET_GLOBAL_DATA",
+  [0x0032] = "AP2_REMOTE_NODE_CHECK",
+  [0x0033] = "AP2_GET_COMPLETE_NODE_STATE",
+  [0x0034] = "AP2_SET_NODE_STATE",
+  [0x0035] = "AP2_SET_COMPLETE_NODE_STATE",
+  [0x003E] = "AP2_CABINET_TIMEOUT_NORMAL",
+  [0x003F] = "AP2_CABINET_TIMEOUT_EXTENDED",
+  [0x0041] = "AP2_CABINET_ADD",
+  [0x0042] = "AP2_CABINET_REMOVE",
+  [0x0044] = "AP2_CABINET_MAKE_READY",
+  [0x0046] = "AP2_CABINET_ONLINE",
+  [0x0047] = "AP2_CABINET_OFFLINE",
+  [0x0050] = "AP2_DISK_LOG",
+  [0x0051] = "AP2_DISK_ADD",
+  [0x0058] = "AP2_REPORT_PRINTER_LOG",
+  [0x0059] = "AP2_REPORT_PRINTER_ADD",
+  [0x005B] = "AP2_BLN_DIAGNOSTICS_DISPLAY",
+  [0x005C] = "AP2_RESET_BLN_DIAGNOSTIC_COUNTERS",
+  [0x0100] = "AP2_DUMMY_CMD / AP2_REV_STRING",
+  [0x0108] = "AP2_CABINET_BOOT_MONITOR",
+  [0x010A] = "AP2_CABINET_COLDSTART",
+  [0x010B] = "AP2_CABINET_WARMSTART",
+  [0x010C] = "AP2_CABINET_DISPLAY",
+  [0x010D] = "AP2_SERVICES_RENDERED",
+  [0x010E] = "AP2_SERVICES_RENDERED_CHANGED",
+  [0x010F] = "AP2_LICENSE_MANAGER_DISPLAY",
+  [0x0110] = "AP2_LICENSE_MANAGER_ADD",
+  [0x0111] = "AP2_LICENSE_MANAGER_DELETE",
+  [0x0112] = "AP2_LICENSE_MANAGER_DELETE_ALL",
+  [0x0113] = "AP2_LICENSE_MANAGER_DBCHANGE",
+  [0x0114] = "AP2_LICENSE_MANAGER_DISPLAY_LICENSE",
+  [0x0116] = "AP2_LICENSE_MANAGER_MESSAGE_SEND",
+  [0x0120] = "AP2_CABINET_SET_MMI1_BAUDRATE",
+  [0x0121] = "AP2_CABINET_SET_MMI2_BAUDRATE",
+  [0x0123] = "AP2_CABINET_SET_FLN1_BAUDRATE",
+  [0x0124] = "AP2_CABINET_SET_FLN2_BAUDRATE",
+  [0x0125] = "AP2_CABINET_SET_FLN3_BAUDRATE",
+  [0x0126] = "AP2_CABINET_SET_BLN_BAUDRATE",
+  [0x0127] = "AP2_CABINET_SET_PBUS_STATE",
+  [0x0128] = "AP2_CABINET_SET_BLN_ADDRESS",
+  [0x0129] = "AP2_CABINET_SET_MODEM_STATE",
+  [0x012A] = "AP2_CABINET_COLDSTART_DISPLAY",
+  [0x012B] = "AP2_CABINET_COLDSTART_CLEAR_HISTORY",
+  [0x012F] = "AP2_CABINET_MEMORY_MODIFY",
+  [0x0130] = "AP2_CABINET_MEMORY_DISPLAY",
+  [0x0131] = "AP2_CABINET_MEMORY_AVAILABLE",
+  [0x0136] = "AP2_P2_ROUTE",
+  [0x0140] = "AP2_PBUS_MODULE_DISPLAY",
+  [0x0142] = "AP2_PBUS_DIAGS_RESET",
+  [0x0143] = "AP2_PBUS_LINETEST",
+  [0x0200] = "AP2_POINT_ADD",
+  [0x0201] = "AP2_POINT_ADD_LDO",
+  [0x0202] = "AP2_POINT_ADD_LDI",
+  [0x0203] = "AP2_POINT_ADD_LAO",
+  [0x0204] = "AP2_POINT_ADD_LAI",
+  [0x0205] = "AP2_POINT_ADD_L2SL",
+  [0x0206] = "AP2_POINT_ADD_L2SP",
+  [0x0207] = "AP2_POINT_ADD_LFSSL",
+  [0x0208] = "AP2_POINT_ADD_LFSSP",
+  [0x0209] = "AP2_POINT_ADD_LOOAL",
+  [0x020A] = "AP2_POINT_ADD_LOOAP",
+  [0x020B] = "AP2_POINT_ADD_LPACI",
+  [0x020C] = "AP2_POINT_ADD_LDAO",
+  [0x020D] = "AP2_POINT_ADD_LFMSSL",
+  [0x020E] = "AP2_POINT_ADD_LFMSSP",
+  [0x020F] = "AP2_POINT_ADD_LENUM",
+  [0x0220] = "AP2_POINT_LOG_VALUE",
+  [0x0221] = "AP2_POINT_LOG_ALARM",
+  [0x0222] = "AP2_POINT_LOG_CTRL_STAT",
+  [0x0223] = "AP2_POINT_LOG_FAILED",
+  [0x0224] = "AP2_POINT_LOG_TOTAL",
+  [0x0225] = "AP2_POINT_LOG_PRIORITY",
+  [0x0226] = "AP2_POINT_LOG_DISABLED",
+  [0x0227] = "AP2_POINT_LOG_TYPE",
+  [0x0228] = "AP2_POINT_LOG_TROUBLE",
+  [0x0229] = "AP2_POINT_LOG_ANY",
+  [0x022A] = "AP2_POINT_LOG_ODSB",
+  [0x022B] = "AP2_POINT_LOG_PDSB",
+  [0x022C] = "AP2_POINT_LOG_ALARM_CMD",
+  [0x0240] = "AP2_POINT_CMD_VALUE",
+  [0x0241] = "AP2_POINT_CMD_PRIORITY",
+  [0x0242] = "AP2_POINT_CMD_ENABLE",
+  [0x0243] = "AP2_POINT_CMD_DISABLE",
+  [0x0244] = "AP2_POINT_CMD_ALARM",
+  [0x0245] = "AP2_POINT_CMD_NORMAL",
+  [0x0246] = "AP2_POINT_CMD_ALARM_ENABLE",
+  [0x0247] = "AP2_POINT_CMD_ALARM_DISABLE",
+  [0x0248] = "AP2_POINT_CMD_INIT_LPACI",
+  [0x0249] = "AP2_POINT_CMD_LOWLIMIT",
+  [0x024A] = "AP2_POINT_CMD_HIGHLIMIT",
+  [0x024B] = "AP2_POINT_CMD_TOTALIZER",
+  [0x024C] = "AP2_POINT_CMD_INTO_TROUBLE",
+  [0x024D] = "AP2_POINT_CMD_OUTOF_TROUBLE",
+  [0x024E] = "AP2_POINT_CMD_RELEASE",
+  [0x0260] = "AP2_POINT_MODIFY",
+  [0x0261] = "AP2_POINT_LOOK",
+  [0x0262] = "AP2_POINT_DEFINITION_DISPLAY",
+  [0x0263] = "AP2_POINT_REMOVE",
+  [0x0264] = "AP2_POINT_DEFINITION_BYADDR_DISPLAY",
+  [0x0265] = "AP2_POINT_QUERY_NAME",
+  [0x0271] = "AP2_COV_ENABLE",
+  [0x0272] = "AP2_COV_DELETE_STUB",
+  [0x0273] = "AP2_COV_DISABLE",
+  [0x0274] = "AP2_COV_ANNUNCIATE",
+  [0x0275] = "AP2_XREF_COV_DISPLAY",
+  [0x0280] = "AP2_MONITOR_ADD_NAME",
+  [0x0281] = "AP2_MONITOR_REMOVE_NAME",
+  [0x0282] = "AP2_MONITOR_START",
+  [0x0290] = "AP2_TREND_SETUP_ADD",
+  [0x0291] = "AP2_TREND_SETUP_DELETE",
+  [0x0292] = "AP2_TREND_ENABLE",
+  [0x0293] = "AP2_TREND_DISABLE",
+  [0x0294] = "AP2_TREND_SETUP_LOG",
+  [0x0295] = "AP2_TREND_DATA_DISPLAY",
+  [0x0296] = "AP2_TREND_DEFINITION_DISPLAY",
+  [0x0297] = "AP2_TREND_MULTIPOINT_DISPLAY",
+  [0x0298] = "AP2_TREND_SETUP_MODIFY",
+  [0x0299] = "AP2_TREND_MODIFY",
+  [0x029A] = "AP2_TREND_SETUP_COPY",
+  [0x029B] = "AP2_TREND_COPY",
+  [0x029C] = "AP2_TREND_LOOK",
+  [0x029D] = "AP2_TREND_QUERY_SINGLE_NAME",
+  [0x029E] = "AP2_TREND_QUERY_NAMES",
+  [0x029F] = "AP2_TREND_QUERY_TRENDS",
+  [0x02A0] = "AP2_TREND_ARC_SETUP",
+  [0x02A1] = "AP2_TREND_ARC_DATA_UPLOAD",
+  [0x02A2] = "AP2_TREND_ARC_UPLOAD_ME",
+  [0x02A5] = "AP2_TREND_EVENT_SETUP_ADD",
+  [0x02A6] = "AP2_TREND_EVENT_MODIFY",
+  [0x02A7] = "AP2_TREND_EVENT_COPY",
+  [0x02A8] = "AP2_TREND_EVENT_ARC_SETUP",
+  [0x02A9] = "AP2_TREND_EVENT_ARC_ENABLE",
+  [0x02E0] = "AP2_POINT_TOTAL_ENABLE",
+  [0x02E1] = "AP2_POINT_TOTAL_DISABLE",
+  [0x02E2] = "AP2_POINT_TOTAL_DISPLAY",
+  [0x0300] = "AP2_POINT_SET_PREFIX",
+  [0x0301] = "AP2_TIME_DISPLAY / AP2_TIME_SOFTWARE",
+  [0x0302] = "AP2_TIME_DISPLAY_CLOCK / AP2_TIME_SET",
+  [0x0303] = "AP2_MESSAGE_SEND / AP2_MESSAGE",
+  [0x0304] = "AP2_LOGON_CEC",
+  [0x0305] = "AP2_LOGOFF_CEC",
+  [0x0306] = "AP2_QUICK_KEYS",
+  [0x0307] = "AP2_LOAD_DATABASE",
+  [0x0308] = "AP2_SAVE_DATABASE",
+  [0x0309] = "AP2_POINT_SAVE",
+  [0x030A] = "AP2_PPCL_SAVE",
+  [0x030B] = "AP2_TAPE_TRAILER",
+  [0x030C] = "AP2_TOGGLE_DEVELOPMENT",
+  [0x030D] = "AP2_COLBAS_TEST",
+  [0x030E] = "AP2_ROUTE_OBJECT",
+  [0x030F] = "AP2_P1_POLL",
+  [0x0310] = "AP2_PB_POLL",
+  [0x0311] = "AP2_PRINT_ERROR",
+  [0x0313] = "AP2_P1_ROUTE",
+  [0x0314] = "AP2_P1_LINETEST",
+  [0x0316] = "AP2_OPEN_ENVELOPE",
+  [0x0317] = "AP2_P1_RESET_COUNTERS",
+  [0x031B] = "AP2_ENVELOPE_OPEN_DEST",
+  [0x031C] = "AP2_ENVELOPE_CLOSE_DEST",
+  [0x031D] = "AP2_ENVELOPE_OPEN_TEXT",
+  [0x031E] = "AP2_ENVELOPE_CLOSE_TEXT",
+  [0x031F] = "AP2_ENVELOPE_OPEN_USERS",
+  [0x0320] = "AP2_ENVELOPE_CLOSE_USERS",
+  [0x0325] = "AP2_SETUP_LOGGER",
+  [0x0326] = "AP2_GET_LOGGER_STATE",
+  [0x0327] = "AP2_SETUP_BUFFERALARM",
+  [0x0328] = "AP2_GET_BUFFERALARM_STATE",
+  [0x0330] = "AP2_USER_ACCT_LOG",
+  [0x0331] = "AP2_USER_ACCT_DISPLAY",
+  [0x0332] = "AP2_USER_ACCT_ADD",
+  [0x0333] = "AP2_USER_ACCT_MODIFY",
+  [0x0334] = "AP2_USER_ACCT_COPY",
+  [0x0335] = "AP2_USER_ACCT_DELETE",
+  [0x0336] = "AP2_USER_ACCT_LOOK",
+  [0x0337] = "AP2_USER_ACCT_DB_GET",
+  [0x0338] = "AP2_USER_ACCT_DB_REPLACE",
+  [0x0350] = "AP2_ACCESS_GROUPS_LOG",
+  [0x0353] = "AP2_ACCESS_GROUPS_MODIFY",
+  [0x0357] = "AP2_ACCESS_GROUPS_DB_GET",
+  [0x0358] = "AP2_ACCESS_GROUPS_DB_REPLACE",
+  [0x0360] = "AP2_EMS_DIAL_ENABLE",
+  [0x0361] = "AP2_EMS_DIAL_DISABLE",
+  [0x0362] = "AP2_EMS_DB_REPLACE",
+  [0x0363] = "AP2_EMS_DB_GET",
+  [0x0364] = "AP2_EMS_DB_DISPLAY",
+  [0x0365] = "AP2_EMS_ENTRY_REPLACE",
+  [0x0366] = "AP2_EMS_DB_GET_DIALFLAGS",
+  [0x0367] = "AP2_EMS_DB_GET_DESTINATIONS",
+  [0x0368] = "AP2_EMS_PRINT",
+  [0x0401] = "AP2_ENUM_TYPE_ADD",
+  [0x0402] = "AP2_ENUM_TYPE_DELETE",
+  [0x0403] = "AP2_ENUM_TYPE_DB_DELETE",
+  [0x0404] = "AP2_ENUM_TYPE_DISPLAY",
+  [0x0405] = "AP2_ENUM_TYPE_LOOK",
+  [0x0406] = "AP2_ENUM_TYPE_LOG",
+  [0x0407] = "AP2_ENUM_ELEMENT_ADD",
+  [0x0408] = "AP2_ENUM_ELEMENT_DELETE",
+  [0x0409] = "AP2_ENUM_ELEMENT_MODIFY",
+  [0x040A] = "AP2_ENUM_TYPE_DB_GET",
+  [0x040B] = "AP2_ENUM_TYPE_DB_REPLACE",
+  [0x040E] = "AP2_ENUM_TYPE_REPLACE",
+  [0x0500] = "AP2_ALARM_SETUP",
+  [0x0501] = "AP2_ALARM_REMOVE",
+  [0x0502] = "AP2_ALARM_POINT_QUERY_LIST_EALARMABLE",
+  [0x0503] = "AP2_ALARM_POINT_QUERY_REC_EALARMABLE",
+  [0x0504] = "AP2_ALARM_POINT_SETUP_QUERY_LIST",
+  [0x0505] = "AP2_ALARM_POINT_SETUP_QUERY_RECORD",
+  [0x0506] = "AP2_ALARM_SETUP_COPY",
+  [0x0507] = "AP2_ALARM_SETUP_MODIFY",
+  [0x0508] = "AP2_ALARM_PRINT",
+  [0x0509] = "AP2_ALARM_ACK",
+  [0x050A] = "AP2_ALARM_ACK_PENDING_QUERY_LIST",
+  [0x050B] = "AP2_ALARM_SETUP_DISPLAY_BY_MODE",
+  [0x050C] = "AP2_ALARM_SETUP_DISPLAY_BY_CATEGORY",
+  [0x050D] = "AP2_ALARM_SETUP_DISPLAY",
+  [0x0520] = "AP2_ALARM_MODE_ADD",
+  [0x0521] = "AP2_ALARM_MODE_COPY",
+  [0x0522] = "AP2_ALARM_MODE_LISTBY_SETPOINT_NAME",
+  [0x0523] = "AP2_ALARM_MODE_LISTBY_PRIORITY",
+  [0x0524] = "AP2_ALARM_MODE_LISTBY_SETPOINT_VALUE",
+  [0x0525] = "AP2_ALARM_MODE_DEFINITION_DISPLAY",
+  [0x0526] = "AP2_ALARM_MODE_LOOK",
+  [0x0528] = "AP2_ALARM_MODE_MODIFY",
+  [0x0529] = "AP2_ALARM_MODE_QUERY_RECORD",
+  [0x052B] = "AP2_ALARM_MODE_DELETE",
+  [0x052C] = "AP2_ALARM_MODE_LISTBY_CATEGORY",
+  [0x052D] = "AP2_ALARM_MODE_LISTBY_MESSAGE",
+  [0x0530] = "AP2_ALARM_MODE_QUERY_LIST",
+  [0x0540] = "AP2_CATEGORY_ADD",
+  [0x0541] = "AP2_CATEGORY_REMOVE",
+  [0x0542] = "AP2_CATEGORY_DESCRIPTOR",
+  [0x0543] = "AP2_CATEGORY_ENABLE_DIAL",
+  [0x0544] = "AP2_CATEGORY_ENABLE_PRINT",
+  [0x0545] = "AP2_CATEGORY_DIAL_DISABLE",
+  [0x0546] = "AP2_CATEGORY_PRINT_DISABLE",
+  [0x0547] = "AP2_CATEGORY_DB_GET",
+  [0x0548] = "AP2_CATEGORY_LOG",
+  [0x0549] = "AP2_CATEGORY_NODES_APPEND",
+  [0x054A] = "AP2_CATEGORY_NODES_REMOVE",
+  [0x054B] = "AP2_CATEGORY_QUERY_LIST",
+  [0x054C] = "AP2_CATEGORY_DEFAULT_DB_GET",
+  [0x054D] = "AP2_CATEGORY_REPLACE",
+  [0x0560] = "AP2_ALARM_MESSAGE_LOOK",
+  [0x0561] = "AP2_ALARM_MESSAGE_ENABLE",
+  [0x0562] = "AP2_ALARM_MESSAGE_DISABLE",
+  [0x0563] = "AP2_ALARM_MESSAGE_DELETE",
+  [0x0564] = "AP2_ALARM_MESSAGE_COPY",
+  [0x0565] = "AP2_ALARM_MESSAGE_ADD",
+  [0x0566] = "AP2_ALARM_MESSAGE_QUERY_RECORD",
+  [0x0567] = "AP2_ALARM_MESSAGE_LOG",
+  [0x0568] = "AP2_ALARM_MESSAGE_QUERY_LIST",
+  [0x056A] = "AP2_ALARM_MESSAGE_MODIFY",
+  [0x0600] = "AP2_CAL_DATE_ADD",
+  [0x0601] = "AP2_CAL_DATE_RESET",
+  [0x0602] = "AP2_CAL_DB_ADD",
+  [0x0603] = "AP2_CAL_DB_RESET",
+  [0x0604] = "AP2_CAL_DB_DISPLAY",
+  [0x0605] = "AP2_CAL_DB_GET_HOL_SPEC",
+  [0x0606] = "AP2_CAL_DB_GET_OTHER",
+  [0x0610] = "AP2_DST_YEAR_ADD",
+  [0x0611] = "AP2_DST_YEAR_DELETE",
+  [0x0612] = "AP2_DST_DB_ADD",
+  [0x0613] = "AP2_DST_DB_DELETE",
+  [0x0614] = "AP2_DST_DB_DISPLAY",
+  [0x0615] = "AP2_DST_DB_GET",
+  [0x0900] = "AP2_LANGUAGE_GET_STRING",
+  [0x0901] = "AP2_LANGUAGE_GET_PROMPT",
+  [0x0902] = "AP2_LANGUAGE_REPORT_DATA",
+  [0x0950] = "AP2_DOWNLOAD_ME",
+  [0x0951] = "AP2_DBCHANGE_POINT",
+  [0x0952] = "AP2_DBCHANGE_ALARM_SETUP",
+  [0x0953] = "AP2_DBCHANGE_ALARM_MODE",
+  [0x0954] = "AP2_DBCHANGE_TREND",
+  [0x0955] = "AP2_DBCHANGE_PPCL",
+  [0x0956] = "AP2_DBCHANGE_CONTROLLER",
+  [0x0957] = "AP2_DBCHANGE_EQS_ZONE",
+  [0x0958] = "AP2_DBCHANGE_EQS_CMD_TABLE",
+  [0x0959] = "AP2_DBCHANGE_EQS_MODE_SCHED",
+  [0x095A] = "AP2_DBCHANGE_LOOP",
+  [0x095B] = "AP2_DBCHANGE_ALARM_MESSAGE",
+  [0x095C] = "AP2_DBCHANGE_SSTO_GENERAL",
+  [0x095D] = "AP2_DBCHANGE_SSTO_START",
+  [0x095E] = "AP2_DBCHANGE_SSTO_STOP",
+  [0x095F] = "AP2_DBCHANGE_SSTO_NIGHT",
+  [0x0961] = "AP2_UPL_DEL_POINT",
+  [0x0962] = "AP2_UPL_DEL_ALARM_SETUP",
+  [0x0963] = "AP2_UPL_DEL_ALARM_MODE",
+  [0x0964] = "AP2_UPL_DEL_TREND",
+  [0x0965] = "AP2_UPL_DEL_PPCL",
+  [0x0966] = "AP2_UPL_DEL_TEC",
+  [0x0967] = "AP2_UPL_DEL_EQS_ZONE",
+  [0x0968] = "AP2_UPL_DEL_EQS_CMD_TABLE",
+  [0x0969] = "AP2_UPL_DEL_EQS_MODE_SCHED",
+  [0x096A] = "AP2_UPL_DEL_LOOP",
+  [0x096B] = "AP2_UPL_DEL_ALARM_MESSAGE",
+  [0x0971] = "AP2_UPL_ADDED_POINT",
+  [0x0972] = "AP2_UPL_ADDED_ALARM_SETUP",
+  [0x0973] = "AP2_UPL_ADDED_ALARM_MODE",
+  [0x0974] = "AP2_UPL_ADDED_TREND",
+  [0x0975] = "AP2_UPL_ADDED_PPCL",
+  [0x0976] = "AP2_UPL_ADDED_TEC",
+  [0x0977] = "AP2_UPL_ADDED_EQS_ZONE",
+  [0x0978] = "AP2_UPL_ADDED_EQS_CMD_TABLE",
+  [0x0979] = "AP2_UPL_ADDED_EQS_MODE_SCHED",
+  [0x097A] = "AP2_UPL_ADDED_LOOP",
+  [0x097B] = "AP2_UPL_ADDED_ALARM_MESSAGE",
+  [0x097C] = "AP2_UPL_ADDED_SSTO_GENERAL",
+  [0x097D] = "AP2_UPL_ADDED_SSTO_START",
+  [0x097E] = "AP2_UPL_ADDED_SSTO_STOP",
+  [0x097F] = "AP2_UPL_ADDED_SSTO_NIGHT",
+  [0x0981] = "AP2_UPL_ALL_POINT",
+  [0x0982] = "AP2_UPL_ALL_ALARM_SETUP",
+  [0x0983] = "AP2_UPL_ALL_ALARM_MODE",
+  [0x0984] = "AP2_UPL_ALL_TREND",
+  [0x0985] = "AP2_UPL_ALL_PPCL",
+  [0x0986] = "AP2_UPL_ALL_TEC",
+  [0x0987] = "AP2_UPL_ALL_EQS_ZONE",
+  [0x0988] = "AP2_UPL_ALL_EQS_CMD_TABLE",
+  [0x0989] = "AP2_UPL_ALL_EQS_MODE_SCHED",
+  [0x098B] = "AP2_UPL_ALL_ALARM_MESSAGE",
+  [0x098C] = "AP2_UPL_ALL_SSTO_GENERAL",
+  [0x098D] = "AP2_UPL_ALL_SSTO_START",
+  [0x098E] = "AP2_UPL_ALL_SSTO_STOP",
+  [0x098F] = "AP2_UPL_ALL_SSTO_NIGHT",
+  [0x099C] = "AP2_DBCHANGE_PORT",
+  [0x099D] = "AP2_UPL_DEL_PORT",
+  [0x099E] = "AP2_UPL_ADDED_PORT",
+  [0x099F] = "AP2_UPL_ALL_PORT",
+  [0x09A0] = "AP2_DBCHANGE_PARTNER",
+  [0x09A1] = "AP2_UPL_DEL_PARTNER",
+  [0x09A2] = "AP2_UPL_ADDED_PARTNER",
+  [0x09A3] = "AP2_UPL_ALL_PARTNER",
+  [0x09A4] = "AP2_DBCHANGE_EQS_OVERRIDE",
+  [0x09A5] = "AP2_UPL_DEL_EQS_OVERRIDE",
+  [0x09A6] = "AP2_UPL_ADDED_EQS_OVERRIDE",
+  [0x09A7] = "AP2_UPL_ALL_EQS_OVERRIDE",
+  [0x09A8] = "AP2_DBCHANGE_UC",
+  [0x09A9] = "AP2_UPL_DEL_UC",
+  [0x09AA] = "AP2_UPL_ADDED_UC",
+  [0x09AB] = "AP2_UPL_ALL_UC",
+  [0x09B0] = "AP2_DBCHANGE_TOD_POINT",
+  [0x09B1] = "AP2_UPL_DEL_TOD_POINT",
+  [0x09B2] = "AP2_UPL_ADDED_TOD_POINT",
+  [0x09B3] = "AP2_UPL_ALL_TOD_POINT",
+  [0x09B4] = "AP2_DBCHANGE_TOD_CMD",
+  [0x09B5] = "AP2_UPL_DEL_TOD_CMD",
+  [0x09B6] = "AP2_UPL_ADDED_TOD_CMD",
+  [0x09B7] = "AP2_UPL_ALL_TOD_CMD",
+  [0x09B8] = "AP2_DBCHANGE_LON",
+  [0x09B9] = "AP2_UPL_DEL_LON",
+  [0x09BA] = "AP2_UPL_ADDED_LON",
+  [0x09BB] = "AP2_UPL_ALL_LON",
+  [0x09BC] = "AP2_DBCHANGE_COMMAND_REPORT",
+  [0x09BD] = "AP2_UPLD_COMND_REPORT",
+  [0x09BE] = "AP2_DBCHANGE_MISCDATA_REPORT",
+  [0x09BF] = "AP2_UPLD_MISCDATA_REPORT",
+  [0x09C0] = "AP2_DBCHANGE_MSTP_DEVICE",
+  [0x09C1] = "AP2_UPL_DEL_MSTP_DEVICE",
+  [0x09C2] = "AP2_UPL_ADDED_MSTP_DEVICE",
+  [0x09C3] = "AP2_UPL_ALL_MSTP_DEVICE",
+  [0x2824] = "AP2_RACS_SYSTEM_DISPLAY",
+  [0x3800] = "AP2_RACS_PARTNER_ADD",
+  [0x3801] = "AP2_RACS_PARTNER_COPY",
+  [0x3802] = "AP2_RACS_PARTNER_DELETE",
+  [0x3803] = "AP2_RACS_PARTNER_DISABLE",
+  [0x3804] = "AP2_RACS_PARTNER_DISPLAY",
+  [0x3805] = "AP2_RACS_PARTNER_ENABLE",
+  [0x3806] = "AP2_RACS_PARTNER_LOG",
+  [0x3807] = "AP2_RACS_PARTNER_LOOK",
+  [0x3808] = "AP2_RACS_PARTNER_MODIFY",
+  [0x3809] = "AP2_RACS_PARTNER_STATLOG",
+  [0x380A] = "AP2_RACS_PARTNER_STATLOG_RESET",
+  [0x3810] = "AP2_RACS_PORT_ADD",
+  [0x3811] = "AP2_RACS_PORT_COPY",
+  [0x3812] = "AP2_RACS_PORT_DELETE",
+  [0x3813] = "AP2_RACS_PORT_DISABLE",
+  [0x3814] = "AP2_RACS_PORT_DISPLAY",
+  [0x3815] = "AP2_RACS_PORT_ENABLE",
+  [0x3816] = "AP2_RACS_PORT_LOG",
+  [0x3817] = "AP2_RACS_PORT_LOOK",
+  [0x3818] = "AP2_RACS_PORT_MODIFY",
+  [0x3819] = "AP2_RACS_PORT_STATLOG",
+  [0x381A] = "AP2_RACS_PORT_STATLOG_RESET",
+  [0x3820] = "AP2_RACS_SYSTEM_ADD",
+  [0x3821] = "AP2_RACS_SYSTEM_COPY",
+  [0x3822] = "AP2_RACS_SYSTEM_DELETE",
+  [0x3823] = "AP2_RACS_SYSTEM_DISABLE",
+  [0x3825] = "AP2_RACS_SYSTEM_ENABLE",
+  [0x3826] = "AP2_RACS_SYSTEM_LOG",
+  [0x3827] = "AP2_RACS_SYSTEM_LOOK",
+  [0x3828] = "AP2_RACS_SYSTEM_MODIFY",
+  [0x3829] = "AP2_RACS_SYSTEM_STATLOG",
+  [0x382A] = "AP2_RACS_SYSTEM_STATLOG_RESET",
+  [0x4000] = "AP2_TEAM_LOG / AP2_APPLICATION_LOG",
+  [0x4001] = "AP2_TEAM_DESC_ADD / AP2_APPLICATION_DISPLAY",
+  [0x4002] = "AP2_MEMBER_DESC_ADD_ANALOG",
+  [0x4003] = "AP2_MEMBER_DESC_ADD_DIGITAL",
+  [0x4004] = "AP2_MEMBER_DESC_ADD_ENUM",
+  [0x4005] = "AP2_MEMBER_DESC_ADD_LPACI",
+  [0x4006] = "AP2_MEMBER_DESC_ADD_L2SL",
+  [0x400B] = "AP2_TEAM_MEMBER_LOG",
+  [0x400C] = "AP2_TEAM_REPORT_LOG",
+  [0x400D] = "AP2_TEAM_REPORT_LIST",
+  [0x400E] = "AP2_REPORT_DESC_ADD",
+  [0x400F] = "AP2_TEAM_DESC_UPLOAD",
+  [0x4010] = "AP2_MEMBER_DESC_UPLOAD",
+  [0x4011] = "AP2_REPORT_DESC_UPLOAD",
+  [0x4015] = "AP2_TEAM_DESC_DB_CHANGE",
+  [0x4016] = "AP2_TEAM_MEMBER_DB_CHANGE",
+  [0x4017] = "AP2_TEAM_DESC_UPLOAD_ADDED",
+  [0x4018] = "AP2_TEAM_MEMBER_UPLOAD_ADDED",
+  [0x4100] = "AP2_PPCL_ADD_LINE",
+  [0x4101] = "AP2_PPCL_EDIT_LINE",
+  [0x4103] = "AP2_PPCL_REMOVE_LINES",
+  [0x4104] = "AP2_PPCL_ENABLE_LINES",
+  [0x4105] = "AP2_PPCL_DISABLE_LINES",
+  [0x4106] = "AP2_PPCL_CLEAR_TRACE",
+  [0x4107] = "AP2_PPCL_PROGRAM_LOG",
+  [0x4108] = "AP2_PPCL_SEARCH_NAME_TYPE",
+  [0x4109] = "AP2_PPCL_QUERY_PROGRAM",
+  [0x410A] = "AP2_PPCL_PROGRAM_DISPLAY",
+  [0x410B] = "AP2_PPCL_MODIFY_LINE",
+  [0x410C] = "AP2_PPCL_COPY_LINE",
+  [0x410D] = "AP2_PPCL_SETUP_MODIFY_LINE",
+  [0x410E] = "AP2_PPCL_LOOK_LINES",
+  [0x410F] = "AP2_PPCL_PDL_RESET",
+  [0x4110] = "AP2_PPCL_PDL_INIT",
+  [0x4111] = "AP2_PPCL_PDL_DISPLAY",
+  [0x412A] = "AP2_PPCL_PROGRAM_DISPLAY_UNRESOLVED",
+  [0x4130] = "AP2_DBCHANGE_PROGRAM",
+  [0x4131] = "AP2_UPL_DEL_PROGRAM",
+  [0x4132] = "AP2_UPL_ADDED_PROGRAM",
+  [0x4133] = "AP2_UPL_ALL_PROGRAM",
+  [0x4134] = "AP2_PROGRAM_ADD",
+  [0x4135] = "AP2_PROGRAM_REMOVE",
+  [0x4137] = "AP2_PROGRAM_LOG",
+  [0x4138] = "AP2_PROGRAM_MODIFY",
+  [0x4200] = "AP2_CONTROLLER_LOG / AP2_TEC_LOG",
+  [0x4201] = "AP2_TEC_ADD",
+  [0x4202] = "AP2_TEC_COPY",
+  [0x4203] = "AP2_TEC_MODIFY / AP2_CONTROLLER_MODIFY",
+  [0x4204] = "AP2_CONTROLLER_REMOVE / AP2_TEC_REMOVE",
+  [0x4205] = "AP2_TEC_LOOK / AP2_CONTROLLER_LOOK",
+  [0x4206] = "AP2_TEC_QUERY_RECORD / AP2_CONTROLLER_QUERY",
+  [0x4207] = "AP2_TEC_QUERY_LIST",
+  [0x4208] = "AP2_TEC_DEFINITION",
+  [0x4210] = "AP2_TEC_MEMBER_LOG",
+  [0x4211] = "AP2_TEC_REPORT_LOG",
+  [0x4212] = "AP2_TEC_REPORT_QUERY_LIST",
+  [0x4220] = "AP2_TEC_LOCAL_INIT_VALUE_LOG",
+  [0x4221] = "AP2_TEC_REMOTE_INIT_VALUE_LOG",
+  [0x4222] = "AP2_TEC_SET_INIT_VALUE",
+  [0x4223] = "AP2_TEC_RESTORE_INIT_VALUE",
+  [0x4224] = "AP2_TEC_INITIALIZE",
+  [0x4225] = "AP2_TEC_UPDATE_LOCAL_INIT_VALUES",
+  [0x4230] = "AP2_FLN_SCAN_ENABLE",
+  [0x4231] = "AP2_FLN_SCAN_DISABLE",
+  [0x4232] = "AP2_P1_DIAGNOSTICS_LOG",
+  [0x4241] = "AP2_UC_ADD",
+  [0x4244] = "AP2_UC_REMOVE",
+  [0x4245] = "AP2_UC_LOOK",
+  [0x4249] = "AP2_UC_MEMBER_LOG",
+  [0x4300] = "AP2_LON_LOG",
+  [0x4301] = "AP2_LON_ADD",
+  [0x4303] = "AP2_LON_MODIFY",
+  [0x4304] = "AP2_LON_REMOVE",
+  [0x4310] = "AP2_LON_MEMBER_LOG",
+  [0x4311] = "AP2_LON_REPORT_LOG",
+  [0x4320] = "AP2_LON_LOCAL_INIT_VALUE_LOG",
+  [0x4321] = "AP2_LON_REMOTE_INIT_VALUE_LOG",
+  [0x4322] = "AP2_LON_SET_INIT_VALUE",
+  [0x4323] = "AP2_LON_RESTORE_INIT_VALUE",
+  [0x4324] = "AP2_LON_INITIALIZE",
+  [0x4325] = "AP2_LON_UPDATE_LOCAL_INIT_VALUES",
+  [0x4332] = "AP2_LON_DIAGNOSTICS_LOG",
+  [0x4401] = "AP2_LON_SEND_SERVICE_PIN",
+  [0x4402] = "AP2_LON_GET_DOMAIN",
+  [0x4403] = "AP2_LON_SET_DOMAIN",
+  [0x4404] = "AP2_LON_REQUEST_WINK",
+  [0x440B] = "AP2_LON_STATUS_CLEAR",
+  [0x4450] = "AP2_LON_PKCMSAGTSRVDBEXPORT",
+  [0x4451] = "AP2_LON_PKCMSAGTSRVDBIMPORT",
+  [0x4452] = "AP2_LON_PEAK_DB_CLEAR",
+  [0x4500] = "AP2_TOD_POINT_ADD",
+  [0x4501] = "AP2_TOD_POINT_REMOVE",
+  [0x4502] = "AP2_TOD_POINT_ENABLE",
+  [0x4503] = "AP2_TOD_POINT_DISABLE",
+  [0x4504] = "AP2_TOD_CMD_ADD",
+  [0x4505] = "AP2_TOD_CMD_REMOVE",
+  [0x4506] = "AP2_TOD_CMD_DISABLE",
+  [0x450E] = "AP2_TOD_POINT_DISPLAY",
+  [0x450F] = "AP2_TOD_CMD_DISPLAY",
+  [0x461F] = "AP2_EBLN_FP_NAMES_DISPLAY",
+  [0x4620] = "AP2_EBLN_FP_NAME_SET",
+  [0x4621] = "AP2_EBLN_FP_IP_CONFIGURE",
+  [0x4622] = "AP2_EBLN_FP_TCP_PORTS_CONFIGURE",
+  [0x4628] = "AP2_EBLN_TRUNK_SETTINGS_REPLACE",
+  [0x4629] = "AP2_EBLN_TRUNK_SETTINGS_DISPLAY",
+  [0x462A] = "AP2_EBLN_FP_SITE_NAME_SET",
+  [0x462B] = "AP2_EBLN_FP_BLN_NAME_SET",
+  [0x462C] = "AP2_EBLN_FP_MULTICAST_CONFIGURE",
+  [0x462D] = "AP2_EBLN_HOSTTABLE_ENTRY_ADD",
+  [0x462E] = "AP2_EBLN_HOSTTABLE_ENTRY_REMOVE",
+  [0x462F] = "AP2_EBLN_HOSTTABLE_DISPLAY",
+  [0x4633] = "AP2_EBLN_REPL_NOTIFY",
+  [0x4634] = "AP2_EBLN_REPL_PULL",
+  [0x4635] = "AP2_EBLN_REPL_PULL_MORE",
+  [0x4636] = "AP2_EBLN_REPL_CHANGES",
+  [0x4637] = "AP2_EBLN_POINT_LOCATION_GET",
+  [0x4638] = "AP2_EBLN_MAC_ADDRESS_SET",
+  [0x4639] = "AP2_EBLN_MII_CONFIGURE",
+  [0x463A] = "AP2_EBLN_MII_DISPLAY",
+  [0x463B] = "AP2_EBLN_IP_DISPLAY",
+  [0x463C] = "AP2_EBLN_PORTS_DISPLAY",
+  [0x463D] = "AP2_EBLN_MULTICAST_DISPLAY",
+  [0x463E] = "AP2_EBLN_MAC_ADDRESS_DISPLAY",
+  [0x4640] = "AP2_EBLN_PING",
+  [0x4644] = "AP2_EBLN_TELNET_ENABLE",
+  [0x4645] = "AP2_EBLN_TELNET_DISABLE",
+  [0x464C] = "AP2_EBLN_REPL_DIAG_NODELIST",
+  [0x465D] = "AP2_WEBSERVER_GET_STATE",
+  [0x4821] = "AP2_BAC_DBCHANGE_BBMD",
+  [0x4822] = "AP2_BAC_UPL_DEL_BBMD",
+  [0x4823] = "AP2_BAC_UPL_ADDED_BBMD",
+  [0x4824] = "AP2_BAC_UPL_ALL_BBMD",
+  [0x4825] = "AP2_BAC_BBMD_ADD",
+  [0x4826] = "AP2_BAC_BBMD_REMOVE",
+  [0x4827] = "AP2_BAC_BBMD_DISPLAY",
+  [0x4828] = "AP2_BAC_BBMD_REMOVE_ALL",
+  [0x4829] = "AP2_BAC_OBJECT_ID_LOG",
+  [0x482A] = "AP2_BAC_APPLICATION_PRIORITY_REPLACE",
+  [0x482B] = "AP2_BAC_APPLICATION_PRIORITY_REMOVE",
+  [0x482C] = "AP2_BAC_APPLICATION_PRIORITY_DISPLAY",
+  [0x482E] = "AP2_BAC_DEVICE_NAME_REPLACE",
+  [0x482F] = "AP2_BAC_DEVICE_NAME_REMOVE",
+  [0x4830] = "AP2_BAC_DBCHANGE_COVTAB",
+  [0x4831] = "AP2_BAC_UPL_DEL_COVTAB",
+  [0x4832] = "AP2_BAC_UPL_ADDED_COVTAB",
+  [0x4833] = "AP2_BAC_UPL_ALL_COVTAB",
+  [0x4834] = "AP2_BAC_COVTAB_ADD",
+  [0x4835] = "AP2_BAC_COVTAB_REMOVE",
+  [0x4837] = "AP2_BAC_COVTAB_REMOVE_ALL",
+  [0x4838] = "AP2_BAC_TREND_LOG_ADD",
+  [0x4839] = "AP2_BAC_TREND_LOG_DELETE",
+  [0x483A] = "AP2_BAC_TREND_LOG_MODIFY",
+  [0x4842] = "AP2_BAC_TREND_LOG_LOG",
+  [0x4843] = "AP2_BAC_TREND_DBCHANGE",
+  [0x4844] = "AP2_BAC_TREND_UPL_DELETED",
+  [0x4845] = "AP2_BAC_TREND_UPL_ADDED",
+  [0x4846] = "AP2_BAC_TREND_UPL_ALL",
+  [0x4877] = "AP2_BAC_DBCHANGE",
+  [0x4878] = "AP2_BAC_UPLOAD_ADDED",
+  [0x4879] = "AP2_BAC_UPLOAD_DELETED",
+  [0x4960] = "AP2_BACNET_SET_MSTP",
+  [0x4961] = "AP2_BACNET_SET_FLN_TYPE",
+  [0x4963] = "AP2_BNMSTP_ADD",
+  [0x4965] = "AP2_BNMSTP_MODIFY",
+  [0x4966] = "AP2_BNMSTP_REMOVE",
+  [0x4967] = "AP2_BNMSTP_LOOK",
+  [0x496B] = "AP2_BNMSTP_MEMBER_LOG",
+  [0x496E] = "AP2_BNMSTP_LOCAL_INIT_VALUE_LOG",
+  [0x4970] = "AP2_BNMSTP_SET_INIT_VALUE",
+  [0x4971] = "AP2_BNMSTP_RESTORE_INIT_VALUE",
+  [0x4972] = "AP2_BNMSTP_INITIALIZE",
+  [0x4973] = "AP2_BNMSTP_UPDATE_LOCAL_INIT_VALUES",
+  [0x4A00] = "AP2_COLBAS_IMMEDIATE",
+  [0x4A01] = "AP2_COLBAS_CONNECT",
+  [0x4A02] = "AP2_COLBAS_DISCONNECT",
+  [0x4A03] = "AP2_COLBAS_WRITE",
+  [0x4A04] = "AP2_COLBAS_ABORT",
+  [0x4A05] = "AP2_COLBAS_UPLOAD_BEGIN",
+  [0x4A06] = "AP2_COLBAS_UPLOAD_CONTINUE",
+  [0x4B01] = "AP2_BNEEO_ADD",
+  [0x4B02] = "AP2_BNEEO_REMOVE",
+  [0x4B03] = "AP2_BNEEO_LOOK",
+  [0x5000] = "AP2_EQS_ZONE_ADD",
+  [0x5001] = "AP2_EQS_ZONE_REMOVE",
+  [0x5002] = "AP2_EQS_ZONE_MODIFY",
+  [0x5003] = "AP2_EQS_ZONE_LOOK",
+  [0x5004] = "AP2_EQS_ZONE_ENABLE",
+  [0x5005] = "AP2_EQS_ZONE_DISABLE",
+  [0x5018] = "AP2_EQS_CMD_TABLE_ENTRY_ADD",
+  [0x5019] = "AP2_EQS_CMD_TABLE_ENTRY_MODIFY",
+  [0x501A] = "AP2_EQS_CMD_TABLE_ENTRY_REMOVE",
+  [0x501B] = "AP2_EQS_CMD_TABLE_ENTRY_LOOK",
+  [0x5020] = "AP2_EQS_MODE_ENTRY_ADD",
+  [0x5021] = "AP2_EQS_MODE_ENTRY_MODIFY",
+  [0x5022] = "AP2_EQS_MODE_ENTRY_REMOVE",
+  [0x5023] = "AP2_EQS_MODE_ENTRY_LOOK",
+  [0x5024] = "AP2_EQS_MODE_ENTRY_ENABLE",
+  [0x5025] = "AP2_EQS_MODE_ENTRY_DISABLE",
+  [0x5028] = "AP2_EQS_OVERRIDE_ADD",
+  [0x5029] = "AP2_EQS_OVERRIDE_MODIFY",
+  [0x502A] = "AP2_EQS_OVERRIDE_REMOVE",
+  [0x502B] = "AP2_EQS_OVERRIDE_LOOK",
+  [0x5035] = "AP2_EQS_DISPLAY_ZONE",
+  [0x5036] = "AP2_EQS_DISPLAY_MODE_ENTRY",
+  [0x5037] = "AP2_EQS_DISPLAY_CMD_TABLE",
+  [0x5038] = "AP2_EQS_ZONE_LOG",
+  [0x5039] = "AP2_EQS_DISPLAY_OVERRIDES",
+  [0x503A] = "AP2_EQS_SSTO_SETUP_GENERAL",
+  [0x503B] = "AP2_EQS_SSTO_SETUP_START",
+  [0x503C] = "AP2_EQS_SSTO_SETUP_STOP",
+  [0x503D] = "AP2_EQS_SSTO_SETUP_NIGHT",
+  [0x503E] = "AP2_EQS_SSTO_LOOK_GENERAL",
+  [0x503F] = "AP2_EQS_SSTO_LOOK_START",
+  [0x5040] = "AP2_EQS_SSTO_LOOK_STOP",
+  [0x5041] = "AP2_EQS_SSTO_LOOK_NIGHT",
+  [0x5042] = "AP2_EQS_SSTO_RESET",
+  [0x5043] = "AP2_EQS_SSTO_ENABLE",
+  [0x5044] = "AP2_EQS_SSTO_DISABLE",
+  [0x5050] = "AP2_EQS_SSTO_DISPLAY_GENERAL",
+  [0x5051] = "AP2_EQS_SSTO_DISPLAY_START",
+  [0x5052] = "AP2_EQS_SSTO_DISPLAY_STOP",
+  [0x5053] = "AP2_EQS_SSTO_DISPLAY_NIGHT",
+  [0x5054] = "AP2_EQS_MEMBER_LOG",
+  [0x5300] = "AP2_GLOBAL_IO_MODULE_DISPLAY",
+  [0x5301] = "AP2_GET_FLN_TOPOLOGY",
+  [0x5303] = "AP2_GLOBAL_IO_MODULE_DISPLAY_MEC_EXPBUS",
+  [0x5304] = "AP2_GET_MEC_EXPBUS_TOPOLOGY",
+  [0x5305] = "AP2_LOCAL_IO_MODULE_DISPLAY",
+  [0x5330] = "AP2_BACKUP_FLASH_DBASE",
+  [0x5331] = "AP2_RESTORE_FLASH_DBASE",
+  [0x5332] = "AP2_CLEAR_FLASH_DBASE",
+  [0x5351] = "AP2_HOA_MAP_MODIFY",
+  [0x5354] = "AP2_HOA_MAP_LOOK",
+  [0x5355] = "AP2_HOA_MAP_ADD",
+  [0x5356] = "AP2_DBCHANGE_HOA_MAP",
+  [0x700C] = "AP2_WS_APOGEEEDIT_GET_STATE",
+}
+-- Per-opcode expected body schema (struct-derived from the AP2 ASDU type set).
+-- NOT a byte-level layout: it is the field list the request body SHOULD contain.
+local OPSCHEMA = {
+  [0x0032] = "ownNodeNr:u8, coldstarted:bool",
+  [0x0034] = "node_changed:u8, node_table_event:Node_table_event, node_complete_state:Node_complete_state",
+  [0x0035] = "nrOfnode_table:u16, node_table:Node_complete_state[]",
+  [0x003E] = "change_node:u8",
+  [0x003F] = "change_node:u8",
+  [0x0041] = "new_node_address:u8, node_complete_state:Node_complete_state",
+  [0x0042] = "removed_node_address:u8, cold_start_removed_node:bool, scu_rev_8_filler:u8",
+  [0x0046] = "change_node:u8",
+  [0x0047] = "change_node:u8",
+  [0x005B] = "start_node:u16, end_node:u16, last_node:u16",
+  [0x010F] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0110] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, license_text:str",
+  [0x0111] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, app_name:str",
+  [0x0112] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0113] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0114] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0116] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, message:str",
+  [0x0120] = "baud_rate:Baud_rate",
+  [0x0121] = "baud_rate:Baud_rate",
+  [0x0123] = "baud_rate:Baud_rate",
+  [0x0124] = "baud_rate:Baud_rate",
+  [0x0125] = "baud_rate:Baud_rate",
+  [0x0126] = "baud_rate:Baud_rate",
+  [0x0127] = "pbus_enabled:bool",
+  [0x0128] = "new_address:u16",
+  [0x0129] = "modem_present:bool",
+  [0x012A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x012F] = "start_address:u32, nrOfnew_bytes:u16, new_bytes:Bytes_to_write[]",
+  [0x0130] = "start_address:u32, end_address:u32, last_address:u32",
+  [0x0136] = "nrOfp2_bytes:u16, p2_bytes:P2_bytes[]",
+  [0x0200] = "point:{tag_:u8,ldi:ldi_,ldo:ldo_,lai:lai_,lao:lao_,l2sl:l2sl_,looap:looap_,lpaci:lpaci_,l2sp:l2sp_,looal:looal_,lfssl:lfssl_,lfssp:lfssp_,ldao:ldao_,lenum:lenum_,lfmsl:lfmsl_,lfmsp:lfmsp_,ppcl_lai:ppcl_lai_}, lenum_address:{tag_:u8,not_present:-,present:present_}, user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, point_extension2:Point_extension2",
+  [0x0201] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0202] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0203] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0204] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0205] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0206] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0207] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0208] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0209] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x020A] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x020B] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x020C] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x020D] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x020E] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x020F] = "point_base:{point_type:Point_type,nrOfnames:u16,names:{name_space:Name_space,name:str,suffix:str}[],point_descriptor:Point_descriptor,access_class:Access_class,out_of_service:bool,failed:bool,control_status:Control_status,point_value:Point_value,point_priority:Point_priority,point_totalizer:{tag_:u8,disabled:-,enabled:enabled_},alarm_object:{tag_:u8,no_alarming:-,std_digital:std_digital_,std_single_analog:std_single_analog_,std_analog:std_analog_,enhanced_digital:enhanced_digital_,enhanced_analog:enhanced_analog_,enhanced_lenum:enhanced_lenum_,bacnet_alarm_analog:bacnet_alarm_analog_,bacnet...",
+  [0x0220] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0221] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, alarm_level:Alarm_levels",
+  [0x0222] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, control_status:Control_status",
+  [0x0223] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0224] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0225] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, point_priority:Point_priority",
+  [0x0226] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0227] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, point_type:Point_type",
+  [0x0228] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0229] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x022A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x022B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x022C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0240] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, point_value:Point_value, point_priority:Point_priority",
+  [0x0241] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, point_priority:Point_priority",
+  [0x0242] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0243] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0244] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0245] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0246] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0247] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0248] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, point_value:Point_value, point_priority:Point_priority",
+  [0x0249] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, low_alarm_limit:f32",
+  [0x024A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, high_alarm_limit:f32",
+  [0x024B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, reset_what:reset_what_",
+  [0x024C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x024D] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x024E] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0261] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0262] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0263] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0264] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, lan_choice:lan_choice_, drop_choice:drop_choice_, point_choice:point_choice_, bSubpoints:bool, last_lan:u8, last_drop:u8, last_point:u16, last_name:{name_space:Name_space,name:str,suffix:str}",
+  [0x0265] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0271] = "name_response:{name_space:Name_space,name:str,suffix:str}, cov_mask:Cov_mask",
+  [0x0272] = "name_response:{name_space:Name_space,name:str,suffix:str}",
+  [0x0273] = "name_response:{name_space:Name_space,name:str,suffix:str}, cov_mask:Cov_mask",
+  [0x0274] = "nrOfannunciate_request:u16, annunciate_request:{name_response:{name_space:Name_space,name:str,suffix:str},value:f32,point_priority:Point_priority,control_status:Control_status,out_of_service:bool,failed:bool,proof_on:bool,operator_disabled:bool,program_disabled:bool,commanded_to_alarm:bool,alarm_state:Alarm_state,alarm_priority:Alarm_priority}[]",
+  [0x0275] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0280] = "name_response:{name_space:Name_space,name:str,suffix:str}",
+  [0x0281] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0290] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, nrOftrend_setups:u16, trend_setups:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}[]",
+  [0x0291] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, which_trend:which_trend_",
+  [0x0292] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0293] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0294] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0295] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, trend_specifier:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}, last_sequence_number:u32, last_date_time:datetime, max_samples:u16",
+  [0x0299] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, trend_specifier:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}, new_trend_specifier:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}",
+  [0x029B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, nrOftrend_setups:u16, trend_setups:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}[]",
+  [0x029C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x02A0] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, nrOftrend_setups:u16, trend_setups:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}[]",
+  [0x02A1] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, trend_specifier:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}, max_samples:u16",
+  [0x02A5] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, nrOftrend_setups:u16, trend_setups:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}[], nrOftrend_event_setups:u16, trend_event_setups:{using_trend_archive:bool,highwater_level:u16,trend_by_event:{tag_:u8,no_trigger:-,event_trigger:event_trigger_}}[]",
+  [0x02A6] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, trend_specifier:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}, new_trend_specifier:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}, trend_by_event:{using_trend_archive:bool,highwater_level:u16,trend_by_event:{tag_:u8,no_trigger:-,event_trigger:event_trigger_}}, new_trend_by_event:{using_trend_ar...",
+  [0x02A8] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, nrOftrend_setups:u16, trend_setups:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}[], nrOftrend_event_setups:u16, trend_event_setups:{using_trend_archive:bool,highwater_level:u16,trend_by_event:{tag_:u8,no_trigger:-,event_trigger:event_trigger_}}[]",
+  [0x02E0] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, total_rate:Total_rate",
+  [0x02E1] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x02E2] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0301] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0302] = "bln_network_time:{year:u8,month:u8,dayofmonth:u8,dayofweek:u8,hours:u8,minutes:u8,seconds:u8,tics:u8}, tics_per_second:u16",
+  [0x0303] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, message:str",
+  [0x030F] = "lan:u8, drop:u16, nrOftx_buffer:u16, tx_buffer:Data_byte[]",
+  [0x0313] = "name:str, p1_command:u8, nrOftx_buffer:u16, tx_buffer:Data_byte[]",
+  [0x0314] = "lan:u8, drop:u8, p1_command:u8, nrOftx_buffer:u16, tx_buffer:Data_byte[]",
+  [0x0317] = "lan_number:u8, drop_number:u8, all_drops:bool",
+  [0x0325] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, logger_state:bool",
+  [0x0327] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, buffer_state:bool",
+  [0x0330] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, initials_pattern:str, last_initials:str",
+  [0x0331] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, initials_pattern:str, last_initials:str",
+  [0x0332] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, user_account:{initials:str,long_name:str,password:str,autologoff_enabled:bool,autologoff_delay:u16,language_ID:Language_ID,date_format:str,time_format:str,user_command_priority:User_command_priority,name_space:Name_space,access_class:BITSTRING32,nrOffunctional_accesses:u16,functional_accesses:{user_access_functions:User_access_functions,user_access_priority:User_access_priority}[]}, password_expire_ext:{strike_count:u8,expire_limit:u16,expire_date:datetime}, is_pxm10tiny_autologin_acct:bool",
+  [0x0333] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, user_account:{initials:str,long_name:str,password:str,autologoff_enabled:bool,autologoff_delay:u16,language_ID:Language_ID,date_format:str,time_format:str,user_command_priority:User_command_priority,name_space:Name_space,access_class:BITSTRING32,nrOffunctional_accesses:u16,functional_accesses:{user_access_functions:User_access_functions,user_access_priority:User_access_priority}[]}, password_expire_ext:{strike_count:u8,expire_limit:u16,expire_date:datetime}, is_pxm10tiny_autologin_acct:bool",
+  [0x0335] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, initials_pattern:str, last_initials:str",
+  [0x0336] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, initials_pattern:str, last_initials:str",
+  [0x0338] = "user_Account_DB:{nrOfuser_accounts:u16,user_accounts:{initials:str,long_name:str,password:str,autologoff_enabled:bool,autologoff_delay:u16,language_ID:Language_ID,date_format:str,time_format:str,user_command_priority:User_command_priority,name_space:Name_space,access_class:BITSTRING32,nrOffunctional_accesses:u16,functional_accesses:Functional_access[]}[]}, nrOfpassword_expire_db_ext:u16, password_expire_db_ext:{initials:str,password_expire_ext:{strike_count:u8,expire_limit:u16,expire_date:datetime}}[]",
+  [0x0350] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0353] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, access_group:{access_class_num:u8,description:str}",
+  [0x0358] = "access_group_DB:{nrOfaccess_groups:u16,access_groups:{access_class_num:u8,description:str}[]}",
+  [0x0360] = "ems_range_req:{begin_EMS_number:u16,end_EMS_number:u16}",
+  [0x0361] = "ems_range_req:{begin_EMS_number:u16,end_EMS_number:u16}",
+  [0x0362] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, ems_database:{nrOfems_entries:u16,ems_entries:{message_number:u16,category:u16,bring_on_remote:bool}[]}",
+  [0x0364] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0365] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, ems_entry:{message_number:u16,category:u16,bring_on_remote:bool}",
+  [0x0401] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, enum_type:{type_id:i16,type_name:str,nrOfelements:u16,elements:{value:i16,value_text:str}[]}",
+  [0x0402] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, enum_type_id:i16",
+  [0x0403] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0404] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_pattern:str, last_pattern:str",
+  [0x0405] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, enum_type_name:str",
+  [0x0406] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_pattern:str, last_pattern:str",
+  [0x0407] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, enum_type_id:i16, nrOfenum_elements:u16, enum_elements:{value:i16,value_text:str}[]",
+  [0x0408] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, enum_type_id:i16, value:i16",
+  [0x0409] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, enum_type_id:i16, value:i16, new_value_text:str",
+  [0x040A] = "last_enum_type_id:i16",
+  [0x040B] = "begin_type_id:i16, end_type_id:i16, enum_type:{type_id:i16,type_name:str,nrOfelements:u16,elements:{value:i16,value_text:str}[]}",
+  [0x040E] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, enum_type:{type_id:i16,type_name:str,nrOfelements:u16,elements:{value:i16,value_text:str}[]}",
+  [0x0500] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_response:{name_space:Name_space,name:str,suffix:str}, mode_name:str, mode_suffix:str, normal_acks:bool, alarmcnt2:bool, level_delay:u16, mode_delay:u16, differential:f32, category0:u8, category1:u8, category2:u8, category3:u8",
+  [0x0501] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_response:{name_space:Name_space,name:str,suffix:str}",
+  [0x0504] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0505] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0506] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_response:{name_space:Name_space,name:str,suffix:str}, mode_name:str, mode_suffix:str, normal_acks:bool, alarmcnt2:bool, level_delay:u16, mode_delay:u16, differential:f32, category0:u8, category1:u8, category2:u8, category3:u8",
+  [0x0507] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_response:{name_space:Name_space,name:str,suffix:str}, mode_name:str, mode_suffix:str, normal_acks:bool, alarmcnt2:bool, level_delay:u16, mode_delay:u16, differential:f32, category0:u8, category1:u8, category2:u8, category3:u8",
+  [0x0508] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, point:{tag_:u8,ldi:ldi_,ldo:ldo_,lai:lai_,lao:lao_,l2sl:l2sl_,looap:looap_,lpaci:lpaci_,l2sp:l2sp_,looal:looal_,lfssl:lfssl_,lfssp:lfssp_,ldao:ldao_,lenum:lenum_,lfmsl:lfmsl_,lfmsp:lfmsp_,ppcl_lai:ppcl_lai_}, alarm_message_node:u8, alarm_message_number:u16, alarm_message:str, lenum_address:{tag_:u8,not_present:-,present:present_}, nrOfalarm_buffer:u16, alarm_buffer:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},point:{tag_:u8,ldi:ldi_,ldo:ldo_,lai:lai_,lao:lao_,l2sl...",
+  [0x0509] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x050A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x050B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, mode_name:str",
+  [0x050C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, category:u16",
+  [0x050D] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0520] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_single:{name_space:Name_space,name:str,suffix:str}, setpoint_name:str, setpoint_suffix:str, alarm_mode:{mode_number:u8,set_point:f32,nrOflevels:u16,levels:{offset:f32,alarm_priority:Alarm_priority,category:u8,msg_number:u16}[]}",
+  [0x0521] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_single:{name_space:Name_space,name:str,suffix:str}, setpoint_name:str, setpoint_suffix:str, alarm_mode:{mode_number:u8,set_point:f32,nrOflevels:u16,levels:{offset:f32,alarm_priority:Alarm_priority,category:u8,msg_number:u16}[]}",
+  [0x0522] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u16, alarm_priority:Alarm_priority",
+  [0x0523] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u16, alarm_priority:Alarm_priority",
+  [0x0524] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u16, setpoint_value:f32",
+  [0x0525] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u16",
+  [0x0526] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u8",
+  [0x0528] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_single:{name_space:Name_space,name:str,suffix:str}, setpoint_name:str, setpoint_suffix:str, alarm_mode:{mode_number:u8,set_point:f32,nrOflevels:u16,levels:{offset:f32,alarm_priority:Alarm_priority,category:u8,msg_number:u16}[]}",
+  [0x0529] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, current_mode:u16",
+  [0x052B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_single:{name_space:Name_space,name:str,suffix:str}, alarm_mode_type:Alarm_mode_type",
+  [0x052C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u16, category:u8",
+  [0x052D] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u16, message_number:u8",
+  [0x0530] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u16",
+  [0x0540] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, category:{category_id:u8,description:str,dial_enabled:bool,printing_enabled:bool,nrOfnodes_bits:u16,nodes_bits:Node_bits[]}",
+  [0x0541] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, first_category_id:u8, last_category_id:u8",
+  [0x0542] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, category_id:u8, new_description:str",
+  [0x0543] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, first_category:u8, last_category:u8",
+  [0x0544] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, first_category:u8, last_category:u8",
+  [0x0545] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, first_category:u8, last_category:u8",
+  [0x0546] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, first_category:u8, last_category:u8",
+  [0x0547] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_category:u8, end_category:u8, last_category:u8",
+  [0x0548] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_category:u8, end_category:u8, last_category:u8",
+  [0x0549] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, category_id:u8, nrOfnode_bits:u16, node_bits:Node_bits[]",
+  [0x054A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, category_id:u8, nrOfnode_bits:u16, node_bits:Node_bits[]",
+  [0x054B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_category:u8, end_category:u8, last_category:u8",
+  [0x054C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_category:u8, end_category:u8, last_category:u8",
+  [0x054D] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, category:{category_id:u8,description:str,dial_enabled:bool,printing_enabled:bool,nrOfnodes_bits:u16,nodes_bits:Node_bits[]}",
+  [0x0560] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_message_id:u16, end_message_id:u16, last_message_id:u16",
+  [0x0561] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_message_id:u16, end_message_id:u16",
+  [0x0562] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_message_id:u16, end_message_id:u16",
+  [0x0563] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_message_id:u16, end_message_id:u16",
+  [0x0564] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, alarm_message:{enabled:bool,msg_number:u16,message:str}",
+  [0x0565] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, alarm_message:{enabled:bool,msg_number:u16,message:str}",
+  [0x0566] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, message_id:u16",
+  [0x0567] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_message_id:u16, end_message_id:u16, last_message_id:u16",
+  [0x0568] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, begin_message_id:u16, end_message_id:u16, last_message_id:u16",
+  [0x056A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, alarm_message:{enabled:bool,msg_number:u16,message:str}",
+  [0x0600] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, calendar_entry:{date_type:Date_type,the_date:date}",
+  [0x0601] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, date_to_reset:date",
+  [0x0602] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, nrOfcalendar_db:u16, calendar_db:{date_type:Date_type,the_date:date}[]",
+  [0x0603] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0604] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0605] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0606] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0610] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, dst_entry:{spring_date:datetime,fall_date:datetime}",
+  [0x0611] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, reset_year:date",
+  [0x0612] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, nrOfdst_pairs:u16, dst_pairs:{spring_date:datetime,fall_date:datetime}[]",
+  [0x0613] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0614] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x0961] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0962] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0963] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u8",
+  [0x0964] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, trend_specifier:{number_of_samples:u16,trend_type:{tag_:u8,point_cov:-,trend_cov:trend_cov_,time:time_}}",
+  [0x0965] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_line_returned:u16",
+  [0x0966] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x0967] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x0968] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, eqs_start_where:{tag_:u8,beginning:-,last_mode:i16}",
+  [0x0969] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_entry_id:i32",
+  [0x096B] = "last_alarm_msg_id:u16",
+  [0x0971] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0972] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0973] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u8",
+  [0x0974] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0975] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_line_returned:u16",
+  [0x0976] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x0977] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x0978] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, eqs_start_where:{tag_:u8,beginning:-,last_mode:i16}",
+  [0x0979] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, entry_ID:i32, last_entry_ID:i32, state_text_ID:i16",
+  [0x097B] = "begin_message_id:u16, end_message_id:u16, last_message_id:u16",
+  [0x097C] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x097D] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x097E] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x097F] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x0981] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0982] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0983] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_mode:u8",
+  [0x0984] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x0985] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_line_returned:u16",
+  [0x0986] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x0987] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x0988] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, eqs_start_where:{tag_:u8,beginning:-,last_mode:i16}",
+  [0x0989] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, entry_ID:i32, last_entry_ID:i32, state_text_ID:i16",
+  [0x098B] = "begin_message_id:u16, end_message_id:u16, last_message_id:u16",
+  [0x098C] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x098D] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x098E] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x098F] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x099E] = "port_request:{begin_port_number:u8,end_port_number:u8,last_port_number:u8}",
+  [0x099F] = "port_request:{begin_port_number:u8,end_port_number:u8,last_port_number:u8}",
+  [0x09A1] = "last_partner_id:u16",
+  [0x09A2] = "partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x09A3] = "partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x09A5] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_xoverride_entry_id:i32",
+  [0x09A6] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_xoverride_ID:i32",
+  [0x09A7] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_xoverride_ID:i32",
+  [0x09A9] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09AA] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09AB] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09B9] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09BA] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09BB] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09C1] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09C2] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x09C3] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x3800] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_record:{partner_log:{number:u16,enabled:bool,device_type:Device_type,descriptor:str,insight_node_number:u16},host_id:str,nrOfpartner_numbers:u16,partner_numbers:{phone_number:str}[],flex_string:str,full_flex_string:str}",
+  [0x3802] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x3803] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x3804] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x3805] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x3806] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x3807] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x3808] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_record:{partner_log:{number:u16,enabled:bool,device_type:Device_type,descriptor:str,insight_node_number:u16},host_id:str,nrOfpartner_numbers:u16,partner_numbers:{phone_number:str}[],flex_string:str,full_flex_string:str}",
+  [0x3809] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x380A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, partner_request:{begin_partner_number:u16,end_partner_number:u16,last_partner_number:u16}",
+  [0x3814] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, port_request:{begin_port_number:u8,end_port_number:u8,last_port_number:u8}",
+  [0x3817] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, port_request:{begin_port_number:u8,end_port_number:u8,last_port_number:u8}",
+  [0x3818] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, port_log:{port_number:Port_number,port_status:{descriptor:str,baud_rate:Baud_rate,highlight_enabled:bool,autobye_enabled:bool,alarm_printing_enabled:bool,report_printing_enabled:bool,port_type:Port_type,my_site_id:str,AdvancedPortString:str,AdvancedSystemString:str,DiagPortString:str,DiagSystemString:str,PortName:str}}",
+  [0x3819] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, port_request:{begin_port_number:u8,end_port_number:u8,last_port_number:u8}",
+  [0x381A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, port_request:{begin_port_number:u8,end_port_number:u8,last_port_number:u8}",
+  [0x4000] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4001] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, description:str, default_member:u16, default_report:u16, member_count:u16, report_count:u16, dynamic:bool, extended_team_desc:{tag_:u8,no_extension:-,LON_extension:LON_extension_,MSTP_extension:-}",
+  [0x4002] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, def_analog_add:{member_desc_base:{member_number:u16,nrOfteam_suffix:u16,team_suffix:Team_Suffix[],member_desc:str,point_type:Point_type,virtual_pt:bool,alarmable:bool,reference_type:Reference_Type,totalize:bool,print_alarms:bool,total_scale:Total_rate,includeInCount2:bool},english_units:str,english_init_val:f32,english_low_alarm:f32,english_high_alarm:f32,si_units:str,si_init_val:f32,si_low_alarm:f32,si_high_alarm:f32,representation:Representation}, analog_team_scale:{scale:scale_}, extended_team_member:{tag_:u...",
+  [0x4003] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, def_digital_add:{member_desc_base:{member_number:u16,nrOfteam_suffix:u16,team_suffix:Team_Suffix[],member_desc:str,point_type:Point_type,virtual_pt:bool,alarmable:bool,reference_type:Reference_Type,totalize:bool,print_alarms:bool,total_scale:Total_rate,includeInCount2:bool},initial_value:f32,state_text_table:State_text_table}, inverted:bool, extended_team_member:{tag_:u8,no_extension:-,LON_extension:LON_extension_,MSTP_extension:MSTP_extension_}",
+  [0x4004] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, def_enum_add:{member_desc_base:{member_number:u16,nrOfteam_suffix:u16,team_suffix:Team_Suffix[],member_desc:str,point_type:Point_type,virtual_pt:bool,alarmable:bool,reference_type:Reference_Type,totalize:bool,print_alarms:bool,total_scale:Total_rate,includeInCount2:bool},initial_value:f32,state_text_table:State_text_table}, extended_team_member:{tag_:u8,no_extension:-,LON_extension:LON_extension_,MSTP_extension:MSTP_extension_}",
+  [0x4005] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, def_analog_add:{member_desc_base:{member_number:u16,nrOfteam_suffix:u16,team_suffix:Team_Suffix[],member_desc:str,point_type:Point_type,virtual_pt:bool,alarmable:bool,reference_type:Reference_Type,totalize:bool,print_alarms:bool,total_scale:Total_rate,includeInCount2:bool},english_units:str,english_init_val:f32,english_low_alarm:f32,english_high_alarm:f32,si_units:str,si_init_val:f32,si_low_alarm:f32,si_high_alarm:f32,representation:Representation}, count_both_edges:bool, si_gain:f32, si_cov_limit:f32, english_...",
+  [0x4006] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, def_digital_add:{member_desc_base:{member_number:u16,nrOfteam_suffix:u16,team_suffix:Team_Suffix[],member_desc:str,point_type:Point_type,virtual_pt:bool,alarmable:bool,reference_type:Reference_Type,totalize:bool,print_alarms:bool,total_scale:Total_rate,includeInCount2:bool},initial_value:f32,state_text_table:State_text_table}, inverted:bool, proof_delay:u16, slavenumber:i16, slaveinverted:bool, extended_team_member:{tag_:u8,no_extension:-,LON_extension:LON_extension_,MSTP_extension:MSTP_extension_}",
+  [0x400B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x400C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x400D] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, report_name_pattern:str, last_report_name:str",
+  [0x400F] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, last_team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}",
+  [0x4010] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, member_number:u16, last_member_number:u16",
+  [0x4017] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, last_team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}",
+  [0x4018] = "team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16}, member_number:u16, last_member_number:u16",
+  [0x4100] = "ppcl_data:{name_space:Name_space,name:str,line_status:str,line_text:str,line_number:u16,line_enabled:bool,line_traced:bool,line_unresolved:bool,line_failed:bool,line_looped:bool}, user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x4101] = "program_name:str",
+  [0x4103] = "ppcl_range:{name_space:Name_space,name:str,first_line:u16,last_line:u16}, user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x4104] = "ppcl_range:{name_space:Name_space,name:str,first_line:u16,last_line:u16}",
+  [0x4105] = "ppcl_range:{name_space:Name_space,name:str,first_line:u16,last_line:u16}",
+  [0x4106] = "ppcl_range:{name_space:Name_space,name:str,first_line:u16,last_line:u16}",
+  [0x4107] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4108] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, begin_line_number:u16, end_line_number:u16, last_line_returned:u16, point_name:str, nrOfStatement_types:u16, Statement_types:PPCL_statement_type[]",
+  [0x4109] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x410A] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, begin_line_number:u16, end_line_number:u16, last_line_returned:u16",
+  [0x410B] = "ppcl_data:{name_space:Name_space,name:str,line_status:str,line_text:str,line_number:u16,line_enabled:bool,line_traced:bool,line_unresolved:bool,line_failed:bool,line_looped:bool}, old_line_number:u16, user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x410E] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, begin_line_number:u16, end_line_number:u16, last_line_returned:u16",
+  [0x410F] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, meter_area:u16",
+  [0x4110] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, meter_area:u16",
+  [0x4111] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, meter_area:u16, last_state:Last_state",
+  [0x412A] = "team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, begin_line_number:u16, end_line_number:u16, last_line_returned:u16",
+  [0x4131] = "program_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4132] = "program_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4133] = "program_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4134] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, program:{name_space:Name_space,program_name:str,base_instance_number:u32,instance_range:u32,priority_for_writing:u32}",
+  [0x4135] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_space:Name_space, program_name:str",
+  [0x4137] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, program_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4200] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:i16",
+  [0x4201] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, tec_body:{team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:Access_class,si_units:bool,lan:u8,drop:u8,duct_available:{tag_:u8,no_duct:-,use_duct:use_duct_},nightOverride:u8,added_to_database:bool,initialized:bool,is_valid:TEC_valid,failed_status:Failed_status,nrOfinitial_values:u16,initial_values:{member_number:u16,initial_value:f32}[],nrOfrechar_values:u16,rechar_values:{member_number:u16,logi...",
+  [0x4202] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, tec_body:{team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:Access_class,si_units:bool,lan:u8,drop:u8,duct_available:{tag_:u8,no_duct:-,use_duct:use_duct_},nightOverride:u8,added_to_database:bool,initialized:bool,is_valid:TEC_valid,failed_status:Failed_status,nrOfinitial_values:u16,initial_values:{member_number:u16,initial_value:f32}[],nrOfrechar_values:u16,rechar_values:{member_number:u16,logi...",
+  [0x4203] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, tec_body:{team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:Access_class,si_units:bool,lan:u8,drop:u8,duct_available:{tag_:u8,no_duct:-,use_duct:use_duct_},nightOverride:u8,added_to_database:bool,initialized:bool,is_valid:TEC_valid,failed_status:Failed_status,nrOfinitial_values:u16,initial_values:{member_number:u16,initial_value:f32}[],nrOfrechar_values:u16,rechar_values:{member_number:u16,logi...",
+  [0x4204] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4205] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4206] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4208] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4210] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, suffix_is_number:bool, member_number:u16",
+  [0x4211] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, suffix_is_number:bool, report_number:u16",
+  [0x4212] = "query:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str},last_suffix:str,application_number:u16}",
+  [0x4220] = "def_TEC_app:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},application_family:Application_family,team_type:u16,name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},all_init_values:bool}",
+  [0x4221] = "def_TEC_app:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},application_family:Application_family,team_type:u16,name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},all_init_values:bool}",
+  [0x4222] = "set:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},application_number:u16,suffix_is_number:bool}, member_number:u16, initial_value:f32",
+  [0x4223] = "restore:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},application_number:u16,suffix_is_number:bool}, member_number:u16",
+  [0x4224] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:u16, clear_panel_initvals:bool, clear_device_initvals:bool",
+  [0x4225] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:u16",
+  [0x4230] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, lan_or_device:{tag_:u8,one_device:one_device_,whole_lan:whole_lan_}",
+  [0x4231] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, lan_or_device:{tag_:u8,one_device:one_device_,whole_lan:whole_lan_}",
+  [0x4232] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, which_lan:{tag_:u8,all_lans:-,one_lan:one_lan_}, which_drop:{tag_:u8,all_drops:-,one_drop:one_drop_}, last_lan:u8, last_drop:u8",
+  [0x4241] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, uc_body:{team_description_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:BITSTRING32,lan:u8,drop:u8,added_to_database:bool,initialized:bool,is_valid:Uc_is_valid,failed_status:Uc_failed_status,nrOfrechar_values:u16,rechar_values:{member_number:u16,logical_value:f32,point_priority:Point_priority,control_status:Control_status}[],is_bacnet:{tag_:u8,BACnetNo:-,BACnetYes:BACnetYes_}}",
+  [0x4244] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4245] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x4249] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x4300] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:i16",
+  [0x4301] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, lon_body:{team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:BITSTRING32,si_units:bool,lan:u8,drop:u8,added_to_database:bool,initialized:bool,is_valid:TEC_valid,failed_status:Failed_status,nrOfinitial_values:u16,initial_values:{member_number:u16,initial_value:f32}[],nrOfrechar_values:u16,rechar_values:{member_number:u16,logical_value:f32,point_priority:Point_priority,control_status:Control_statu...",
+  [0x4303] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, lon_body:{team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:BITSTRING32,si_units:bool,lan:u8,drop:u8,added_to_database:bool,initialized:bool,is_valid:TEC_valid,failed_status:Failed_status,nrOfinitial_values:u16,initial_values:{member_number:u16,initial_value:f32}[],nrOfrechar_values:u16,rechar_values:{member_number:u16,logical_value:f32,point_priority:Point_priority,control_status:Control_statu...",
+  [0x4304] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:i16",
+  [0x4310] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, suffix_is_number:bool, member_number:u16",
+  [0x4311] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, suffix_is_number:bool, report_number:u16",
+  [0x4320] = "def_LON_app:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},application_family:Application_family,team_type:u16,name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},all_init_values:bool}",
+  [0x4321] = "def_LON_app:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},application_family:Application_family,team_type:u16,name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},all_init_values:bool}",
+  [0x4322] = "set:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},application_number:u16,suffix_is_number:bool}, member_number:u16, initial_value:f32",
+  [0x4323] = "restore:{user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class},name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str},application_number:u16,suffix_is_number:bool}, member_number:u16",
+  [0x4324] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:u16, clear_panel_initvals:bool, clear_device_initvals:bool",
+  [0x4325] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:u16",
+  [0x4332] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, subnet_choice:{tag_:u8,all_subnets:-,single_subnet:u8}, node_choice:{tag_:u8,all_nodes:-,single_node:u8}, last_subnet:u8, last_node:u8",
+  [0x4402] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, m_local:{tag_:u8,remote_is_set:remote_is_set_,local_is_set:-}",
+  [0x4403] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, nrOflon_domain:u16, lon_domain:{domain_index:u8,nrOfdomain_id:u16,domain_id:{data:u8}[],subnet:u8,node:u8}[]",
+  [0x4452] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x4621] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, node_name:str, site_name:str, bln_name:str, ip_addr_settings:{dhcp:dhcp_,dns:dns_,nrOfapp_ports:u16,app_ports:u16[],nrOfmulticast:u16,multicast:{mc_addr:u32,mc_port:u16}[],smtp_server:smtp_server_,telnet_enabled:bool,dynamic_dns:dynamic_dns_}, bacnetSettings:{tag_:u8,noBacnet:-,yesBacnet:yesBacnet_}, bacnet_ip_aln_choice:bool, bacnet_ip_network_number:u16, BACnetMSTPALNSettings:{tag_:u8,noMSTPALN:-,yesMSTPALN:yesMSTPALN_}, BACnetMSTPFLNSettings:{tag_:u8,noBACnetFLNs:-,yesBACnetFLNs:yesBACnetFLNs_}",
+  [0x4628] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, bln_name:str, intrasite_eping_period:u32, intrasite_eping_timeout:u32, intersite_eping_period:u32, intersite_eping_timeout:u32, intrasite_notif_repl_period:u32, intrasite_poll_repl_period:u32, intrasite_repl_cycle_timeout:u32, intersite_notif_repl_period:u32, intersite_poll_repl_period:u32, intersite_repl_cycl_timeout:u32, tombstone_lifetime:u32, holdback_delay:u32",
+  [0x4629] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x462A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, site_name:str",
+  [0x462B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, bln_name:str",
+  [0x462D] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, hosttable_entry:{node_name:str,ip_address:u32}",
+  [0x462E] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, node_name:str",
+  [0x462F] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, last_name:str",
+  [0x4634] = "reconciliation:u16, high_watermark:u32, nrOfutdv_array:u16, utdv_array:{originating_node:str,originating_usn:u32}[], changes_max_size:u32",
+  [0x4635] = "changes_max_size:u32, srce_cycle_number:u16, srce_cycle_pdu_number:u16",
+  [0x4636] = "reconciliation:u16, boc_usn_changed:u32, more_data:bool, srce_cycle_number:u16, srce_cycle_pdu_number:u16, nrOfutdv_array:u16, utdv_array:{originating_node:str,originating_usn:u32}[], nrOfgrain_array:u16, grain_array:{repl_guid:str,usn_changed:u32,repl_cmd_type:Repl_Cmd_Type,grain_type:Grain_Type,entry_id:str,nrOfblob:u16,blob:{<Value>k__BackingField:SByte}[],grain_version:u32,orig_time:u32,orig_node:str,orig_usn:u32}[]",
+  [0x4637] = "name_single:{name_space:Name_space,name:str,suffix:str}",
+  [0x4640] = "enode:{node_name:str,site_name:str,bln_name:str,failed:bool,ready:bool,replication_online:bool,reresolve_all:bool,reresolve_unresolved:bool,spare1:u32,baseTime:u32,offset:u16,dst_flag:bool}",
+  [0x4644] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x4645] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x482A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_priority_entry:{app_id:u8,bacnet_priority:u8}",
+  [0x482B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, app_id:u8",
+  [0x482C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, last_app_id:u8",
+  [0x482E] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, device_id:str, object_id:str, device_name:str, object_name:str, mac_address:str, option_string:str",
+  [0x482F] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, device_id:str, object_id:str",
+  [0x4838] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, point_name:{name_space:Name_space,name:str,suffix:str}, log_object:{object_Identifier:u32,object_Name:str,object_Type:u16,description:str,log_Enabled:bool,start_Time:datetime,stop_Time:datetime,log_deviceObjectProperty:{objectIdentifier:u32,propertyIdentifier:u32,propertyArrayIndex:u32,deviceIdentifer:u32},log_interval:u32,COV_Resubscription_Interval:u32,client_COV_Increment:client_COV_Increment_,stop_When_Full:bool,buffer_Size:u32,record_Count:u32,total_Record_Count:u32,notification_Threshold:u32,records...",
+  [0x4839] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, object_Identifier:u32",
+  [0x483A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, point_name:{name_space:Name_space,name:str,suffix:str}, log_object:{object_Identifier:u32,object_Name:str,object_Type:u16,description:str,log_Enabled:bool,start_Time:datetime,stop_Time:datetime,log_deviceObjectProperty:{objectIdentifier:u32,propertyIdentifier:u32,propertyArrayIndex:u32,deviceIdentifer:u32},log_interval:u32,COV_Resubscription_Interval:u32,client_COV_Increment:client_COV_Increment_,stop_When_Full:bool,buffer_Size:u32,record_Count:u32,total_Record_Count:u32,notification_Threshold:u32,records...",
+  [0x4842] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_Object_Identifer:u32",
+  [0x4844] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_Object_Identifer:u32",
+  [0x4845] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_Object_Identifer:u32",
+  [0x4846] = "name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, last_Object_Identifer:u32",
+  [0x4878] = "last_object_id:u32",
+  [0x4879] = "last_object_id:u32",
+  [0x4960] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, baud_rate:BAC_Baud_rate, mstp_network_number:u16, mstp_node_number:u8, keep_alive_poll_rate:u16, discovery_poll_rate:u16",
+  [0x4961] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, BACnet_MSTP_LAN:BACnet_MSTP_LAN_",
+  [0x4963] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, body:{team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:Access_class,is_master:{is_master:bool},device:{instance_number:u32,network_number:u16,mac_address:Mac_Address,failed:bool},added_to_database:bool,initialized:bool,is_valid:TEC_valid,nrOfinitial_values:u16,initial_values:{member_number:u16,initial_value:f32,xoverride:bool}[],initial_value_priority:u8,save_relinquish_default:bool,bacnet_pas...",
+  [0x4965] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, body:{team_desc_base:{team_family:Application_family,team_type:u16,team_revision:u16},nrOfnames:u16,names:{name_space:Name_space,name:str}[],descriptor:str,access_class:Access_class,is_master:{is_master:bool},device:{instance_number:u32,network_number:u16,mac_address:Mac_Address,failed:bool},added_to_database:bool,initialized:bool,is_valid:TEC_valid,nrOfinitial_values:u16,initial_values:{member_number:u16,initial_value:f32,xoverride:bool}[],initial_value_priority:u8,save_relinquish_default:bool,bacnet_pas...",
+  [0x4966] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:i16",
+  [0x4967] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:i16",
+  [0x496B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x496E] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x4970] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, application_number:u16, initial_value:f32",
+  [0x4971] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, application_number:u16",
+  [0x4972] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:u16, clear_panel_initvals:bool, clear_device_initvals:bool",
+  [0x4973] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, application_number:u16",
+  [0x4B01] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, log_object:{object_instance_number:u32,object_Type:u16,object_Name:str,description:str,log_deviceObjectProperty:{object_instance_number:u32,object_Type:u16,propertyIdentifier:u8,propertyArrayIndex:u8,device_present:bool,device_instance_number:u32,device_type:u16},eventType:u8,eventState:u16,notification_Class:u32,eventEnable:u8,ackedTransitions:u8,notifyType:u8,alarmmessage_Number:u16,eventresolved:u16,event_Time_Stamps:{AlarmTimeStamp:datetime,FaultTimeStamp:datetime,NormalTimeStamp:datetime},event_param...",
+  [0x4B02] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, searchbyname:bool, objectIDbegin:u32, objectIDend:u32, objectIDlast:u32",
+  [0x4B03] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, objectIDbegin:u32",
+  [0x5000] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, eqs_zone_definition:{nrOfnames:u16,names:{name_space:Name_space,name:str}[],eqs_zone_data:{zone_enabled:bool,description:str,access_class:Access_class,min_off_time:u16,recmd_after_warmstart:bool,warmstart_delay:u16,state_text_table:State_text_table,default_mode:i16,english_units:bool,optimization_osv:bool},nrOfrecharacterization_values:u16,recharacterization_values:{member_number:u16,logical_value:f32,point_priority:Point_priority,control_status:Control_status}[]}",
+  [0x5001] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5002] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, eqs_zone_definition:{nrOfnames:u16,names:{name_space:Name_space,name:str}[],eqs_zone_data:{zone_enabled:bool,description:str,access_class:Access_class,min_off_time:u16,recmd_after_warmstart:bool,warmstart_delay:u16,state_text_table:State_text_table,default_mode:i16,english_units:bool,optimization_osv:bool},nrOfrecharacterization_values:u16,recharacterization_values:{member_number:u16,logical_value:f32,point_priority:Point_priority,control_status:Control_status}[]}",
+  [0x5003] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5004] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5005] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5018] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, eqs_cmd_table_sequence:{name_team:{name_space:Name_space,name:str},name_name:{name_space:Name_space,name:str,suffix:str},nrOfcmd_table_entries:u16,cmd_table_entries:{mode:i16,command_value:f32,command_offset:u16}[]}",
+  [0x5019] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, eqs_cmd_table_entry:{name_team:{name_space:Name_space,name:str},name_name:{name_space:Name_space,name:str,suffix:str},eqs_cmd_table_data:{mode:i16,command_value:f32,command_offset:u16}}",
+  [0x501A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_response:{name_space:Name_space,name:str}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, mode:{tag_:u8,all_modes:-,one_mode:i16}",
+  [0x501B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}, eqs_start_where:{tag_:u8,beginning:-,last_mode:i16}",
+  [0x5020] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, eqs_mode_entry:{name:{name_space:Name_space,name:str},eqs_mode_data:{entry_ID:i32,entry_enabled:bool,mode:i16,occurrence:Occurrence,scheduled_days:Schedule_days,start_date:date,end_date:date,start_time:time,stop_time:time,days_spanned:u8,exclusive:bool}}",
+  [0x5021] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, eqs_mode_entry:{name:{name_space:Name_space,name:str},eqs_mode_data:{entry_ID:i32,entry_enabled:bool,mode:i16,occurrence:Occurrence,scheduled_days:Schedule_days,start_date:date,end_date:date,start_time:time,stop_time:time,days_spanned:u8,exclusive:bool}}",
+  [0x5022] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_response:{name_space:Name_space,name:str}, which_mode_entry:{tag_:u8,all_mode_entries:-,entry_ID:i32}",
+  [0x5023] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, entry_ID:i32, last_entry_ID:i32",
+  [0x5024] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_response:{name_space:Name_space,name:str}, eqs_which_mode_entry:{tag_:u8,all_mode_entries:-,entry_ID:i32}",
+  [0x5025] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_response:{name_space:Name_space,name:str}, eqs_which_mode_entry:{tag_:u8,all_mode_entries:-,entry_ID:i32}",
+  [0x5028] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_response:{name_space:Name_space,name:str}, eqs_xoverride:{entry_ID_to_xoverride:i32,my_entry_ID:i32,disable:bool,xoverride_date:date,ovr_start_time:time,ovr_stop_time:time,ovr_day_span:u8}",
+  [0x5029] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_response:{name_space:Name_space,name:str}, eqs_xoverride:{entry_ID_to_xoverride:i32,my_entry_ID:i32,disable:bool,xoverride_date:date,ovr_start_time:time,ovr_stop_time:time,ovr_day_span:u8}",
+  [0x502A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_response:{name_space:Name_space,name:str}, entry_ID:i32",
+  [0x502B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, xoverride_entry_ID:i32, last_entry_ID:i32",
+  [0x5035] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5036] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, scheduled_days:Schedule_days, last_entry_ID:i32, last_schedule_day:Schedule_days",
+  [0x5037] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x5038] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5039] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, last_entry_id:i32, last_xoverride_entry_ID:i32",
+  [0x503A] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, ssto_general_setup:{osv:bool,eopst:bool,eopsp:bool,eoocnt:bool,ssto_amd:Ssto_amd,ssto_desop:{tag_:u8,value:Ssto_desop_value,name_suffix:name_suffix_},to:{tag_:u8,value:f32,name_suffix:name_suffix_},ti:{tag_:u8,value:f32,name_suffix:name_suffix_},sph:{tag_:u8,value:f32,name_suffix:name_suffix_},sphd:{tag_:u8,value:f32,name_suffix:name_suffix_},spc:{tag_:u8,value:f32,name_suffix:name_suffix_},spcd:{tag_:u8,value:f...",
+  [0x503B] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, ssto_start_setup:{stmht:u16,occ_early_st_ht:bool,mod_early_st_ht:u16,occ_late_st_ht:bool,mod_late_st_ht:u16,ssto_zo_mod_ht:Ssto_zo_mod_ht,aosvstht:bool,hlo:f32,hdi:f32,min_st_dur_ht:f32,max_st_dur_ht:f32,to_min_st_dur_ht:f32,to_max_st_dur_ht:f32,cdtht:f32,dspht:f32,stmcl:u16,occ_early_st_cl:bool,mod_early_st_cl:u16,occ_late_st_cl:bool,mod_late_st_cl:u16,ssto_zo_mod_cl:Ssto_zo_mod_cl,aosvstcl:bool,clo:f32,cdi:f32...",
+  [0x503C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, ssto_stop_setup:{apmht:u16,sk1_ht:f32,tdht:f32,dt_max_ht:f32,max_sp_dur_ht:f32,a_osv_sp_ht:bool,spmcl:u16,sk1_cl:f32,dt_max_cl:f32,max_sp_dur_cl:f32,a_osv_sp_cl:bool}",
+  [0x503D] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, ssto_night_setup:{ntmht:u16,ntmcl:u16,ihys:f32}",
+  [0x503E] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x503F] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5040] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5041] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5042] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, reset_settings:Ssto_reset_settings",
+  [0x5043] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, enable_settings:SSTO_enable_settings",
+  [0x5044] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}, disable_settings:SSTO_disable_settings",
+  [0x5050] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5051] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5052] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5053] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, team_search:{name_space:Name_space,name_pattern:str,last_name_space:Name_space,last_name:str}",
+  [0x5054] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, application_family:Application_family, team_type:u16, name_search:{name_space:Name_space,name_pattern:str,suffix_pattern:str,last_name_space:Name_space,last_name:str,last_suffix:str}",
+  [0x5300] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, bim_lan_number:u8, bim_drop_number:u8",
+  [0x5301] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, lan_number:u8",
+  [0x5303] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, bim_lan_number:u8, bim_drop_number:u8",
+  [0x5304] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, lan_number:u8",
+  [0x5330] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x5331] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x5332] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x5351] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, hoa_map:{nrOfhoa_map_entries:u16,hoa_map_entries:{switch_number:u8,point_number:CHAR_}[]}",
+  [0x5354] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
+  [0x5355] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}, hoa_map:{nrOfhoa_map_entries:u16,hoa_map_entries:{switch_number:u8,point_number:CHAR_}[]}",
+  [0x700C] = "user_profile:{user_logon:str,point_priority:Point_priority,access_class:Access_class}",
 }
 
--- Status / error code catalog. Codes flagged * are the ones observed in
--- normal operation; the rest are vendor-documented (Siemens BACnet ALN
--- Manual 125-3020 Appendix C) and surface mostly on writes, firmware-
--- update flows, and PPCL ops.
-local STATUS_ERRORS = {
-    -- Common
-    [0x0002] = "object_unknown (E2; out-of-scope for scope-restricted op)",
-    [0x0003] = "not_found (E3; *dominant* error in normal operation)",
-    [0x00AC] = "not_supported (E172; opcode not on this firmware)",
-    [0x0E11] = "already_exists (E3601; CreateObject — treat as success)",
-    [0x0E15] = "physical_point_not_commandable (E3605; 0x0240 vs SYST — retry as 0x4222)",
-    -- Vendor-documented
-    [0x0001] = "no_memory_available (E1)",
-    [0x0004] = "priority_too_low (E4)",
-    [0x0005] = "failed_no_change (E5)",
-    [0x0007] = "out_of_service (E7)",
-    [0x0008] = "field_panel_general_error (E8)",
-    [0x0009] = "already_exists_v2 (E9; sibling of E3601)",
-    [0x000A] = "trend_already_exists / value_unchanged (E10)",
-    [0x000B] = "value_out_of_range (E11; also see E3606)",
-    [0x000C] = "line_not_traced (E12; PPCL)",
-    [0x000D] = "line_state_mismatch (E13; PPCL)",
-    [0x0016] = "has_unresolved_points (E22; PPCL/zone)",
-    [0x0028] = "line_accessed_not_traced (E40; PPCL tracebit)",
-    [0x0040] = "tiu_busy (E64)",
-    [0x0065] = "command_not_supported (E101; sibling of E172)",
-    [0x0080] = "point_in_hand_mode (E128)",
-    [0x0081] = "invalid_password (E129)",
-    [0x0082] = "user_accounts_database_full (E130)",
-    [0x00AB] = "coldstart_required (E171)",
-    [0x00B7] = "operation_aborted_warmstart (E183)",
-    [0x00B8] = "too_many_framing_errors (E184)",
-    [0x00F9] = "invalid_point_address (E249)",
-    [0x00FA] = "failed_io_device (E250)",
-    [0x00FE] = "monitor_list_full (E254; COV)",
-    [0x0200] = "flt_transfer_in_progress (E512; firmware loader)",
-    [0x0202] = "flt_transfer_killed (E514)",
-    [0x0203] = "tec_not_added (E515)",
-    [0x0205] = "connection_lost (E517)",
-    [0x0206] = "warm_started (E518)",
-    [0x0207] = "protocol_error (E519)",
-    [0x0209] = "timeout (E521)",
-    [0x0210] = "invalid_fln_number (E528)",
-    [0x0E10] = "invalid_drop_number (E3600)",
-    [0x0E12] = "invalid_point_number (E3602)",
-    [0x0E13] = "physical_point_failed (E3603)",
-    [0x0E14] = "physical_point_not_commandable_v2 (E3604; sibling of E3605)",
-    [0x0E16] = "value_out_of_range_v2 (E3606; sibling of E11)",
-    [0x0E17] = "application_invalid_for_device (E3607)",
-}
-
--- Data-type codes seen in value-block 7-byte metadata (last byte). Empirical
--- distribution from ~575 R3 responses across 5 captures.
-local DATA_TYPE_CODES = {
-    [0x00] = "digital/binary/enum",
-    [0x01] = "rare (semantics not pinned)",
-    [0x02] = "small int (likely int16)",
-    [0x03] = "analog (dominant)",
-    [0x04] = "(unobserved; speculative)",
-    [0x05] = "(unobserved; speculative)",
-    [0x06] = "analog32 / extended numeric",
-}
-
--- Comm-status byte (value-block metadata offset +1 after the 01 00 00 marker).
--- This is the device-level comm-fault flag — distinct from the response-level
--- direction byte (0x01 success / 0x05 error). PXCs return cached values
--- indefinitely from comm-faulted devices; this byte is the only way to spot it.
-local COMM_STATUS = {
-    [0x00] = "live (device online)",
-    [0x01] = "STALE (device comm-faulted; cached value)",
-}
-
--- 4-byte BLN multicast beacon payload — invariant across the corpus.
-local BEACON_PAYLOAD_HEX = "01000000"
-
-------------------------------------------------------------------------
--- ProtoFields
-------------------------------------------------------------------------
-
+------------------------------------------------------------------------ fields
 local f = {}
-
--- Frame header (12 bytes, big-endian)
-f.total_len = ProtoField.uint32("p2.total_len", "Total Length", base.DEC)
-f.msg_type  = ProtoField.uint32("p2.msg_type",  "Message Type", base.HEX, MSG_TYPES)
-f.sequence  = ProtoField.uint32("p2.seq",       "Sequence",     base.DEC)
-
--- Routing header
-f.dir_byte    = ProtoField.uint8 ("p2.dir",       "Direction",       base.HEX, DIR_BYTES)
-f.bln1        = ProtoField.string("p2.bln1",     "BLN Network (1)")
-f.node_a      = ProtoField.string("p2.node_a",   "Node A (slot 2)")
-f.bln2        = ProtoField.string("p2.bln2",     "BLN Network (2)")
-f.node_b      = ProtoField.string("p2.node_b",   "Node B (slot 4)")
-f.dst_node    = ProtoField.string("p2.dst",      "Destination Node")
-f.src_node    = ProtoField.string("p2.src",      "Source Node")
-f.sender      = ProtoField.string("p2.sender",   "Sender (self)")
-f.recipient   = ProtoField.string("p2.recipient","Recipient (peer)")
-
--- Body
-f.opcode      = ProtoField.uint16("p2.opcode",   "Opcode",     base.HEX, OPCODES)
-f.error_code  = ProtoField.uint16("p2.err_code", "Error Code", base.HEX, STATUS_ERRORS)
-
--- Read / COV / write decoded fields
-f.device_name  = ProtoField.string("p2.device", "Device Name")
-f.point_name   = ProtoField.string("p2.point",  "Point Name")
-f.float_value  = ProtoField.float ("p2.value",  "Value (float, BE)")
-f.units        = ProtoField.string("p2.units",  "Units")
-
--- Value block sub-fields
-f.value_marker      = ProtoField.bytes ("p2.vb.marker",       "Value-block Marker (01 00 00)")
-f.value_sentinel    = ProtoField.bytes ("p2.vb.sentinel",     "Property-state Sentinel (4 bytes)")
-f.value_comm_status = ProtoField.uint8 ("p2.vb.comm_status",  "Comm Status",          base.HEX, COMM_STATUS)
-f.value_err_code    = ProtoField.uint8 ("p2.vb.err_code",     "Per-device Err Code",  base.HEX)
-f.value_dtype       = ProtoField.uint8 ("p2.vb.dtype",        "Data Type",            base.HEX, DATA_TYPE_CODES)
-
--- Identity-block strings (handshake / 0x4640)
-f.scanner_name = ProtoField.string("p2.scanner", "Scanner Name")
-f.site_name    = ProtoField.string("p2.site",    "Site Name")
-f.network_name = ProtoField.string("p2.network", "Network Name")
-f.id_timestamp = ProtoField.absolute_time("p2.id.timestamp",
-                                          "Embedded Unix epoch", base.UTC)
-
--- Sysinfo response decode (0x010C)
-f.sysinfo_model    = ProtoField.string("p2.sys.model",    "Panel Model")
-f.sysinfo_firmware = ProtoField.string("p2.sys.firmware", "Firmware")
-f.sysinfo_build    = ProtoField.string("p2.sys.build",    "Build Date")
-
--- Port config (0x099F)
-f.port_index = ProtoField.uint8 ("p2.port.index", "Port Index", base.HEX)
-f.port_label = ProtoField.string("p2.port.label", "Port Label")
-
--- Routing table entry (0x4634)
-f.rt_peer = ProtoField.string("p2.rt.peer", "Peer Name")
-f.rt_cost = ProtoField.uint32("p2.rt.cost", "Cost", base.DEC)
-
--- Alarm-record fields (0x0508 / 0x0509)
-f.alarm_class       = ProtoField.string("p2.alarm.class",       "Alarm Class")
-f.alarm_point       = ProtoField.string("p2.alarm.point",       "Alarmed Point")
-f.alarm_description = ProtoField.string("p2.alarm.description", "Alarm Description")
-f.alarm_marker      = ProtoField.string("p2.alarm.marker",      "Internal Marker (4-char)")
-f.alarm_time_raised = ProtoField.string("p2.alarm.t_raised",    "Time Alarm First Raised")
-f.alarm_time_now    = ProtoField.string("p2.alarm.t_now",       "Time of Report (now)")
-f.alarm_time_last   = ProtoField.string("p2.alarm.t_last",      "Time of Last Transition")
-f.alarm_value       = ProtoField.float ("p2.alarm.value",       "Alarm-time Value")
-
--- Schedule fields (0x098D / 0x5020)
-f.sched_name      = ProtoField.string("p2.sched.name",      "Schedule Name")
-f.sched_date      = ProtoField.string("p2.sched.date",      "BACnet Date (4B)")
-f.sched_setpoint  = ProtoField.float ("p2.sched.setpoint",  "Setpoint (f32 BE)")
-
--- Beacon
-f.beacon_payload = ProtoField.bytes("p2.beacon.payload", "Beacon Payload")
-
--- Generic LP-strings collected from elsewhere in the body
-f.lp_strings = ProtoField.string("p2.strings", "Decoded Strings")
-
+f.total_len = ProtoField.uint32("p2.total_len","Total Length",base.DEC)
+f.msg_type  = ProtoField.uint32("p2.msg_type","Message Type (raw)",base.HEX)
+f.msg_class = ProtoField.uint8 ("p2.msg_class","Message Class",base.HEX,MSG_CLASS)
+f.seq       = ProtoField.uint32("p2.seq","Sequence",base.DEC)
+f.dir       = ProtoField.uint8 ("p2.dir","Direction",base.HEX,DIR)
+f.bln1      = ProtoField.string("p2.bln1","BLN Name (slot 0)")
+f.dst       = ProtoField.string("p2.dst","Dest/Peer Node (slot 1)")
+f.bln2      = ProtoField.string("p2.bln2","BLN Name (slot 2)")
+f.src       = ProtoField.string("p2.src","Source/Self Node (slot 3)")
+f.opcode    = ProtoField.uint16("p2.opcode","AP2 Function Code",base.HEX,OPCODES)
+f.err       = ProtoField.uint16("p2.err","Error Code",base.HEX,ERRORS)
+f.schema    = ProtoField.string("p2.schema","Expected body fields [struct-derived]")
+f.tlv       = ProtoField.string("p2.tlv","TLV String")
+f.scope     = ProtoField.string("p2.scope","Scope Tag")
+f.priority  = ProtoField.uint8 ("p2.priority","Command Priority",base.HEX,PRIORITY)
+f.value     = ProtoField.float ("p2.value","Value (f32 BE)")
+f.cov_count = ProtoField.uint16("p2.cov.count","COV point count",base.DEC)
+f.cov_point = ProtoField.string("p2.cov.point","COV Point Name")
+f.cov_cond  = ProtoField.bytes ("p2.cov.cond","COV condition/priority block (10B)")
+-- 10-byte condition block, field order from the ASDU schema (1 byte each fits the 10B
+-- exactly; widths/values to confirm against an alarmed/commanded capture). [struct-derived]
+f.cov_pri    = ProtoField.uint8("p2.cov.point_priority","point_priority",base.HEX,PRIORITY)
+f.cov_ctrl   = ProtoField.uint8("p2.cov.control_status","control_status",base.HEX)
+f.cov_oos    = ProtoField.uint8("p2.cov.out_of_service","out_of_service",base.DEC)
+f.cov_fail   = ProtoField.uint8("p2.cov.failed","failed",base.DEC)
+f.cov_proof  = ProtoField.uint8("p2.cov.proof_on","proof_on",base.DEC)
+f.cov_opdis  = ProtoField.uint8("p2.cov.operator_disabled","operator_disabled",base.DEC)
+f.cov_pgmdis = ProtoField.uint8("p2.cov.program_disabled","program_disabled",base.DEC)
+f.cov_cmdal  = ProtoField.uint8("p2.cov.commanded_to_alarm","commanded_to_alarm",base.DEC)
+f.cov_astate = ProtoField.uint8("p2.cov.alarm_state","alarm_state",base.DEC)
+f.cov_apri   = ProtoField.uint8("p2.cov.alarm_priority","alarm_priority",base.DEC)
+f.r_name    = ProtoField.string("p2.roster.name","Node Name")
+f.r_ver     = ProtoField.uint32("p2.roster.ver","Node Version (change generation)")
+f.r_tabver  = ProtoField.uint16("p2.roster.tabver","Table Version")
+f.r_count   = ProtoField.uint16("p2.roster.count","Entry Count")
+f.id_node   = ProtoField.string("p2.id.node","Node Name")
+f.id_site   = ProtoField.string("p2.id.site","Site Name")
+f.id_bln    = ProtoField.string("p2.id.bln","BLN Name")
+f.body      = ProtoField.bytes ("p2.body","Body")
 p2.fields = {
-    f.total_len, f.msg_type, f.sequence,
-    f.dir_byte, f.bln1, f.bln2,
-    f.node_a, f.node_b, f.dst_node, f.src_node, f.sender, f.recipient,
-    f.opcode, f.error_code,
-    f.device_name, f.point_name, f.float_value, f.units,
-    f.value_marker, f.value_sentinel, f.value_comm_status,
-    f.value_err_code, f.value_dtype,
-    f.scanner_name, f.site_name, f.network_name, f.id_timestamp,
-    f.sysinfo_model, f.sysinfo_firmware, f.sysinfo_build,
-    f.port_index, f.port_label,
-    f.rt_peer, f.rt_cost,
-    f.alarm_class, f.alarm_point, f.alarm_description, f.alarm_marker,
-    f.alarm_time_raised, f.alarm_time_now, f.alarm_time_last, f.alarm_value,
-    f.sched_name, f.sched_date, f.sched_setpoint,
-    f.lp_strings,
+  f.total_len,f.msg_type,f.msg_class,f.seq,f.dir,f.bln1,f.dst,f.bln2,f.src,
+  f.opcode,f.err,f.schema,f.tlv,f.scope,f.priority,f.value,
+  f.cov_count,f.cov_point,f.cov_cond,
+  f.cov_pri,f.cov_ctrl,f.cov_oos,f.cov_fail,f.cov_proof,f.cov_opdis,f.cov_pgmdis,f.cov_cmdal,f.cov_astate,f.cov_apri,
+  f.r_name,f.r_ver,f.r_tabver,f.r_count,
+  f.id_node,f.id_site,f.id_bln,f.body,
 }
 
-p2b.fields = { f.beacon_payload }
-
-------------------------------------------------------------------------
--- Helpers
-------------------------------------------------------------------------
-
--- Read a null-terminated ASCII string starting at `offset` in tvb. Returns
--- (string_value, length_including_null). Returns nil on missing terminator.
-local function read_cstring(tvb, offset)
-    local len = tvb:len()
-    if offset >= len then return nil end
-    for i = offset, len - 1 do
-        if tvb(i, 1):uint() == 0 then
-            local s = (i > offset) and tvb(offset, i - offset):string() or ""
-            return s, (i - offset + 1)
-        end
+------------------------------------------------------------------------ helpers
+local function cstr(tvb, off)
+  local n = tvb:len(); if off >= n then return nil end
+  for i = off, n-1 do if tvb(i,1):uint()==0 then return tvb(off,i-off):string(),(i-off+1) end end
+  return nil
+end
+local SCOPE = { SYST=true, NONE=true, CC=true }
+local function tlv_walk(tvb, off, last, tree)
+  local i = off
+  while i + 3 <= last do
+    if tvb(i,1):uint()==0x01 and tvb(i+1,1):uint()==0x00 then
+      local l = tvb(i+2,1):uint()
+      if l > 0 and i+3+l <= last then
+        local s = tvb(i+3,l):string()
+        if SCOPE[s] then
+          tree:add(f.scope, tvb(i,3+l), s)
+          if i+3+l < last then tree:add(f.priority, tvb(i+3+l,1)) end
+        else tree:add(f.tlv, tvb(i,3+l), s) end
+        i = i + 3 + l
+      else i = i + 1 end
+    else i = i + 1 end
+  end
+end
+local function dissect_cov(tvb, off, last, tree)
+  if off+4 > last then return end
+  tree:add(f.cov_count, tvb(off,2)); off = off + 4
+  while off + 3 <= last do
+    if not (tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00) then break end
+    local l = tvb(off+2,1):uint(); if off+3+l > last then break end
+    local pt = tree:add(p2, tvb(off,0), "COV point")
+    pt:add(f.cov_point, tvb(off+3,l)); off = off + 3 + l
+    if off+3 <= last then off = off + 3 end
+    if off+4 <= last then pt:add(f.value, tvb(off,4)); off = off + 4 end
+    if off+10 <= last then
+      local cb = pt:add(f.cov_cond, tvb(off,10))
+      cb:set_text("condition/priority block (10B) [field order struct-derived; confirm w/ alarmed capture]")
+      cb:add(f.cov_pri,   tvb(off,1));   cb:add(f.cov_ctrl,  tvb(off+1,1))
+      cb:add(f.cov_oos,   tvb(off+2,1)); cb:add(f.cov_fail,  tvb(off+3,1))
+      cb:add(f.cov_proof, tvb(off+4,1)); cb:add(f.cov_opdis, tvb(off+5,1))
+      cb:add(f.cov_pgmdis,tvb(off+6,1)); cb:add(f.cov_cmdal, tvb(off+7,1))
+      cb:add(f.cov_astate,tvb(off+8,1)); cb:add(f.cov_apri,  tvb(off+9,1))
+      off = off + 10
     end
-    return nil
+  end
+end
+local function dissect_roster(tvb, off, last, tree)
+  if off+8 > last then return end
+  tree:add(f.r_tabver, tvb(off+4,2)); tree:add(f.r_count, tvb(off+6,2)); off = off + 8
+  while off + 3 <= last do
+    if not (tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00) then break end
+    local l = tvb(off+2,1):uint(); if off+3+l > last then break end
+    local e = tree:add(p2, tvb(off,0), "Node entry")
+    e:add(f.r_name, tvb(off+3,l)); off = off + 3 + l
+    if off+4 <= last then e:add(f.r_ver, tvb(off,4)); off = off + 4 end
+  end
+end
+local function dissect_identity(tvb, off, last, tree)
+  local fl = { f.id_node, f.id_site, f.id_bln }; local idx = 1
+  while off + 3 <= last and idx <= 3 do
+    if not (tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00) then break end
+    local l = tvb(off+2,1):uint(); if off+3+l > last then break end
+    tree:add(fl[idx], tvb(off+3,l)); off = off + 3 + l; idx = idx + 1
+  end
+  if off < last then tlv_walk(tvb, off, last, tree) end
 end
 
--- Pull all `01 00 LL [ASCII]` style LP-strings from a TvbRange. Mirrors
--- _extract_lp_strings in the scanner. Returns a list of {offset, length, value}.
---
--- Important: validate the raw bytes are printable ASCII directly — do NOT
--- rely on `:string()` to filter, because Wireshark's TvbRange:string()
--- truncates at the first NUL byte. A "\0\0" payload would otherwise round-
--- trip as an empty string and pass a pattern-based check, polluting results
--- with phantom empty entries (the alarm-header `01 00 02 00 00` padding TLV
--- exhibits this).
-local function extract_lp_strings(tvb)
-    local out = {}
-    local len = tvb:len()
-    local i = 0
-    while i < len - 3 do
-        -- TLV header: tag 0x01 + u16 BE length (spec §9.2).
-        -- High byte is 0x00 for all observed TEC names (capped at 30 chars
-        -- per §2.4), but read the full u16 to match spec.
-        if tvb(i, 1):uint() == 0x01 then
-            local slen = tvb(i+1, 2):uint()
-            if slen > 0 and slen < 100 and (i + 3 + slen) <= len then
-                local ok = true
-                for j = i + 3, i + 2 + slen do
-                    local b = tvb(j, 1):uint()
-                    if b < 0x20 or b > 0x7E then ok = false; break end
-                end
-                if ok then
-                    table.insert(out, {
-                        offset = i,
-                        length = 3 + slen,
-                        value  = tvb(i+3, slen):string(),
-                    })
-                    i = i + 3 + slen
-                else
-                    i = i + 1
-                end
-            else
-                i = i + 1
-            end
-        else
-            i = i + 1
-        end
+------------------------------------------------------------------------ one PDU
+local function dissect_one(tvb, pinfo, tree)
+  local total = tvb(0,4):uint()
+  local mclass = tvb(7,1):uint()
+  local dir = tvb(12,1):uint()
+  local st = tree:add(p2, tvb(0,total), "Siemens P2")
+  st:add(f.total_len, tvb(0,4)); st:add(f.msg_type, tvb(4,4)); st:add(f.msg_class, tvb(7,1))
+  st:add(f.seq, tvb(8,4)); st:add(f.dir, tvb(12,1))
+  local off = 13
+  local sfields = { f.bln1, f.dst, f.bln2, f.src }; local slots = {}
+  for s = 1, 4 do
+    local val, adv = cstr(tvb, off); if not val then break end
+    st:add(sfields[s], tvb(off, adv-1), val); slots[s] = val; off = off + adv
+  end
+  local opname = nil
+  if dir == 0x00 then
+    if off + 2 <= total then
+      local op = tvb(off,2):uint(); st:add(f.opcode, tvb(off,2))
+      opname = OPCODES[op] or string.format("unknown_0x%04X", op)
+      off = off + 2
+      if off < total then
+        local bt = st:add(p2, tvb(off, total-off), "Body ("..(total-off).." B)")
+        if OPSCHEMA[op] then bt:add(f.schema, tvb(off,0), OPSCHEMA[op]) end
+        local ok = pcall(function()
+          if op==0x0274 then dissect_cov(tvb,off,total,bt)
+          elseif op==0x4634 or op==0x4636 then dissect_roster(tvb,off,total,bt)
+          elseif op==0x4640 then dissect_identity(tvb,off,total,bt)
+          else tlv_walk(tvb,off,total,bt) end
+        end)
+        if not ok then tlv_walk(tvb,off,total,bt) end
+      end
     end
-    return out
+  elseif dir == 0x05 then
+    if total >= off+2 then st:add(f.err, tvb(total-2,2)) end
+    if off < total-2 then tlv_walk(tvb, off, total-2, st:add(p2, tvb(off,total-2-off), "Body")) end
+  else
+    if off < total then
+      local bt = st:add(p2, tvb(off,total-off), "Body ("..(total-off).." B)")
+      pcall(function() tlv_walk(tvb, off, total, bt) end)
+    end
+  end
+  local cls = MSG_CLASS[mclass] or string.format("0x%02X", mclass)
+  local who = (slots[4] or "?").."->"..(slots[2] or "?")
+  if dir == 0x00 then pinfo.cols.info:set(cls.."  "..(opname or "?").."  "..who)
+  elseif dir == 0x05 then
+    local ec = (total>=2) and tvb(total-2,2):uint() or 0
+    pinfo.cols.info:set("ERROR "..(ERRORS[ec] or string.format("0x%04X",ec)).."  seq="..tvb(8,4):uint())
+  else pinfo.cols.info:set("success  seq="..tvb(8,4):uint().."  "..who) end
 end
 
--- Extract u16-BE-prefixed strings (the format used in some sysinfo bodies).
-local function extract_u16lp_strings(tvb)
-    local out = {}
-    local len = tvb:len()
-    local i = 0
-    while i < len - 2 do
-        local slen = tvb(i, 2):uint()
-        if slen > 0 and slen < 1024 and (i + 2 + slen) <= len then
-            local ok = true
-            for j = i + 2, i + 1 + slen do
-                local b = tvb(j, 1):uint()
-                if b < 0x20 or b > 0x7E then ok = false; break end
-            end
-            if ok then
-                table.insert(out, {
-                    offset = i, length = 2 + slen, value = tvb(i+2, slen):string()
-                })
-                i = i + 2 + slen
-            else
-                i = i + 1
-            end
-        else
-            i = i + 1
-        end
-    end
-    return out
-end
-
--- Decode an 8-byte BACnet date+time block. Format from the protocol spec's
--- alarm section: year-1900 / month / day / day-of-week / hour / min / sec / hund.
-local function decode_bacnet_datetime(tvb, off)
-    if off + 8 > tvb:len() then return nil end
-    local y   = tvb(off,     1):uint()
-    local mo  = tvb(off + 1, 1):uint()
-    local d   = tvb(off + 2, 1):uint()
-    local dow = tvb(off + 3, 1):uint()
-    local h   = tvb(off + 4, 1):uint()
-    local mi  = tvb(off + 5, 1):uint()
-    local s   = tvb(off + 6, 1):uint()
-    local hu  = tvb(off + 7, 1):uint()
-    if y < 0x70 then return nil end                   -- year < 2012: implausible
-    if mo < 1 or mo > 12 then return nil end
-    if d  < 1 or d  > 31 then return nil end
-    if dow > 7 then return nil end
-    if h > 23 or mi > 59 or s > 59 or hu > 99 then return nil end
-    local dows = {"Mon","Tue","Wed","Thu","Fri","Sat","Sun"}
-    local dows_label = (dow >= 1 and dow <= 7) and dows[dow] or "?"
-    return string.format("%04d-%02d-%02d %s %02d:%02d:%02d.%02d",
-        y + 1900, mo, d, dows_label, h, mi, s, hu)
-end
-
--- Decode a 4-byte BACnet date — used inside 0x098D schedule entries and
--- 0x5020 schedule writes. Format: [year-1900][month][day][day-of-week].
-local function decode_bacnet_date4(tvb, off)
-    if off + 4 > tvb:len() then return nil end
-    local y   = tvb(off,     1):uint()
-    local mo  = tvb(off + 1, 1):uint()
-    local d   = tvb(off + 2, 1):uint()
-    local dow = tvb(off + 3, 1):uint()
-    if y < 0x70 then return nil end
-    if mo < 1 or mo > 12 then return nil end
-    if d  < 1 or d  > 31 then return nil end
-    if dow < 1 or dow > 7 then return nil end
-    local dows = {"Mon","Tue","Wed","Thu","Fri","Sat","Sun"}
-    return string.format("%04d-%02d-%02d (%s)", y + 1900, mo, d, dows[dow])
-end
-
-------------------------------------------------------------------------
--- Value-block detection + decode
--- See spec §14 (Response Parsing — Point Reads) and
--- "Comm status (the stale-cache trick)".
-------------------------------------------------------------------------
-
--- Returns offset of [01 00 00] value-block marker, or nil. Mirrors the
--- scanner's _parse_read_response with the documented off-by-one fix:
--- bound is `len - 13` so payload[i..i+13] is fully addressable.
---
--- The predicate must be tight: 0x0981 enumerate responses contain `01 00 00`
--- bytes embedded in the per-entry metadata block (e.g. `01 00 00 04 00 02 00 00`
--- right after the device-name TLV) whose preceding byte is the last ASCII
--- char of the device name. Without sentinel-shape and reserved-byte checks,
--- those false-match and the dissector decodes garbage floats and a phantom
--- "comm STALE" tag pulled from whatever bytes happen to follow. Verified
--- against an enumerate-response capture, where SHAPE A enumerate metadata produces
--- exactly this confusion.
-local function find_value_block(tvb)
-    local len = tvb:len()
-    for i = 1, len - 14 do
-        if  tvb(i, 1):uint()   == 0x01
-        and tvb(i+1, 1):uint() == 0x00
-        and tvb(i+2, 1):uint() == 0x00
-        then
-            -- Sentinel shapes: see spec §14.3.
-            -- Real value blocks have one of these patterns at +3..+6:
-            --   `3F FF FF XX` — R1 ("quality flags" register), where XX
-            --                   varies. The protocol spec documents
-            --                   `3F FF FF FF` but the F7 variant — and
-            --                   probably others — is real and common in
-            --                   the field. Lock only the 3-byte prefix.
-            --   `00 00 00 00` — R2/R3 (explicit "all flags clear" /
-            --                   modern compact form).
-            -- The 09xx enumerate-response per-entry metadata block has
-            -- shapes like `04 00 02 00`, `03 00 02 00`, etc. that
-            -- false-match a permissive scan; either the `3F FF FF`
-            -- prefix or the all-zero check filters them out.
-            local s0 = tvb(i+3, 1):uint()
-            local s1 = tvb(i+4, 1):uint()
-            local s2 = tvb(i+5, 1):uint()
-            local s3 = tvb(i+6, 1):uint()
-            local sentinel_3fff = (s0 == 0x3F and s1 == 0xFF and s2 == 0xFF)
-            local sentinel_zero = (s0 == 0x00 and s1 == 0x00 and s2 == 0x00 and s3 == 0x00)
-            -- Byte +7 is the "reserved" byte of the 3-byte status group
-            -- (sentinel:4 + reserved:1 + comm_status:1 + err/dtype:1).
-            -- Always 0x00 across all observed read responses — including
-            -- STALE responses, where it's byte +8 (comm_status) that flips
-            -- to 0x01, never +7.
-            local reserved_ok = (tvb(i+7, 1):uint() == 0x00)
-            if (sentinel_3fff or sentinel_zero) and reserved_ok then
-                local prev = tvb(i-1, 1):uint()
-                local is_ascii_end = (prev >= 0x41 and prev <= 0x5A)
-                                  or (prev >= 0x61 and prev <= 0x7A)
-                                  or (prev >= 0x30 and prev <= 0x39)
-                                  or prev == 0x20 or prev == 0x2E
-                                  or prev == 0x5F or prev == 0x2D
-                if is_ascii_end then
-                    -- Cheap float-leading-byte sanity check
-                    local first = tvb(i+10, 1):uint()
-                    if first <= 0x48
-                       or first == 0xBF or first == 0xC0 or first == 0xC1
-                       or first == 0xC2 or first == 0xC3 or first == 0xC4
-                       or first == 0xC5
-                    then
-                        return i
-                    end
-                end
-            end
-        end
-    end
-    return nil
-end
-
--- Decode value block at offset `vb`. Adds a sub-tree with marker, sentinel,
--- comm-status, error-code, data-type, and value. Returns the float value.
-local function dissect_value_block(tvb, vb, parent, pinfo)
-    local vtree = parent:add(p2, tvb(vb, 14), "Value Block")
-    vtree:add(f.value_marker,      tvb(vb,     3))
-    vtree:add(f.value_sentinel,    tvb(vb + 3, 4))
-    -- 7-byte metadata at offsets +3..+9, broken into:
-    --   +3..+6: sentinel (4 bytes; documented separately)
-    --   +7    : reserved (always 0x00 observed)
-    --   +8    : comm_status — 0x00 live / 0x01 STALE (PROTOCOL "Comm status")
-    --             this is the "second byte of the metadata block" the doc
-    --             refers to, counting from the start of the 3-byte trailer
-    --   +9    : err_code in R1/R2 (legacy dialect; 0x06 = typical comm err)
-    --             OR data-type code in R3 (modern dialect / SHAPE B). The
-    --             role depends on whether the sentinel at +3..+6 is non-zero
-    --             (R1, then +9 is err_code) or zero (R2/R3, then +9 may be
-    --             a data-type code).
-    vtree:add(f.value_comm_status, tvb(vb + 8, 1))
-    vtree:add(f.value_err_code,    tvb(vb + 9, 1))
-    vtree:add(f.value_dtype,       tvb(vb + 9, 1))
-    vtree:add(f.float_value,       tvb(vb + 10, 4))
-    local val = tvb(vb + 10, 4):float()
-
-    -- If the device is comm-faulted, flag it loudly in the info column.
-    if tvb(vb + 8, 1):uint() == 0x01 then
-        pinfo.cols.info:append(" [#COM stale]")
-    end
-    return val
-end
-
-------------------------------------------------------------------------
--- Routing header
--- spec §4.6 (Routing Header — Name Slot Ordering): slot 2 is the
--- destination, slot 4 is the source, for ALL message types. Verified
--- across a large corpus. The IdentifyBlock body's
--- first TLV agrees with slot 4 (sender's self-name).
-------------------------------------------------------------------------
-
--- Parses [dir][BLN\0][slot2\0][BLN\0][slot4\0]. Returns body offset.
-local function dissect_routing(tvb, tree, msg_type)
-    local rtree = tree:add(p2, tvb, "Routing Header")
-    rtree:add(f.dir_byte, tvb(0, 1))
-    local fields = { f.bln1, f.dst_node, f.bln2, f.src_node }
-    local off = 1
-    for _, field in ipairs(fields) do
-        local s, n = read_cstring(tvb, off)
-        if not s then return nil end
-        rtree:add(field, tvb(off, n - 1), s)
-        if field == f.dst_node then
-            rtree:add(f.node_a, tvb(off, n - 1), s)
-        elseif field == f.src_node then
-            rtree:add(f.node_b, tvb(off, n - 1), s)
-        end
-        off = off + n
-    end
-    rtree:set_len(off)
-    return off
-end
-
-------------------------------------------------------------------------
--- Identity block (0x4640) — also the body of CONNECT/ANNOUNCE handshakes
--- and mid-session identity refreshes inside any msg type.
-------------------------------------------------------------------------
-
-local function dissect_identify(tvb, tree, pinfo)
-    local strings = extract_lp_strings(tvb)
-    local labels = { f.scanner_name, f.site_name, f.network_name }
-    for i, s in ipairs(strings) do
-        if i <= #labels then
-            tree:add(labels[i], tvb(s.offset + 3, s.length - 3), s.value)
-        end
-    end
-    if #strings >= 1 then
-        pinfo.cols.info:append(" scanner=" .. strings[1].value)
-    end
-
-    -- Embedded Unix epoch timestamp lives at offset (len-7..len-4) of the
-    -- identity payload — see spec §9.9. The byte
-    -- before is always 0x00 padding. PXC may validate this; scanners send
-    -- int(time.time()) here.
-    local len = tvb:len()
-    if len >= 7 then
-        local ts_off = len - 7
-        -- Sanity: leading pad byte must be 0x00 and the resulting epoch
-        -- must look plausible (after 2010, before 2070).
-        if tvb(ts_off, 1):uint() == 0x00 then
-            local epoch = tvb(ts_off + 1, 4):uint()
-            if epoch >= 1262304000 and epoch <= 3155760000 then
-                local ts = NSTime.new(epoch, 0)
-                tree:add(f.id_timestamp, tvb(ts_off + 1, 4), ts)
-            end
-        end
-    end
-end
-
-------------------------------------------------------------------------
--- Alarm-record dissector for 0x0508 (PXC->DCC) and 0x0509 (DCC->PXC).
-------------------------------------------------------------------------
-
-local function dissect_alarm_record(body, tree, pinfo)
-    if body:len() < 10 then return end
-
-    local strings = extract_lp_strings(body)
-    if #strings >= 1 then
-        tree:add(f.alarm_class,
-            body(strings[1].offset + 3, strings[1].length - 3),
-            strings[1].value)
-    end
-
-    -- Subsequent LP-strings: typically [point_name][point_name][description]
-    local data_strings = {}
-    for i = 2, #strings do
-        table.insert(data_strings, strings[i])
-    end
-    if #data_strings >= 1 then
-        tree:add(f.alarm_point,
-            body(data_strings[1].offset + 3, data_strings[1].length - 3),
-            data_strings[1].value)
-        pinfo.cols.info:append(string.format(" point=%s", data_strings[1].value))
-    end
-    if #data_strings >= 3 then
-        tree:add(f.alarm_description,
-            body(data_strings[3].offset + 3, data_strings[3].length - 3),
-            data_strings[3].value)
-    end
-
-    -- Optional 4-char ASCII marker between two zero-pad runs (only in 0x0508)
-    for i = 4, body:len() - 4 do
-        local b1, b2, b3, b4 = body(i,1):uint(), body(i+1,1):uint(),
-                               body(i+2,1):uint(), body(i+3,1):uint()
-        if b1 >= 0x41 and b1 <= 0x7A
-           and b2 >= 0x41 and b2 <= 0x7A
-           and b3 >= 0x41 and b3 <= 0x7A
-           and b4 >= 0x41 and b4 <= 0x7A
-           and body(i-4, 4):uint() == 0
-        then
-            tree:add(f.alarm_marker, body(i, 4), body(i, 4):string())
-            break
-        end
-    end
-
-    -- Hunt for BACnet datetime blocks (8 bytes each); first three are
-    -- typically raise / current / last-transition.
-    local dt_count = 0
-    local dt_labels = { f.alarm_time_raised, f.alarm_time_now, f.alarm_time_last }
-    local i = 0
-    while i + 8 <= body:len() and dt_count < #dt_labels do
-        local ts = decode_bacnet_datetime(body, i)
-        if ts then
-            tree:add(dt_labels[dt_count + 1], body(i, 8), ts)
-            dt_count = dt_count + 1
-            i = i + 8
-        else
-            i = i + 1
-        end
-    end
-end
-
-------------------------------------------------------------------------
--- 0x010C SystemInfo response decoder
-------------------------------------------------------------------------
-
-local function dissect_sysinfo_response(tvb, tree, pinfo)
-    -- Strings here are typically u16-BE-prefixed (per scanner code paths).
-    -- Fall back to LP-strings if u16 fails.
-    local strings = extract_u16lp_strings(tvb)
-    if #strings == 0 then
-        strings = extract_lp_strings(tvb)
-    end
-    local fields = { f.sysinfo_model, f.sysinfo_firmware, f.sysinfo_build }
-    for i, s in ipairs(strings) do
-        if i <= #fields then
-            local val_off = (s.length == 2 + #s.value) and (s.offset + 2)
-                                                       or  (s.offset + 3)
-            tree:add(fields[i], tvb(val_off, #s.value), s.value)
-        end
-    end
-    if #strings >= 1 then
-        pinfo.cols.info:append(" model=" .. strings[1].value)
-    end
-    if #strings >= 2 then
-        pinfo.cols.info:append(" fw=" .. strings[2].value)
-    end
-end
-
-------------------------------------------------------------------------
--- 0x099F GetPortConfig
--- Request body: 09 9F 00 04 XX  (5 bytes total; XX = port index)
--- Response: TLV strings — three dot-separated config rows + a port label.
-------------------------------------------------------------------------
-
-local function dissect_port_config(tvb, tree, pinfo, is_request)
-    if is_request and tvb:len() >= 3 then
-        -- Request: skip 2-byte separator, then port index byte
-        tree:add(f.port_index, tvb(2, 1))
-        pinfo.cols.info:append(string.format(" port=0x%02X", tvb(2, 1):uint()))
-    else
-        local strings = extract_lp_strings(tvb)
-        for _, s in ipairs(strings) do
-            -- Last string in a typical response is the human label
-            -- ("USB Modem port", "HMI port"); earlier ones are config rows.
-            if not s.value:find(";") and #s.value > 2 then
-                tree:add(f.port_label, tvb(s.offset + 3, s.length - 3), s.value)
-                pinfo.cols.info:append(" label=\"" .. s.value .. "\"")
-            else
-                tree:add(p2, tvb(s.offset, s.length), "Config: " .. s.value)
-            end
-        end
-    end
-end
-
-------------------------------------------------------------------------
--- 0x4634 RoutingTable — list of {LP-name, u32 BE cost} entries.
-------------------------------------------------------------------------
-
-local function dissect_routing_table(tvb, tree, pinfo)
-    local stree = tree:add(p2, tvb, "Routing Table Entries")
-    local i = 0
-    local count = 0
-    local len = tvb:len()
-    while i + 7 < len do
-        -- TLV header: tag 0x01 + u16 BE length (spec §9.2).
-        if tvb(i, 1):uint() == 0x01 then
-            local slen = tvb(i+1, 2):uint()
-            if slen > 0 and slen < 64 and (i + 3 + slen + 4) <= len then
-                local s = tvb(i+3, slen):string()
-                if s:match("^[%w%p%s|]*$") then
-                    local cost = tvb(i + 3 + slen, 4):uint()
-                    -- First-TLV invariant per spec §12.10:
-                    -- the first entry MUST be $paneldefault. Flag and
-                    -- bail on anything else so a malformed/forged frame
-                    -- doesn't get rendered as if it were valid topology.
-                    if count == 0 and s ~= "$paneldefault" then
-                        stree:add_expert_info(PI_PROTOCOL, PI_WARN,
-                            "First routing-table TLV is not $paneldefault — "
-                            .. "frame is malformed (spec §12.10)")
-                        return
-                    end
-                    local etree = stree:add(p2, tvb(i, 3 + slen + 4),
-                        string.format("%s = %u", s, cost))
-                    etree:add(f.rt_peer, tvb(i + 3, slen), s)
-                    etree:add(f.rt_cost, tvb(i + 3 + slen, 4), cost)
-                    i = i + 3 + slen + 4
-                    count = count + 1
-                else
-                    i = i + 1
-                end
-            else
-                i = i + 1
-            end
-        else
-            i = i + 1
-        end
-    end
-    if count > 0 then
-        pinfo.cols.info:append(string.format(" (%d peers)", count))
-    end
-end
-
-------------------------------------------------------------------------
--- Schedule-write decoder (0x098D / 0x5020) — best-effort surface of the
--- schedule name, BACnet date entries, and f32 setpoints. Full structure
--- per spec §12.17 (Schedule Operations).
-------------------------------------------------------------------------
-
-local function dissect_schedule_payload(tvb, tree, pinfo)
-    local strings = extract_lp_strings(tvb)
-    if #strings >= 1 then
-        local s = strings[1]
-        tree:add(f.sched_name, tvb(s.offset + 3, s.length - 3), s.value)
-        pinfo.cols.info:append(" sched=" .. s.value)
-    end
-    -- Walk for plausible 4-byte BACnet dates and f32-shaped setpoints.
-    local i = 0
-    local len = tvb:len()
-    while i + 4 <= len do
-        local d = decode_bacnet_date4(tvb, i)
-        if d then
-            tree:add(f.sched_date, tvb(i, 4), d)
-            i = i + 4
-        else
-            i = i + 1
-        end
-    end
-end
-
-------------------------------------------------------------------------
--- Generic name/point extractor used by simple read-shaped requests
-------------------------------------------------------------------------
-
-local function dissect_name_pair(rest, tree, pinfo)
-    local strings = extract_lp_strings(rest)
-    if #strings >= 2 then
-        tree:add(f.device_name,
-            rest(strings[1].offset + 3, strings[1].length - 3), strings[1].value)
-        tree:add(f.point_name,
-            rest(strings[2].offset + 3, strings[2].length - 3), strings[2].value)
-        pinfo.cols.info:append(string.format(" %s/%s",
-            strings[1].value, strings[2].value))
-    elseif #strings == 1 then
-        tree:add(f.point_name,
-            rest(strings[1].offset + 3, strings[1].length - 3), strings[1].value)
-        pinfo.cols.info:append(string.format(" (BLN virtual) %s", strings[1].value))
-    end
-end
-
-------------------------------------------------------------------------
--- Value-update opcodes (0x0274 ValuePush, 0x0240 WriteWithQuality).
--- Empirically validated against this capture's 5033 / 5034 traffic:
---
--- 0x0274 PXC->DCC (5034): 02 74 [00 01 00 00] [LP device] [LP point] [f32 BE]
--- 0x0274 DCC->PXC (5033): 02 74 [00 01 00 00] [LP point] [01 00 00] [f32 BE]
--- 0x0240 PXC->DCC (5034): 02 40 [LP "NONE"] 00 [3FFFFFFF] 00 00 [LP point]
---                         01 00 00 00 00 01 00 00 01 00 00 [f32 BE]
---
--- For 0x0274 we can place the float at the byte after the last LP-string.
--- For 0x0240 we walk forward to find a `01 00 00` marker preceded by ASCII
--- and read 4 bytes at marker+11 (slightly different layout from R1/R2/R3
--- read responses).
-------------------------------------------------------------------------
-
-local function dissect_value_update(rest, tree, pinfo, opcode, src_port)
-    local strings = extract_lp_strings(rest)
-    if #strings == 0 then return end
-
-    if opcode == 0x0274 then
-        -- Branch on the wire shape rather than the port: PXC->DCC carries
-        -- two LP-strings (device + point); DCC->PXC carries one (point
-        -- only). This is more reliable than port-checking — Mode C flows
-        -- can put DCC->5033 PXC traffic on either side.
-        if #strings >= 2 then
-            tree:add(f.device_name,
-                rest(strings[1].offset + 3, strings[1].length - 3),
-                strings[1].value)
-            tree:add(f.point_name,
-                rest(strings[2].offset + 3, strings[2].length - 3),
-                strings[2].value)
-            local foff = strings[2].offset + strings[2].length
-            if foff + 4 <= rest:len() then
-                tree:add(f.float_value, rest(foff, 4))
-                pinfo.cols.info:append(string.format(" %s/%s = %g",
-                    strings[1].value, strings[2].value, rest(foff, 4):float()))
-            else
-                pinfo.cols.info:append(string.format(" %s/%s",
-                    strings[1].value, strings[2].value))
-            end
-        else
-            -- DCC->PXC push-write: just a point name; float sits 3 bytes
-            -- past the LP-string end (skipping the `01 00 00` empty TLV).
-            tree:add(f.point_name,
-                rest(strings[1].offset + 3, strings[1].length - 3),
-                strings[1].value)
-            local foff = strings[1].offset + strings[1].length + 3
-            if foff + 4 <= rest:len() then
-                tree:add(f.float_value, rest(foff, 4))
-                pinfo.cols.info:append(string.format(" (BLN-push) %s = %g",
-                    strings[1].value, rest(foff, 4):float()))
-            else
-                pinfo.cols.info:append(string.format(" (BLN-push) %s",
-                    strings[1].value))
-            end
-        end
-
-    elseif opcode == 0x0240 then
-        -- Device is literally "NONE" for panel-globals; point follows.
-        if #strings >= 2 then
-            tree:add(f.device_name,
-                rest(strings[1].offset + 3, strings[1].length - 3),
-                strings[1].value)
-            tree:add(f.point_name,
-                rest(strings[2].offset + 3, strings[2].length - 3),
-                strings[2].value)
-            -- Look for the value-block marker after the point name. Per
-            -- spec §12.6, the f32
-            -- sits 11 bytes past the FIRST `01 00 00` marker that follows
-            -- the point TLV — different from the R1/R2/R3 read-response
-            -- shape, so don't reuse find_value_block here.
-            local scan_from = strings[2].offset + strings[2].length
-            local found = nil
-            for j = scan_from, rest:len() - 14 do
-                if  rest(j, 1):uint()   == 0x01
-                and rest(j+1, 1):uint() == 0x00
-                and rest(j+2, 1):uint() == 0x00 then
-                    found = j
-                    break
-                end
-            end
-            if found and found + 15 <= rest:len() then
-                tree:add(f.float_value, rest(found + 11, 4))
-                pinfo.cols.info:append(string.format(" %s/%s = %g",
-                    strings[1].value, strings[2].value,
-                    rest(found + 11, 4):float()))
-            else
-                pinfo.cols.info:append(string.format(" %s/%s",
-                    strings[1].value, strings[2].value))
-            end
-        end
-    end
-end
-
-------------------------------------------------------------------------
--- Body dispatcher: dispatches operational opcodes regardless of which
--- msg type carries them (0x33, 0x34, or Mode C 0x2E/0x2F).
-------------------------------------------------------------------------
-
-local function dispatch_request(opcode, rest, btree, pinfo, src_port)
-    if opcode == 0x0271 or opcode == 0x0220 or opcode == 0x0272
-            or opcode == 0x0273 or opcode == 0x0241 or opcode == 0x0244 then
-        dissect_name_pair(rest, btree, pinfo)
-
-    elseif opcode == 0x4640 then
-        dissect_identify(rest, btree, pinfo)
-
-    elseif opcode == 0x0508 or opcode == 0x0509 then
-        dissect_alarm_record(rest, btree, pinfo)
-
-    elseif opcode == 0x010C then
-        -- Empty-body request (`01 0C` only). Nothing to decode here.
-
-    elseif opcode == 0x099F then
-        dissect_port_config(rest, btree, pinfo, true)
-
-    elseif opcode == 0x4634 then
-        dissect_routing_table(rest, btree, pinfo)
-
-    elseif opcode == 0x4636 or opcode == 0x4647 then
-        -- Two body shapes observed for this opcode-class:
-        --   1) SYST-wildcard pattern body `01 00 04 'SYST' 23 3F FF FF FF`.
-        --      Flagged inline so analysts can spot it.
-        --   2) ReplChanges body containing <name, IP> records wrapped
-        --      in sub-opcode 0x462D. Decoded record-by-record below.
-        if rest:len() >= 9 then
-            local first9 = rest(0, 9):bytes():tohex()
-            local SYST_WILDCARD = "010004535953542333FFFFFF"
-            if string.find(string.upper(first9 .. (rest:len() >= 12 and rest(9, 3):bytes():tohex() or "")),
-                           SYST_WILDCARD, 1, true) then
-                btree:add(p2, rest(0, math.min(12, rest:len())),
-                    string.format("SYST-wildcard pattern body on opcode 0x%04X", opcode))
-                pinfo.cols.info:append(string.format(" [SYST-wildcard 0x%04X]", opcode))
-            else
-                -- Look for ReplChanges body marker: sub-opcode 0x462D appearing
-                -- within first ~50 bytes. If present, the body is a
-                -- peer-table push containing <name, IP> records.
-                if rest:len() >= 30 then
-                    local scan_end = math.min(80, rest:len() - 2)
-                    local found_462d = false
-                    for scan_i = 0, scan_end do
-                        if rest(scan_i, 2):uint() == 0x462D then
-                            found_462d = true
-                            break
-                        end
-                    end
-                    if found_462d then
-                        btree:add(p2, rest(0, math.min(40, rest:len())),
-                            "0x4636 ReplChanges: BLN-wide peer-table push (body carries <name, IP> records via sub-opcode 0x462D)")
-                        pinfo.cols.info:append(" [ReplChanges push]")
-                        -- Surface any name strings found in the body
-                        local strings = extract_lp_strings(rest)
-                        if #strings >= 1 then
-                            local raw = ""
-                            for idx, s in ipairs(strings) do
-                                if idx > 8 then raw = raw .. ", ..."; break end
-                                if idx > 1 then raw = raw .. ", " end
-                                raw = raw .. s.value
-                            end
-                            btree:add(f.lp_strings, rest, raw)
-                        end
-                    end
-                end
-            end
-        end
-
-    elseif opcode == 0x464A or opcode == 0x464B or opcode == 0x464C then
-        -- Peer-table write opcodes. Surface the peer-name string from the
-        -- body so the analyst can see what's being written.
-        btree:add(p2, rest(0, math.min(16, rest:len())),
-            "Peer-table write — registers peer-name in BLN peer table via replication")
-        pinfo.cols.info:append(string.format(" [peer-write 0x%04X]", opcode))
-        local strings = extract_lp_strings(rest)
-        if #strings >= 1 then
-            btree:add(f.lp_strings, rest, strings[1].value)
-            pinfo.cols.info:append(string.format(" name=%s", strings[1].value))
-        end
-
-    elseif opcode == 0x464D then
-        -- BLN topology query. Empty body in the request; the response is
-        -- a ~2KB body containing the BLN peer inventory.
-        btree:add(p2, rest(0, math.min(2, rest:len())),
-            "BLN topology query (response carries peer inventory)")
-        pinfo.cols.info:append(" [topology-query]")
-
-    elseif opcode == 0x0274 or opcode == 0x0240 then
-        dissect_value_update(rest, btree, pinfo, opcode, src_port)
-
-    elseif opcode == 0x4222 or opcode == 0x4221 or opcode == 0x4220
-            or opcode == 0x4200 or opcode == 0x02A8 or opcode == 0x0291
-            or opcode == 0x0294 or opcode == 0x0295 then
-        -- SYST/device/point read or write — surface strings; value
-        -- breakout differs across these and isn't fully byte-mapped yet.
-        local strings = extract_lp_strings(rest)
-        if #strings >= 1 then
-            local raw = ""
-            for i, s in ipairs(strings) do
-                if i > 1 then raw = raw .. ", " end
-                raw = raw .. s.value
-            end
-            btree:add(f.lp_strings, rest, raw)
-            pinfo.cols.info:append(" " .. raw)
-        end
-
-    elseif opcode == 0x098C or opcode == 0x098D
-            or opcode == 0x098E or opcode == 0x098F
-            or opcode == 0x5020 or opcode == 0x5022 or opcode == 0x5003 then
-        dissect_schedule_payload(rest, btree, pinfo)
-
-    elseif opcode == 0x4100 or opcode == 0x4103
-            or opcode == 0x4104 or opcode == 0x4106 then
-        -- PPCL editor: first LP-string is the program name
-        local strings = extract_lp_strings(rest)
-        if #strings >= 1 then
-            btree:add(f.point_name,
-                rest(strings[1].offset + 3, strings[1].length - 3),
-                strings[1].value)
-            pinfo.cols.info:append(string.format(" prog=%s", strings[1].value))
-        end
-
-    else
-        -- Generic: dump strings for analysis
-        local strings = extract_lp_strings(rest)
-        if #strings > 0 then
-            local raw = ""
-            for i, s in ipairs(strings) do
-                if i > 1 then raw = raw .. ", " end
-                raw = raw .. s.value
-            end
-            btree:add(f.lp_strings, rest, raw)
-        end
-    end
-end
-
-------------------------------------------------------------------------
--- Per-frame dissector
-------------------------------------------------------------------------
-
--- Helper: does the body start with an 0x4640 IdentifyBlock marker? Used
--- to distinguish CONNECT/ANNOUNCE handshake (or mid-session identity
--- refresh) from Mode C operational opcode framing — see the protocol spec
--- "Three connection modes" / "Implementation note".
-local function body_is_identify(body)
-    return body:len() >= 2
-       and body(0, 1):uint() == 0x46
-       and body(1, 1):uint() == 0x40
-end
-
-local function dissect_one_frame(tvb, pinfo, root)
-    local total_len = tvb(0, 4):uint()
-    local msg_type  = tvb(4, 4):uint()
-    local sequence  = tvb(8, 4):uint()
-
-    -- src_port lets value-update opcodes branch on the listening port
-    -- (0x0274 has direction-dependent wire format; see the protocol spec).
-    local src_port = pinfo.src_port or 0
-
-    local tree = root:add(p2, tvb(0, total_len), "Siemens P2")
-
-    local htree = tree:add(p2, tvb(0, 12), "Frame Header")
-    htree:add(f.total_len, tvb(0, 4))
-    htree:add(f.msg_type,  tvb(4, 4))
-    htree:add(f.sequence,  tvb(8, 4))
-
-    pinfo.cols.protocol = "P2"
-    local mt_label = MSG_TYPES[msg_type] or string.format("0x%X", msg_type)
-    pinfo.cols.info:set(string.format("seq=%d %s", sequence, mt_label))
-
-    if total_len <= 12 then
-        return total_len
-    end
-
-    local payload = tvb(12, total_len - 12)
-    if payload:len() < 1 then
-        return total_len
-    end
-
-    local dir_byte = payload(0, 1):uint()
-
-    -- Routing header (always present in DATA/HEARTBEAT/CONNECT/ANNOUNCE)
-    local body_off = dissect_routing(payload, tree, msg_type)
-    if not body_off then return total_len end
-
-    local is_op_carrier = (msg_type == 0x33) or (msg_type == 0x34)
-    local is_handshake_carrier = (msg_type == 0x2E) or (msg_type == 0x2F)
-
-    if not is_op_carrier and not is_handshake_carrier then
-        pinfo.cols.info:append(" [" .. (DIR_BYTES[dir_byte] or "?") .. "]")
-        return total_len
-    end
-
-    if payload:len() <= body_off + 2 then
-        -- Bare-opcode session ping or pure ACK; nothing further to parse.
-        return total_len
-    end
-
-    local body = payload(body_off, payload:len() - body_off)
-
-    -- For CONNECT/ANNOUNCE, the body is normally a 0x4640 IdentifyBlock —
-    -- but in Mode C headless flows it can be an operational opcode instead.
-    -- Discriminate on the first 2 bytes after the routing header.
-    if is_handshake_carrier and body_is_identify(body) then
-        local btree = tree:add(p2, body, "IdentifyBlock (handshake/refresh)")
-        btree:add(f.opcode, body(0, 2))
-        local rest = body(2, body:len() - 2)
-        dissect_identify(rest, btree, pinfo)
-        pinfo.cols.info:append(" [Identify]")
-        return total_len
-    end
-
-    -- Mode C tag for non-identify 0x2E/0x2F frames so the user can see at a
-    -- glance that operational ops are riding inside CONNECT/ANNOUNCE framing.
-    if is_handshake_carrier then
-        pinfo.cols.info:append(" [Mode C]")
-    end
-
-    -- Unified opcode dispatcher (handles both 0x33/0x34 DATA/HEARTBEAT and
-    -- Mode C operational frames). Opcodes appear on requests (dir=0x00);
-    -- responses are matched to requests by sequence number, so we dispatch
-    -- on the direction byte for response decoding.
-    if dir_byte == 0x00 then
-        local opcode = body(0, 2):uint()
-        local op_name = OPCODES[opcode] or string.format("unknown_0x%04X", opcode)
-        local btree = tree:add(p2, body, "Request — " .. op_name)
-        btree:add(f.opcode, body(0, 2))
-        pinfo.cols.info:append(string.format(" %s [Request]", op_name))
-
-        local rest = body(2, body:len() - 2)
-        dispatch_request(opcode, rest, btree, pinfo, src_port)
-
-    elseif dir_byte == 0x05 then
-        -- Error response: u16 BE error code immediately after routing
-        local btree = tree:add(p2, body, "Error Response")
-        if body:len() >= 2 then
-            btree:add(f.error_code, body(0, 2))
-            local code = body(0, 2):uint()
-            local name = STATUS_ERRORS[code] or string.format("unknown_0x%04X", code)
-            pinfo.cols.info:append(" [ERROR " .. name .. "]")
-        end
-
-    else
-        -- Success response (dir=0x01). No opcode echo; shape depends on
-        -- which request it answers. Heuristics:
-        --   * find_value_block hit -> ReadProperty response
-        --   * else                 -> identify echo / sysinfo / generic
-        local btree = tree:add(p2, body, "Success Response")
-        local vb = find_value_block(payload)
-        if vb then
-            local pre = payload(0, vb)
-            local strings = extract_lp_strings(pre)
-            if #strings >= 2 then
-                local sd = strings[#strings - 1]
-                local sp = strings[#strings]
-                btree:add(f.device_name, payload(sd.offset + 3, sd.length - 3), sd.value)
-                btree:add(f.point_name,  payload(sp.offset + 3, sp.length - 3), sp.value)
-                pinfo.cols.info:append(string.format(" %s/%s", sd.value, sp.value))
-            end
-            local val = dissect_value_block(payload, vb, btree, pinfo)
-            pinfo.cols.info:append(string.format(" = %g", val))
-            -- Units after value block
-            if payload:len() > vb + 14 then
-                local after = payload(vb + 14, payload:len() - vb - 14)
-                local units_strings = extract_lp_strings(after)
-                if #units_strings >= 1 then
-                    local u = units_strings[1]
-                    btree:add(f.units, after(u.offset + 3, u.length - 3), u.value)
-                    pinfo.cols.info:append(" " .. u.value)
-                end
-            end
-        else
-            -- No value block — try LP-strings first, fall back to u16-LL.
-            -- Special-case: if it looks like a sysinfo response (carries a
-            -- recognizable model string), break it out properly.
-            local strings = extract_lp_strings(body)
-            if #strings == 0 then
-                strings = extract_u16lp_strings(body)
-            end
-            local looks_sysinfo = false
-            for _, s in ipairs(strings) do
-                if s.value:find("PME%d") or s.value:find("APOGEE")
-                        or s.value:find("PXME") then
-                    looks_sysinfo = true
-                    break
-                end
-            end
-            if looks_sysinfo then
-                dissect_sysinfo_response(body, btree, pinfo)
-            elseif #strings > 0 then
-                local raw = ""
-                for i, s in ipairs(strings) do
-                    if i > 1 then raw = raw .. ", " end
-                    raw = raw .. s.value
-                end
-                btree:add(f.lp_strings, body, raw)
-                pinfo.cols.info:append(" [" .. raw .. "]")
-            end
-        end
-    end
-
-    return total_len
-end
-
-------------------------------------------------------------------------
--- Top-level TCP dissector with reassembly
-------------------------------------------------------------------------
-
+------------------------------------------------------------------------ top-level (reassembly)
 function p2.dissector(tvb, pinfo, tree)
-    local offset = 0
-    local len = tvb:len()
-    if len < 12 then
-        pinfo.desegment_offset = 0
-        pinfo.desegment_len = DESEGMENT_ONE_MORE_SEGMENT
-        return
+  pinfo.cols.protocol = "P2"
+  local len = tvb:len(); local offset = 0
+  while offset + 13 <= len do
+    if offset + 4 > len then pinfo.desegment_offset=offset; pinfo.desegment_len=DESEGMENT_ONE_MORE_SEGMENT; return end
+    local total = tvb(offset,4):uint()
+    if total < 13 or total > 65536 then return end
+    if offset + total > len then
+      pinfo.desegment_offset = offset; pinfo.desegment_len = (offset+total)-len; return
     end
-
-    while offset + 12 <= len do
-        local total_len = tvb(offset, 4):uint()
-        if total_len < 12 or total_len > 65536 then
-            return
-        end
-        if offset + total_len > len then
-            pinfo.desegment_offset = offset
-            pinfo.desegment_len = (offset + total_len) - len
-            return
-        end
-        dissect_one_frame(tvb(offset, total_len), pinfo, tree)
-        offset = offset + total_len
-    end
+    dissect_one(tvb(offset,total):tvb(), pinfo, tree)
+    offset = offset + total
+  end
 end
 
-------------------------------------------------------------------------
--- UDP/10001 multicast presence beacon
--- spec §3.2.2 (Multicast Presence Beacon).
--- Payload is invariant across the corpus: 4 bytes 01 00 00 00.
--- Dual-emitted to both 233.89.188.1 and 255.255.255.255 with sub-millisecond
--- delta. Cadence ~10.5s. Carries no node/site/BLN info — pure presence.
-------------------------------------------------------------------------
-
-function p2b.dissector(tvb, pinfo, tree)
-    local len = tvb:len()
-    if len ~= 4 then
-        return 0  -- not our beacon
-    end
-    local hex = tvb(0, 4):bytes():tohex():lower()
-
-    pinfo.cols.protocol = "P2-Beacon"
-    local subtree = tree:add(p2b, tvb(0, len), "Siemens P2 BLN Presence Beacon")
-    subtree:add(f.beacon_payload, tvb(0, 4))
-
-    if hex == BEACON_PAYLOAD_HEX then
-        pinfo.cols.info:set("BLN presence beacon (01 00 00 00)")
-    else
-        pinfo.cols.info:set("BLN beacon (unexpected payload " .. hex .. ")")
-        subtree:add_expert_info(PI_PROTOCOL, PI_NOTE,
-            "Unexpected beacon payload — corpus has zero variation in 1040 samples")
-    end
-    return len
-end
-
-------------------------------------------------------------------------
--- Bind to the known P2 ports
-------------------------------------------------------------------------
-
-local tcp_table = DissectorTable.get("tcp.port")
-tcp_table:add(5033, p2)
-tcp_table:add(5034, p2)
-
-local udp_table = DissectorTable.get("udp.port")
-udp_table:add(10001, p2b)
+local tcp = DissectorTable.get("tcp.port")
+tcp:add(5033, p2)
+tcp:add(5034, p2)
