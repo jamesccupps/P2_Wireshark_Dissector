@@ -21,7 +21,7 @@ When opening an issue:
   → (only on direction `0x00`) the 2-byte AP2 opcode → body. The opcode is parsed at a
   *variable* offset by scanning the four NULs — never at a fixed offset.
 - `OPCODES` (name table) and `OPSCHEMA` (expected-body field lists) are **machine-
-  generated** from the protocol's authoritative function-code set and its ASDU type
+  generated** from the protocol's function-code set and its ASDU type
   definitions. **Don't hand-edit opcode names or schemas** — if a name is wrong or
   missing, open an issue. Contributions are body *decoders*, not names.
 - Bespoke body decoders (`dissect_cov`, `dissect_roster`, `dissect_identity`) are the

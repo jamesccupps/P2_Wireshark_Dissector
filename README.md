@@ -1,8 +1,16 @@
-# Siemens APOGEE P2 (Protocol II) Wireshark Dissector
+# Siemens APOGEE P2 (Protocol II)
 
-A Lua dissector for Wireshark that decodes the Siemens APOGEE **P2** (Protocol II)
-building-automation protocol over TCP. Built and validated from wire captures; the
-opcode names are the protocol's authoritative AP2 function-code vocabulary.
+Tools and a technical reference for **P2 ("Protocol II")**, the Siemens APOGEE
+building-automation protocol over TCP — for owner-operators working with their own legacy
+equipment. This repository contains three things:
+
+- **[`PROTOCOL.md`](PROTOCOL.md)** — a wire-level technical reference for the protocol.
+- **`p2.lua`** — a Wireshark dissector that decodes P2 on the wire (passive).
+- **`p2_gui.py` / `p2_scanner.py`** — a scanner that reads from panels (active; see the
+  *P2 Scanner* and *Scope & ethics* sections below).
+
+The dissector is built and validated from wire captures; the opcode names are the
+protocol's AP2 function-code vocabulary.
 
 > **v2.5 — response correlation + more body decoders.** Responses carry no opcode on the
 > wire (only requests do) but echo their request's sequence; the dissector now keeps a
@@ -25,7 +33,7 @@ opcode names are the protocol's authoritative AP2 function-code vocabulary.
 > application-layer cursoring, not a frame more-follows bit; event timestamps are 8 bytes
 > (`yr-1900, mo, day, day-of-week, hr, min, sec, cs`).
 >
-> **v2.1 — wire-verified rebuild.** Opcode names corrected to the full authoritative
+> **v2.1 — wire-verified rebuild.** Opcode names corrected to the full
 > set; the framing model fixed (the opcode is read only on request frames, at its true
 > variable offset); accurate body decoders for the common operations; per-opcode
 > *expected-body schema* notes; and the old UDP/10001 "multicast presence beacon"
@@ -38,7 +46,7 @@ Click a P2 packet and get:
 
 - **Frame header** — total length, message class, sequence, direction
 - **Routing slots** — the four NUL-terminated ASCII slots `[BLN, dst-node, BLN, src-node]`
-- **Opcode** — the 2-byte AP2 function code, labelled against the full authoritative
+- **Opcode** — the 2-byte AP2 function code, labelled against the full
   name set; an opcode that isn't a defined function code shows as `unknown_0x….`
 - **Per-opcode body** — wire-verified decoders for the common operations:
   - **COV value push** (`0x0274`) — point name, present value (`f32` BE), and the
@@ -91,7 +99,7 @@ port it arrived on.
   DB-change/replication records + alarm prints), all carrying the `EBLN_PING 0x4640`
   identity exchange; and a data band, `0x33` (legacy) / `0x34` (modern). The pairs are
   chosen by a panel's firmware generation, not by direction.
-- **Opcodes** — the complete authoritative AP2 function-code set is named. The common
+- **Opcodes** — the complete AP2 function-code set is named. The common
   operations are byte-decoded; the rest show their name + expected-body schema + a
   generic body walk.
 - **Errors** — `0x0003` not_found, `0x00AC` not_supported, `0x0E15` not_commandable,
@@ -132,6 +140,67 @@ Heuristic to spot Siemens PXC field panels in a capture without decoding payload
 tshark -r capture.pcapng -Y "tcp.flags.syn==1" \
     -T fields -e ip.src -e ip.ttl -e tcp.window_size_value | sort -u
 ```
+
+## Protocol specification
+
+[`PROTOCOL.md`](PROTOCOL.md) is the wire-level reference behind both tools: transport and
+framing, the encoding primitives, addressing, the function-code (opcode) catalog and body
+structures, the point model, change-of-value and alarming, PPCL over the wire, and security
+considerations — with every claim evidence-tagged (`[W]` wire-observed / `[S]`
+struct-derived / `[D]` vendor-doc / `[I]` inferred / `[OPEN]`). Start with its **Summary**
+for the one-screen overview.
+
+## P2 Scanner (companion active tool)
+
+Alongside the passive dissector, this repository includes an **active** P2 scanner — a
+client that connects to panels and reads from them, for an owner-operator inventorying and
+monitoring **their own** equipment. It is the opposite end of the spectrum from the
+dissector: the dissector only *watches* traffic, the scanner *sends* requests.
+
+**Files (no data files needed):**
+
+- `p2_gui.py` — a single-file Tkinter GUI. Edit your site settings in-app (no `site.json`
+  required), discover/scan panels, browse the node/device tree, read and walk points, dump
+  PPCL programs, listen for change-of-value pushes, and export results to CSV/JSON.
+- `p2_scanner.py` — the scanner library/CLI. Self-contained: the FLN/TEC point catalog is
+  embedded, so it runs as one file. (An external `tecpoints.json` is still honored if you
+  drop one in, to update the catalog.)
+- `firmware_registry.py` — a small shared helper (per-panel firmware/dialect cache).
+
+**Run it:**
+
+```bash
+python p2_gui.py            # GUI — recommended; edit config, scan, view, export
+python p2_scanner.py --help # CLI
+```
+
+The GUI imports the scanner at runtime, so keep the three `.py` files together. Site
+configuration is edited in **File → Edit Site Config** and is applied immediately;
+`site.json` is written only if you choose **Save Config**, and is otherwise optional.
+
+## Scope & ethics
+
+P2 has **no authentication and no encryption** — the only admission check is a matching
+BLN name, which is visible in cleartext on every frame (it is an access label, not a
+secret). That makes this tooling powerful and easy to misuse, so:
+
+- **Use it only on networks and equipment you own or are explicitly authorized to test.**
+  These tools are for owner-operators securing and maintaining their own legacy plant.
+- **Read-only by default.** The scanner is built around reads, browse, and enumeration.
+  It does **not** implement panel-destructive operations (cold/warm start, flash erase,
+  node eviction) — and a conformant tool should refuse to, even behind a flag.
+- **Active discovery leaves a footprint.** A correct-BLN handshake registers the scanner's
+  identity as a permanent node-table entry on the panel (this is how P2 registration
+  works). Prefer the passive push-listener and the dissector when you only need to observe.
+- **Rate-limit and avoid production disruption.** Use inter-request delays, a single
+  connection per panel, and do not run scans against life-safety or revenue-critical
+  systems outside a maintenance window. The replication-class opcodes can stall a panel.
+- **Never expose P2 to an untrusted network.** Segment it onto a dedicated, firewalled
+  automation VLAN.
+
+This split — a passive dissector plus a read-oriented scanner, with destructive operations
+documented but not shipped runnable — is deliberate: it helps a defender understand and
+secure their own system without handing an attacker a turnkey weapon.
 
 ## Contributing
 

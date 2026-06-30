@@ -74,7 +74,7 @@
 --        confirm it. (Field-by-field byte decode is NOT auto-generated, because the
 --        struct->wire mapping is non-trivial — TLV framing, scope tags, and unproven
 --        enum widths — so a generated split would be confidently wrong for most ops.)
---   2.0  Wire-verified rebuild: authoritative AP2_Function_Code names; removed the
+--   2.0  Wire-verified rebuild: the full AP2_Function_Code name set; removed the
 --        UDP/10001 233.89.188.1 "presence beacon" (misattribution); opcode read at
 --        the variable post-slot offset and only on dir==0x00 (no phantom opcodes);
 --        0x29-0x2F session-control band incl. 0x2A; COV/roster/identity decoders;
