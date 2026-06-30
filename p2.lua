@@ -1,7 +1,70 @@
 -- p2.lua — Siemens APOGEE P2 (Protocol II) Wireshark dissector
--- Version: 2.1  (2026-06-24)  -- wire-verified rebuild + per-opcode body schema
+-- Version: 2.5  (2026-06-29)  -- seq-state response correlation + response-body decoders
 --
 -- Changelog
+--   2.5  Response correlation via sequence state. Responses (direction 0x01 success /
+--        0x05 error) carry NO opcode on the wire — only the request does — but a response
+--        echoes its request's sequence number. The dissector now keeps a per-TCP-stream
+--        {sequence -> opcode} map (populated from direction==0x00 frames) and uses it to:
+--          * label each response with the operation it answers ("response to
+--            POINT_LOG_VALUE", "ERROR not_found — request was POINT_CMD_VALUE"), and
+--          * dispatch a response-body decoder by the recovered opcode.
+--        Response decoders added (designed against real captured bytes):
+--          * CABINET_DISPLAY 0x010C -> firmware banner (rev / platform / build-date TLVs,
+--            then node/site/BLN + IP/MAC via the walk) — the richest unauthenticated read.
+--          * EBLN_PING 0x4640 -> eBLN_Node (node/site/BLN) via the identity decoder.
+--          * Value responses (POINT_LOG_VALUE 0x0220, POINT_LOG_ALARM 0x0221, COV_ENABLE
+--            0x0271, UPL_ALL_* 0x0981/0x0982, TREND_DATA_DISPLAY 0x0295): names + EU-units
+--            string, and the value block (3F FF FF Fx quality sentinel + sub-type + f32)
+--            where present. NOTE: in a plain analog read the f32 is not behind the quality
+--            sentinel and its offset varies by point type, so it is left in the raw body
+--            rather than guessed (see PROTOCOL.md 10.9 [OPEN]); UPL/sentinel-framed values
+--            ARE decoded. Honest over confidently-wrong.
+--        seq-state is populated only on the first pass (pinfo.visited guard); requests
+--        precede their responses in capture order so the map is ready when the response is
+--        seen. Unmatched responses (request not in capture) fall back to the generic walk.
+--   2.4  Added wire-verified byte decoders for the most common request/push bodies, all
+--        designed against real captured bytes (not metadata):
+--        * Addressing family (POINT_LOG_VALUE 0x0220, POINT_LOG_ALARM 0x0221,
+--          POINT_CMD_VALUE 0x0240, POINT_CMD_PRIORITY 0x0241, TREND_DATA_DISPLAY 0x0295,
+--          UPL_ALL_* 0x0981/0x0982): optional scope tag (SYST/NONE/CC + command priority +
+--          3F FF FF FF) then Name_search (name_space u16 + name TLV + suffix TLV + resume
+--          cursor). POINT_CMD_VALUE also decodes the trailing f32 commanded value.
+--        * COV subscribe (COV_ENABLE 0x0271 / COV_DISABLE 0x0273 / COV_DELETE_STUB 0x0272):
+--          name_space + name TLV + suffix TLV + 2-byte trailer (00 FF enable / 00 00 disable).
+--        * ALARM_PRINT 0x0508: scope tag, point name + descriptor TLVs, the value block
+--          (3F FF FF Fx quality sentinel + point sub-type + f32), and the 8-byte event
+--          timestamps. Timestamp helper decodes [yr-1900][mo][day][DOW 1=Mon][hr][min][sec][cs].
+--        These run only on dir==0x00 (responses carry no opcode, so they are not per-opcode
+--        dispatched). Anything past the known prefix falls through to the generic TLV walk,
+--        so an unexpected layout degrades gracefully rather than mis-splitting.
+--   2.3  COV_ANNUNCIATE (0x0274) per-point record corrected: each point is a
+--        name_response = u16 name_space (00 00) + name TLV + suffix TLV, THEN the
+--        f32 value + 10-byte condition block. The prior decoder consumed the first
+--        point's name_space as part of the count and lacked per-point name_space
+--        handling, so it stopped after the first point in a multi-point push and
+--        mislabelled the empty suffix TLV (01 00 00) as a "value marker". Now decodes
+--        every point in a multi-point COV and handles non-empty subpoint suffixes.
+--        (EBLN_PING baseTime is a Unix-epoch wall-clock, not a tick counter; event
+--        timestamps are 8 bytes incl. a day-of-week field — see PROTOCOL.md.)
+--   2.2  message-class model corrected from fleet captures
+--   2.2  Corrected from multi-panel + command captures:
+--        * Message classes are legacy/modern PAIRS chosen by the panel's firmware
+--          generation, NOT by direction: data 0x33(legacy)/0x34(modern); 2nd channel
+--          0x2E(legacy)/0x2F(modern) carrying identity + DB-change/replication records
+--          + alarm prints; peer carriers 0x29/0x2A (panel<->panel, mirror-only).
+--          Fingerprint a panel via CABINET_DISPLAY 0x010C and pick the dialect from its
+--          firmware generation rather than blind-probing.
+--        * COV (0x0274) condition block: byte0 point_priority (0x23=OPER when commanded)
+--          and byte1 control_status (0x00/02/03/04/06) now wire-confirmed.
+--        * Sequence is per-(peer,channel) with gaps (not one global counter); responses
+--          echo the request seq; reconnect resumes (no reset).
+--        * UPL_ALL_* continuation is application-layer cursoring (cursor = last object
+--          name), not a frame more-follows bit; single frames up to ~1570 B.
+--        * Event timestamps are 8 bytes [yr-1900][mo][day][DOW 1=Mon][hr][min][sec][cs].
+--        (Candidate future decoders, not yet shipped to avoid offset-fragility: a
+--        seq-stateful CABINET_DISPLAY 0x010C banner decode on the response, and an
+--        ALARM_PRINT 0x0508 record decode — both currently surface via the TLV walk.)
 --   2.1  Per-opcode EXPECTED BODY SCHEMA for every defined function code, derived
 --        from the AP2 ASDU type structures and shown as a "[schema: struct-derived,
 --        not byte-verified]" note under the body. The actual bytes are still parsed
@@ -27,11 +90,21 @@
 
 local p2 = Proto("p2", "Siemens APOGEE P2 (Protocol II)")
 
+-- seq-state: responses carry no opcode, only an echoed sequence number. Map
+-- {tcp.stream : sequence} -> request opcode so responses can be correlated + decoded.
+local f_tcp_stream = Field.new("tcp.stream")
+local resp_op = {}
+
 ------------------------------------------------------------------------ value strings
+-- Message classes are legacy/modern PAIRS chosen by the panel's firmware generation
+-- (fingerprint via CABINET_DISPLAY 0x010C), NOT by direction:
+--   data channel:    0x33 legacy / 0x34 modern  (same opcodes + same f32 encoding)
+--   2nd channel:     0x2E legacy / 0x2F modern  (identity + DB-change/replication records + alarm prints)
+--   peer (mirror-only): 0x29 maintenance / 0x2A panel<->panel COV-subscribe
 local MSG_CLASS = {
-  [0x33]="data (legacy dialect)", [0x34]="data (modern dialect)",
-  [0x29]="session carrier", [0x2A]="peer-session carrier",
-  [0x2E]="CONNECT (session establish)", [0x2F]="ANNOUNCE (presence)",
+  [0x33]="data (legacy panel)", [0x34]="data (modern panel)",
+  [0x29]="peer maintenance carrier", [0x2A]="peer COV-subscribe carrier",
+  [0x2E]="2nd channel (legacy: announce/DB-sync)", [0x2F]="2nd channel (modern: announce/DB-sync)",
 }
 local DIR = { [0x00]="request / push", [0x01]="success response", [0x05]="error response" }
 local ERRORS = {
@@ -1142,8 +1215,10 @@ f.value     = ProtoField.float ("p2.value","Value (f32 BE)")
 f.cov_count = ProtoField.uint16("p2.cov.count","COV point count",base.DEC)
 f.cov_point = ProtoField.string("p2.cov.point","COV Point Name")
 f.cov_cond  = ProtoField.bytes ("p2.cov.cond","COV condition/priority block (10B)")
--- 10-byte condition block, field order from the ASDU schema (1 byte each fits the 10B
--- exactly; widths/values to confirm against an alarmed/commanded capture). [struct-derived]
+-- 10-byte condition block, field order from the ASDU schema (1 byte each fits the 10B exactly).
+-- byte0 point_priority and byte1 control_status are now WIRE-CONFIRMED (point_priority=0x23 OPER
+-- when commanded; control_status observed 0x00/02/03/04/06). A failed sensor asserts the
+-- oos/failed bytes. alarm_state(+8)/alarm_priority(+9) still need a limit-alarmed capture.
 f.cov_pri    = ProtoField.uint8("p2.cov.point_priority","point_priority",base.HEX,PRIORITY)
 f.cov_ctrl   = ProtoField.uint8("p2.cov.control_status","control_status",base.HEX)
 f.cov_oos    = ProtoField.uint8("p2.cov.out_of_service","out_of_service",base.DEC)
@@ -1161,6 +1236,25 @@ f.r_count   = ProtoField.uint16("p2.roster.count","Entry Count")
 f.id_node   = ProtoField.string("p2.id.node","Node Name")
 f.id_site   = ProtoField.string("p2.id.site","Site Name")
 f.id_bln    = ProtoField.string("p2.id.bln","BLN Name")
+-- request-family decoders (2.4)
+local NAME_SPACE = { [0x0000]="system", [0x0001]="user", [0xFFFF]="any" }
+local COV_SUB = { [0x00FF]="enable", [0x0000]="disable" }
+f.ns        = ProtoField.uint16("p2.namespace","Name Space",base.HEX,NAME_SPACE)
+f.pt_name   = ProtoField.string("p2.point.name","Point / Object Name")
+f.pt_suffix = ProtoField.string("p2.point.suffix","Name Suffix")
+f.resume    = ProtoField.string("p2.resume","Resume Cursor (last object)")
+f.cov_sub   = ProtoField.uint16("p2.cov.subscribe","COV Subscribe",base.HEX,COV_SUB)
+f.cmd_value = ProtoField.float ("p2.cmd.value","Commanded Value (f32 BE)")
+f.ts        = ProtoField.string("p2.timestamp","Event Timestamp")
+f.qual      = ProtoField.uint32("p2.quality","Value Quality Sentinel",base.HEX)
+f.subtype   = ProtoField.uint8 ("p2.point.subtype","Point Sub-type",base.HEX)
+f.al_value  = ProtoField.float ("p2.alarm.value","Alarm Value (f32 BE)")
+-- seq-state response correlation (2.5)
+f.resp_op   = ProtoField.string("p2.response_to","Response to (opcode recovered via seq)")
+f.fw_rev    = ProtoField.string("p2.fw.rev","Firmware Revision")
+f.fw_plat   = ProtoField.string("p2.fw.platform","Hardware Platform / Firmware Version")
+f.fw_build  = ProtoField.string("p2.fw.build","Firmware Build Date")
+f.eu        = ProtoField.string("p2.eu","Engineering Units")
 f.body      = ProtoField.bytes ("p2.body","Body")
 p2.fields = {
   f.total_len,f.msg_type,f.msg_class,f.seq,f.dir,f.bln1,f.dst,f.bln2,f.src,
@@ -1168,7 +1262,10 @@ p2.fields = {
   f.cov_count,f.cov_point,f.cov_cond,
   f.cov_pri,f.cov_ctrl,f.cov_oos,f.cov_fail,f.cov_proof,f.cov_opdis,f.cov_pgmdis,f.cov_cmdal,f.cov_astate,f.cov_apri,
   f.r_name,f.r_ver,f.r_tabver,f.r_count,
-  f.id_node,f.id_site,f.id_bln,f.body,
+  f.id_node,f.id_site,f.id_bln,
+  f.ns,f.pt_name,f.pt_suffix,f.resume,f.cov_sub,f.cmd_value,f.ts,f.qual,f.subtype,f.al_value,
+  f.resp_op,f.fw_rev,f.fw_plat,f.fw_build,f.eu,
+  f.body,
 }
 
 ------------------------------------------------------------------------ helpers
@@ -1195,25 +1292,36 @@ local function tlv_walk(tvb, off, last, tree)
   end
 end
 local function dissect_cov(tvb, off, last, tree)
-  if off+4 > last then return end
-  tree:add(f.cov_count, tvb(off,2)); off = off + 4
-  while off + 3 <= last do
+  -- COV_ANNUNCIATE body: u16 count, then per point a name_response
+  -- (u16 name_space + name TLV + suffix TLV) + f32 value + 10-byte condition block.
+  if off+2 > last then return end
+  tree:add(f.cov_count, tvb(off,2)); off = off + 2
+  while off + 9 <= last do
+    local rec = off
+    off = off + 2                              -- name_space (u16; observed 00 00 = system)
     if not (tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00) then break end
     local l = tvb(off+2,1):uint(); if off+3+l > last then break end
-    local pt = tree:add(p2, tvb(off,0), "COV point")
+    local pt = tree:add(p2, tvb(rec,0), "COV point")
     pt:add(f.cov_point, tvb(off+3,l)); off = off + 3 + l
-    if off+3 <= last then off = off + 3 end
-    if off+4 <= last then pt:add(f.value, tvb(off,4)); off = off + 4 end
+    -- suffix TLV: empty (01 00 00) for top-level points; non-empty for FLN subpoints
+    if off+3 <= last and tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00 then
+      local sl = tvb(off+2,1):uint()
+      if off+3+sl <= last then
+        if sl > 0 then pt:add(f.cov_point, tvb(off+3,sl)) end
+        off = off + 3 + sl
+      else break end
+    end
+    if off+4 <= last then pt:add(f.value, tvb(off,4)); off = off + 4 else break end
     if off+10 <= last then
       local cb = pt:add(f.cov_cond, tvb(off,10))
-      cb:set_text("condition/priority block (10B) [field order struct-derived; confirm w/ alarmed capture]")
+      cb:set_text("condition/priority block (10B) [byte0/1 wire-confirmed; alarm bytes need limit-alarm capture]")
       cb:add(f.cov_pri,   tvb(off,1));   cb:add(f.cov_ctrl,  tvb(off+1,1))
       cb:add(f.cov_oos,   tvb(off+2,1)); cb:add(f.cov_fail,  tvb(off+3,1))
       cb:add(f.cov_proof, tvb(off+4,1)); cb:add(f.cov_opdis, tvb(off+5,1))
       cb:add(f.cov_pgmdis,tvb(off+6,1)); cb:add(f.cov_cmdal, tvb(off+7,1))
       cb:add(f.cov_astate,tvb(off+8,1)); cb:add(f.cov_apri,  tvb(off+9,1))
       off = off + 10
-    end
+    else break end
   end
 end
 local function dissect_roster(tvb, off, last, tree)
@@ -1237,6 +1345,138 @@ local function dissect_identity(tvb, off, last, tree)
   if off < last then tlv_walk(tvb, off, last, tree) end
 end
 
+-- ---- request-family helpers/decoders (2.4; designed against captured bytes) ----
+-- read a string TLV (01 00 <len> <bytes>); returns (string, len, next_off) or nil
+local function read_tlv(tvb, off, last)
+  if off + 3 > last then return nil end
+  if tvb(off,1):uint() ~= 0x01 or tvb(off+1,1):uint() ~= 0x00 then return nil end
+  local l = tvb(off+2,1):uint()
+  if off + 3 + l > last then return nil end
+  return tvb(off+3,l):string(), l, off + 3 + l
+end
+-- decode an 8-byte event timestamp [yr-1900][mo][day][DOW 1=Mon][hr][min][sec][centisec]
+local DOW = { "Mon","Tue","Wed","Thu","Fri","Sat","Sun" }
+local function ts8(tvb, off, last)
+  if off + 8 > last then return nil end
+  local yr=tvb(off,1):uint();   local mo=tvb(off+1,1):uint(); local dy=tvb(off+2,1):uint()
+  local dw=tvb(off+3,1):uint(); local hh=tvb(off+4,1):uint(); local mm=tvb(off+5,1):uint()
+  local ss=tvb(off+6,1):uint(); local cs=tvb(off+7,1):uint()
+  -- year>=2000 excludes the all-zero "null/never" sentinel (epoch base 1900) and most
+  -- non-timestamp trailing bytes; cs<=99 (centiseconds). Tightened to avoid false matches.
+  if yr<100 or yr>199 or mo<1 or mo>12 or dy<1 or dy>31 or dw<1 or dw>7
+     or hh>23 or mm>59 or ss>59 or cs>99 then return nil end
+  return string.format("%04d-%02d-%02d %s %02d:%02d:%02d.%02d", 1900+yr, mo, dy, DOW[dw] or "?", hh, mm, ss, cs)
+end
+-- consume an optional scope tag: 01 00 <len> <SCOPE> <command-priority:1> <3F FF FF FF>; returns next_off
+local function scope_tag(tvb, off, last, tree)
+  local s, l, no = read_tlv(tvb, off, last)
+  if s and SCOPE[s] and no + 5 <= last and tvb(no+1,4):uint() == 0x3FFFFFFF then
+    local sc = tree:add(p2, tvb(off, (no+5)-off), "Scope: "..s)
+    sc:add(f.scope, tvb(off,3+l), s)
+    sc:add(f.priority, tvb(no,1))     -- command priority byte (wire-confirmed: 0x23 OPER on commands)
+    return no + 5
+  end
+  return off
+end
+-- Name_search: name_space u16 + name TLV + suffix TLV [+ last_name_space u16 + last_name TLV + last_suffix TLV]
+local function dissect_namesearch(tvb, off, last, tree, has_resume)
+  if off + 2 > last then return off end
+  tree:add(f.ns, tvb(off,2)); off = off + 2
+  local nm, nl, no = read_tlv(tvb, off, last); if not nm then return off end
+  tree:add(f.pt_name, tvb(off+3,nl)); off = no
+  local sf, sl, so = read_tlv(tvb, off, last)
+  if sf ~= nil then if sl > 0 then tree:add(f.pt_suffix, tvb(off+3,sl)) end; off = so end
+  if has_resume and off + 2 <= last then
+    off = off + 2                                   -- last_name_space
+    local rn, rl, rno = read_tlv(tvb, off, last)
+    if rn ~= nil then
+      if rl > 0 then tree:add(f.resume, tvb(off+3,rl)) end; off = rno
+      local rs, rsl, rso = read_tlv(tvb, off, last)
+      if rs ~= nil then off = rso end
+    end
+  end
+  return off
+end
+-- addressing-family request: [scope] + Name_search + opcode tail
+local function dissect_addr(tvb, off, last, tree, has_resume, tail)
+  off = scope_tag(tvb, off, last, tree)
+  off = dissect_namesearch(tvb, off, last, tree, has_resume)
+  if tail == "cov" then
+    if off + 2 <= last then tree:add(f.cov_sub, tvb(off,2)); off = off + 2 end
+  elseif tail == "value" then
+    if off + 4 <= last then tree:add(f.cmd_value, tvb(off,4)); off = off + 4 end
+  end
+  if off < last then tlv_walk(tvb, off, last, tree) end
+end
+-- ALARM_PRINT 0x0508 push: scope + name/descriptor TLVs + value block + dual timestamps
+local function dissect_alarm(tvb, off, last, tree)
+  off = scope_tag(tvb, off, last, tree)
+  local nts = 0                                  -- alarm records carry up to 3 timestamps
+  while off < last do
+    local b0 = tvb(off,1):uint()
+    if off + 3 <= last and b0 == 0x01 and tvb(off+1,1):uint() == 0x00 then
+      local l = tvb(off+2,1):uint()
+      if off + 3 + l <= last then
+        if l > 0 then tree:add(f.tlv, tvb(off,3+l), tvb(off+3,l):string()) end
+        off = off + 3 + l
+      else off = off + 1 end
+    elseif off + 4 <= last and b0 == 0x3F and tvb(off+1,1):uint() == 0xFF and tvb(off+2,1):uint() == 0xFF then
+      tree:add(f.qual, tvb(off,4)); off = off + 4               -- quality sentinel 3F FF FF Fx
+      if off + 3 <= last then tree:add(f.subtype, tvb(off+2,1)); off = off + 3 end  -- 00 comm subtype
+      if off + 4 <= last then tree:add(f.al_value, tvb(off,4)); off = off + 4 end   -- f32 value
+    else
+      local t = (nts < 3) and ts8(tvb, off, last) or nil       -- report / onset / last-normal
+      if t then tree:add(f.ts, tvb(off,8), t); off = off + 8; nts = nts + 1
+      else off = off + 1 end
+    end
+  end
+end
+-- opcodes whose request body is scope?+Name_search (point reads, trend read, bulk uploads)
+local ADDR_OPS = {
+  [0x0220]=true, [0x0221]=true, [0x0295]=true,
+  [0x0981]=true, [0x0982]=true,
+}
+
+-- ---- response-body decoders (2.5; reached via seq-state, never an on-wire opcode) ----
+-- CABINET_DISPLAY 0x010C response: firmware banner = rev / platform / build TLVs, then
+-- (after a binary config block) node/site/BLN + IP/MAC TLVs surfaced by the walk.
+local function dissect_banner(tvb, off, last, tree)
+  local labels = { f.fw_rev, f.fw_plat, f.fw_build }
+  for i = 1, 3 do
+    local s, l, no = read_tlv(tvb, off, last)
+    if s then if l > 0 then tree:add(labels[i], tvb(off+3,l)) end; off = no else break end
+  end
+  if off < last then tlv_walk(tvb, off, last, tree) end
+end
+-- Value responses (read / COV-enable / UPL / trend): names + EU-units string + the value
+-- block at the 3F FF FF Fx quality-sentinel anchor. The f32 in a plain analog read is NOT
+-- sentinel-framed and its offset varies by point type, so it is intentionally left raw.
+local EU_HINT = { ["DEG F"]=1,["DEG C"]=1,["PCT"]=1,["IN H2O"]=1,["PSI"]=1,["GPM"]=1,
+                  ["CFM"]=1,["KW"]=1,["KWH"]=1,["VOLTS"]=1,["AMPS"]=1,["HZ"]=1,["RPM"]=1,["FPM"]=1 }
+local function dissect_value_resp(tvb, off, last, tree)
+  while off < last do
+    local b0 = tvb(off,1):uint()
+    if off + 3 <= last and b0 == 0x01 and tvb(off+1,1):uint() == 0x00 then
+      local l = tvb(off+2,1):uint()
+      if off + 3 + l <= last then
+        if l > 0 then
+          local s = tvb(off+3,l):string()
+          tree:add(EU_HINT[s] and f.eu or f.tlv, tvb(off,3+l), s)
+        end
+        off = off + 3 + l
+      else off = off + 1 end
+    elseif off + 11 <= last and b0 == 0x3F and tvb(off+1,1):uint() == 0xFF and tvb(off+2,1):uint() == 0xFF then
+      tree:add(f.qual, tvb(off,4)); off = off + 4          -- quality sentinel
+      tree:add(f.subtype, tvb(off+2,1)); off = off + 3     -- 00 comm sub-type
+      tree:add(f.value, tvb(off,4)); off = off + 4         -- f32 value
+    else off = off + 1 end
+  end
+end
+-- opcodes whose response carries a value/Point_base-style body
+local VALUE_RESP = {
+  [0x0220]=true, [0x0221]=true, [0x0271]=true, [0x0295]=true, [0x0981]=true, [0x0982]=true,
+}
+
 ------------------------------------------------------------------------ one PDU
 local function dissect_one(tvb, pinfo, tree)
   local total = tvb(0,4):uint()
@@ -1251,11 +1491,17 @@ local function dissect_one(tvb, pinfo, tree)
     local val, adv = cstr(tvb, off); if not val then break end
     st:add(sfields[s], tvb(off, adv-1), val); slots[s] = val; off = off + adv
   end
-  local opname = nil
+  -- seq-state key: per TCP stream + the (echoed) sequence number
+  local seq = tvb(8,4):uint()
+  local sinfo = f_tcp_stream()
+  local skey = (sinfo and tostring(sinfo.value) or "?") .. ":" .. seq
+  local opname, rop = nil, nil
+  local function rlabel(o) return OPCODES[o] or string.format("0x%04X", o) end
   if dir == 0x00 then
     if off + 2 <= total then
       local op = tvb(off,2):uint(); st:add(f.opcode, tvb(off,2))
       opname = OPCODES[op] or string.format("unknown_0x%04X", op)
+      if not pinfo.visited then resp_op[skey] = op end   -- remember for the matching response
       off = off + 2
       if off < total then
         local bt = st:add(p2, tvb(off, total-off), "Body ("..(total-off).." B)")
@@ -1264,18 +1510,36 @@ local function dissect_one(tvb, pinfo, tree)
           if op==0x0274 then dissect_cov(tvb,off,total,bt)
           elseif op==0x4634 or op==0x4636 then dissect_roster(tvb,off,total,bt)
           elseif op==0x4640 then dissect_identity(tvb,off,total,bt)
+          elseif op==0x0508 then dissect_alarm(tvb,off,total,bt)
+          elseif op==0x0271 or op==0x0272 or op==0x0273 then dissect_addr(tvb,off,total,bt,false,"cov")
+          elseif op==0x0240 then dissect_addr(tvb,off,total,bt,true,"value")
+          elseif op==0x0241 then dissect_addr(tvb,off,total,bt,true,"none")
+          elseif ADDR_OPS[op] then dissect_addr(tvb,off,total,bt,true,"none")
           else tlv_walk(tvb,off,total,bt) end
         end)
         if not ok then tlv_walk(tvb,off,total,bt) end
       end
     end
   elseif dir == 0x05 then
+    rop = resp_op[skey]
     if total >= off+2 then st:add(f.err, tvb(total-2,2)) end
+    if rop then st:add(f.resp_op, tvb(0,0), rlabel(rop)):set_generated() end
     if off < total-2 then tlv_walk(tvb, off, total-2, st:add(p2, tvb(off,total-2-off), "Body")) end
   else
+    rop = resp_op[skey]
     if off < total then
-      local bt = st:add(p2, tvb(off,total-off), "Body ("..(total-off).." B)")
-      pcall(function() tlv_walk(tvb, off, total, bt) end)
+      local hdr = rop and ("Body ("..(total-off).." B) -- response to "..rlabel(rop))
+                  or ("Body ("..(total-off).." B)")
+      local bt = st:add(p2, tvb(off,total-off), hdr)
+      if rop then bt:add(f.resp_op, tvb(0,0), rlabel(rop)):set_generated() end
+      pcall(function()
+        if rop==0x010C then dissect_banner(tvb,off,total,bt)
+        elseif rop==0x4640 then dissect_identity(tvb,off,total,bt)
+        elseif rop and VALUE_RESP[rop] then dissect_value_resp(tvb,off,total,bt)
+        else tlv_walk(tvb,off,total,bt) end
+      end)
+    elseif rop then
+      st:add(f.resp_op, tvb(0,0), rlabel(rop)):set_generated()   -- 0-byte ACK (e.g. write)
     end
   end
   local cls = MSG_CLASS[mclass] or string.format("0x%02X", mclass)
@@ -1283,8 +1547,11 @@ local function dissect_one(tvb, pinfo, tree)
   if dir == 0x00 then pinfo.cols.info:set(cls.."  "..(opname or "?").."  "..who)
   elseif dir == 0x05 then
     local ec = (total>=2) and tvb(total-2,2):uint() or 0
-    pinfo.cols.info:set("ERROR "..(ERRORS[ec] or string.format("0x%04X",ec)).."  seq="..tvb(8,4):uint())
-  else pinfo.cols.info:set("success  seq="..tvb(8,4):uint().."  "..who) end
+    pinfo.cols.info:set("ERROR "..(ERRORS[ec] or string.format("0x%04X",ec)).."  seq="..seq
+                        ..(rop and ("  ["..rlabel(rop).."]") or ""))
+  else
+    pinfo.cols.info:set("success"..(rop and ("  "..rlabel(rop).." resp") or "").."  seq="..seq.."  "..who)
+  end
 end
 
 ------------------------------------------------------------------------ top-level (reassembly)
