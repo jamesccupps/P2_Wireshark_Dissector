@@ -1004,8 +1004,8 @@ a modern panel uses `0x2F` in both. [W]
 - **`0x2F`** = the **modern** panel's second channel — the same role as `0x2E`, selected by firmware
   generation. The identity body is `TLV(node-name) + TLV(site) + TLV(BLN-name)` (the same triple as
   the `0x4640` `eBLN_Node` body, §5.1, §10.6). [W]
-- **`0x29` / `0x2A`** = the peer (panel↔panel) carriers of the same exchange (maintenance /
-  COV-subscribe), visible only from a panel-side mirror. [W]
+- **`0x29` / `0x2A`** = the peer (panel↔panel) carriers of the same exchange (session /
+  peer-session), visible only from a panel-side mirror. [W]
 
 The residual nuance — which peer is treated as **primary** vs secondary within a panel↔panel
 `0x29`/`0x2A` session (and on what criterion the primary is chosen) — is not pinned. The role/initiator
