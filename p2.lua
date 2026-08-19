@@ -88,6 +88,10 @@
 -- There is NO multicast "presence beacon"; the real optional availability multicast
 -- is 234.5.6.7:8 (off by default), not a discovery beacon.
 
+-- Dissector version. Tracks the p2.lua decode surface only; the scanner
+-- versions independently (p2_scanner.__version__). See CHANGELOG.md.
+local P2_DISSECTOR_VERSION = "2.6"
+
 local p2 = Proto("p2", "Siemens APOGEE P2 (Protocol II)")
 
 -- seq-state: responses carry no opcode, only an echoed sequence number. Map
@@ -103,13 +107,23 @@ local resp_op = {}
 --   peer (mirror-only): 0x29 maintenance / 0x2A panel<->panel COV-subscribe
 local MSG_CLASS = {
   [0x33]="data (legacy panel)", [0x34]="data (modern panel)",
-  [0x29]="peer maintenance carrier", [0x2A]="peer COV-subscribe carrier",
+  -- Labels follow PROTOCOL.md §6.2. 0x29 is the low-volume session carrier seen
+  -- only at connection start at low sequence numbers; 0x2A is the peer-to-peer
+  -- (panel<->panel) session carrier. Both carry the EBLN_PING 0x4640 identity
+  -- exchange. Earlier labels ("maintenance" / "COV-subscribe") asserted a
+  -- function the corpus does not establish.
+  [0x29]="session carrier", [0x2A]="peer-session carrier (panel<->panel)",
   [0x2E]="2nd channel (legacy: announce/DB-sync)", [0x2F]="2nd channel (modern: announce/DB-sync)",
 }
 local DIR = { [0x00]="request / push", [0x01]="success response", [0x05]="error response" }
 local ERRORS = {
   [0x0003]="not_found", [0x00AC]="not_supported (E172)", [0x0002]="out_of_scope",
   [0x0E11]="already_exists", [0x0E15]="not_commandable", [0x0009]="error_0009",
+  -- 0x0E12: observed a few times in the corpus; an already-exists-adjacent
+  -- record-state rejection whose precise meaning is not established
+  -- (PROTOCOL.md §7.2.2, Appendix D item 3). Named here so it renders as a
+  -- known-but-unpinned code rather than bare hex.
+  [0x0E12]="record_state_rejected (unconfirmed)",
 }
 local PRIORITY = {
   [0x00]="NONE (read)", [0x01]="tec_ovrd", [0x05]="PDL", [0x0A]="host_2",
@@ -117,6 +131,7 @@ local PRIORITY = {
   [0x20]="EMER", [0x22]="SMOKE", [0x23]="OPER",
 }
 local OPCODES = {
+  [0x0030] = "AP2_SET_GLOBAL_DATA",
   [0x0031] = "AP2_GET_GLOBAL_DATA",
   [0x0032] = "AP2_REMOTE_NODE_CHECK",
   [0x0033] = "AP2_GET_COMPLETE_NODE_STATE",
@@ -1546,9 +1561,19 @@ local function dissect_one(tvb, pinfo, tree)
   local who = (slots[4] or "?").."->"..(slots[2] or "?")
   if dir == 0x00 then pinfo.cols.info:set(cls.."  "..(opname or "?").."  "..who)
   elseif dir == 0x05 then
-    local ec = (total>=2) and tvb(total-2,2):uint() or 0
-    pinfo.cols.info:set("ERROR "..(ERRORS[ec] or string.format("0x%04X",ec)).."  seq="..seq
-                        ..(rop and ("  ["..rlabel(rop).."]") or ""))
+    -- Guard on off+2, not total>=2. The error tail lives after the four routing
+    -- slots; on a truncated frame whose slots run to the end there is no tail,
+    -- and reading tvb(total-2,2) would lift two header/slot bytes and render
+    -- them as a phantom error code (observed: a 13-byte dir-0x05 frame reported
+    -- "ERROR 0x0105"). Matches the guard already used on the tree item above.
+    if total >= off+2 then
+      local ec = tvb(total-2,2):uint()
+      pinfo.cols.info:set("ERROR "..(ERRORS[ec] or string.format("0x%04X",ec)).."  seq="..seq
+                          ..(rop and ("  ["..rlabel(rop).."]") or ""))
+    else
+      pinfo.cols.info:set("ERROR (truncated - no code)  seq="..seq
+                          ..(rop and ("  ["..rlabel(rop).."]") or ""))
+    end
   else
     pinfo.cols.info:set("success"..(rop and ("  "..rlabel(rop).." resp") or "").."  seq="..seq.."  "..who)
   end
@@ -1558,8 +1583,16 @@ end
 function p2.dissector(tvb, pinfo, tree)
   pinfo.cols.protocol = "P2"
   local len = tvb:len(); local offset = 0
-  while offset + 13 <= len do
-    if offset + 4 > len then pinfo.desegment_offset=offset; pinfo.desegment_len=DESEGMENT_ONE_MORE_SEGMENT; return end
+  while offset < len do
+    -- Fewer than a full 13-byte header (4 len + 4 class + 4 seq + 1 dir) in hand:
+    -- ask TCP for one more segment rather than dropping the tail. The old guard
+    -- (`offset + 4 > len` inside a `offset + 13 <= len` loop) could never fire, so
+    -- a segment ending mid-header silently desynced the rest of the stream.
+    if offset + 13 > len then
+      pinfo.desegment_offset = offset
+      pinfo.desegment_len = DESEGMENT_ONE_MORE_SEGMENT
+      return
+    end
     local total = tvb(offset,4):uint()
     if total < 13 or total > 65536 then return end
     if offset + total > len then

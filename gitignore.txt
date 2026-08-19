@@ -1,0 +1,33 @@
+# Site configuration — contains BLN names, node names, panel IPs.
+# Never commit a real one.
+site.json
+*.site.json
+
+# Local point catalog override
+tecpoints.json
+
+# Captures — may contain live site traffic
+*.pcap
+*.pcapng
+*.cap
+
+# Scanner output
+*.csv
+*.json.out
+scan_*.json
+p2_scan_*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -7,7 +7,8 @@ equipment. This repository contains three things:
 - **[`PROTOCOL.md`](PROTOCOL.md)** — a wire-level technical reference for the protocol.
 - **`p2.lua`** — a Wireshark dissector that decodes P2 on the wire (passive).
 - **`p2_gui.py` / `p2_scanner.py`** — a scanner that reads from panels (active; see the
-  *P2 Scanner* and *Scope & ethics* sections below).
+  *P2 Scanner* and *Scope & ethics* sections below), with `firmware_registry.py` (shared
+  dialect cache) and `analyze_pcap.py` (offline opcode/error census over a capture).
 
 The dissector is built and validated from wire captures; the opcode names are the
 protocol's AP2 function-code vocabulary.
@@ -99,11 +100,14 @@ port it arrived on.
   DB-change/replication records + alarm prints), all carrying the `EBLN_PING 0x4640`
   identity exchange; and a data band, `0x33` (legacy) / `0x34` (modern). The pairs are
   chosen by a panel's firmware generation, not by direction.
-- **Opcodes** — the complete AP2 function-code set is named. The common
-  operations are byte-decoded; the rest show their name + expected-body schema + a
-  generic body walk.
-- **Errors** — `0x0003` not_found, `0x00AC` not_supported, `0x0E15` not_commandable,
-  `0x0002` out_of_scope, `0x0E11` already_exists, `0x0E12`.
+- **Opcodes** — 630 AP2 function codes are named, matching the `PROTOCOL.md` §9.5
+  catalog one-for-one. The common operations are byte-decoded; the rest show their name +
+  expected-body schema + a generic body walk. An opcode outside the catalog renders as
+  `unknown_0x….`
+- **Errors** — all seven wire-observed codes from `PROTOCOL.md` §7.2.2: `0x0003`
+  not_found, `0x00AC` not_supported, `0x0E15` not_commandable, `0x0002` out_of_scope,
+  `0x0E11` already_exists, plus `0x0E12` and `0x0009`, whose precise meanings are not yet
+  established (Appendix D item 3).
 - **Values** — big-endian `f32`; the COV condition/priority block decoded field by field.
 
 ## Correctness notes
@@ -161,7 +165,8 @@ dissector: the dissector only *watches* traffic, the scanner *sends* requests.
 
 - `p2_gui.py` — a single-file Tkinter GUI. Edit your site settings in-app (no `site.json`
   required), discover/scan panels, browse the node/device tree, read and walk points, dump
-  PPCL programs, listen for change-of-value pushes, and export results to CSV/JSON.
+  PPCL programs, compare scans, and export results to CSV/JSON. (The passive COV/push
+  listener is CLI-only — see `--listen-push` below.)
 - `p2_scanner.py` — the scanner library/CLI. Self-contained: the FLN/TEC point catalog is
   embedded, so it runs as one file. (An external `tecpoints.json` is still honored if you
   drop one in, to update the catalog.)
@@ -173,6 +178,101 @@ dissector: the dissector only *watches* traffic, the scanner *sends* requests.
 python p2_gui.py            # GUI — recommended; edit config, scan, view, export
 python p2_scanner.py --help # CLI
 ```
+
+Common invocations:
+
+```bash
+# Inventory one panel's points
+python p2_scanner.py --node 192.0.2.10 --network MYBLN --read-all
+
+# Passive listen for COV / alarm pushes, pinned to the automation VLAN
+python p2_scanner.py --listen-push 300 --listen-bind 192.0.2.50 --format json
+
+# Offline opcode / error census over an existing capture
+python analyze_pcap.py capture.pcapng
+```
+
+### CLI reference
+
+Requires Python 3.10+ and the standard library only (the GUI additionally needs
+`tkinter`, which ships with most CPython builds; on Debian/Ubuntu install
+`python3-tk`). No third-party packages.
+
+**Target & connection**
+
+| Flag | Purpose |
+|---|---|
+| `--node` | PXC controller IP or node name |
+| `--pxc` | For --cold-discover: known PXC IP (skips port scan) |
+| `--network` | P2 network name (auto-learned if not set) |
+| `--port` | P2 ALN port (default: 5033). Override only where the configured P2 port is not 5033 — e.g. a site where a Datamate Advanced co-install bumped the s… |
+| `--scanner-name` | Scanner identity on P2 network (overrides config; default from config or {SCANNER_NAME!r}) |
+| `--config` | Load site config from JSON file |
+| `--save` | Save learned config to JSON file |
+| `--site-hint` | For --cold-discover: override BACnet-inferred prefix |
+
+**Discovery**
+
+| Flag | Purpose |
+|---|---|
+| `--discover` | Discover nodes and devices |
+| `--scan-network` | Probe all known nodes |
+| `--range` | IP range to scan. Formats: 192.0.2.0/24, 192.0.2.1-254, 192.0.2, or single IP. Can specify multiple times. |
+| `--auto-discover` | Polished one-shot cold discovery: auto-detects local subnet (if --range omitted), port-scans TCP/5033, bootstraps BLN + supervisor + per-panel name… |
+| `--cold-discover` | Discover BLN/scanner/node names on an unknown site. Uses BACnet recon + Cartesian dictionary attack. |
+| `--cold-delay` | For --cold-discover: delay between probes (default 0.3) |
+| `--skip-bacnet` | For --cold-discover: skip BACnet phase |
+| `--skip-portscan` | Skip port scan during discovery (use known nodes) |
+| `--bacnet-duration` | For --cold-discover: BACnet listen seconds (default 30) |
+| `--bacnet-interface` | For --cold-discover: bind interface (default 0.0.0.0) |
+| `--with-panel` | Also scan panel-level points during discovery |
+| `--list-nodes` | List known PXC nodes |
+
+**Reading points**
+
+| Flag | Purpose |
+|---|---|
+| `--device` | TEC device name (e.g., DEVICE1) |
+| `--point` | Specific point(s) to read. Accepts point names ("ROOM TEMP |
+| `--read-all` | Read all points on every discovered device |
+| `--walk-points` | Use opcode 0x0981 to enumerate every point on a panel (more complete than 0x0986 FLN enumerate). Requires -n NODE. |
+| `--browse` | Browse devices on a node |
+| `--quick` | Quick scan (key points only) |
+| `--force-slot` | When reading by slot number, attempt the read even if the slot is undefined in the app\'s point table (for protocol troubleshooting). |
+| `--force-full` | For --cold-discover: enable exhaustive tier 3 sweep |
+| `--read-delay` | Inter-read delay during a device scan (default: 0.05). Raise on slow controllers or where you want to throttle probe rate. |
+| `--verify` | Verify which devices are actually online after discovery |
+| `--show-app` | Show point table for TEC application |
+
+**Panel info & programs**
+
+| Flag | Purpose |
+|---|---|
+| `--info` | Show node firmware/revision info during discovery |
+| `--sysinfo-compact` | Use opcode 0x010C (newer firmware) for panel info. Complements --info which uses legacy 0x0100. Requires -n NODE. |
+| `--dump-programs` | Use opcode 0x0985 to read PPCL program source from a panel. Requires -n NODE. |
+
+**Passive capture**
+
+| Flag | Purpose |
+|---|---|
+| `--listen-push` | Bind to the supervisor port (default 5033) and collect PXC push notifications (COV events, BLN virtual updates, routing tables). No SECONDS = run u… |
+| `--listen-port` | Port for --listen-push (default: 5033 — Siemens-canonical supervisor port per 149-1006; override if your site uses a different port, e.g. 5034 for… |
+| `--listen-bind` | Local interface address for --listen-push (default: 0.0.0.0, all interfaces). Set this to the automation-VLAN address on a dual-homed host so the l… |
+| `--listen-output` | Write captured events to FILE (default: stdout) |
+| `--listen-no-ack` | Don't ACK incoming pushes (safer if a real DCC is also on the network) |
+| `--sniff` | Live capture P2 traffic to learn network name (requires tshark/Wireshark, default 10s) |
+| `--pcap` | Decode a pcap/pcapng file |
+
+**Output & misc**
+
+| Flag | Purpose |
+|---|---|
+| `--format` | Output format (default: table) |
+| `--offline` | Only show devices confirmed offline (implies --verify) |
+| `--online` | Only show devices confirmed online (implies --verify) |
+| `--debug-reads` | Print raw hex when a point-read fails to parse (helpful for diagnosing unusual response shapes) |
+
 
 The GUI imports the scanner at runtime, so keep the three `.py` files together. Site
 configuration is edited in **File → Edit Site Config** and is applied immediately;
@@ -201,6 +301,17 @@ secret). That makes this tooling powerful and easy to misuse, so:
 This split — a passive dissector plus a read-oriented scanner, with destructive operations
 documented but not shipped runnable — is deliberate: it helps a defender understand and
 secure their own system without handing an attacker a turnkey weapon.
+
+## Security
+
+See [SECURITY.md](SECURITY.md). Vulnerabilities in **P2 itself or in Siemens equipment**
+go to Siemens ProductCERT, not to this repository; bugs in **this tooling** (a frame that
+crashes a parser, unvalidated input reaching the wire) go to GitHub issues.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). The dissector and scanner version independently
+(`P2_DISSECTOR_VERSION` in `p2.lua`; `p2_scanner.__version__`).
 
 ## Contributing
 

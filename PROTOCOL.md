@@ -880,7 +880,7 @@ sanitized placeholders; the body grammar of a given opcode is defined in §8.
 02 20            opcode = 0x0220 (POINT_LOG_VALUE / ReadShort)         [W]
 01 00 04 53 59 53 54                 SYST scope-name TLV               [W]
 00 3F FF FF FF                       scope selector: scope_byte 0x00 (read) + mask [W]
-00 00                                reserved (2 bytes)                [W]
+00 00                                name_space = system (§8.5)        [W]
 01 00 0A 43 54 4C 52 30 31 2E 30 30 31   name TLV part 1 "CTLR01.001" (10) [W]
 01 00 07 52 4F 4F 4D 54 4D 50            name TLV part 2 "ROOMTMP"     (7)  [W]
 00 00 01 00 00 01 00 00              read trailer (8 bytes)            [W]
@@ -4311,8 +4311,9 @@ specific test that would confirm or falsify it.
 
 3. **Error-code value↔class meanings.** *Known:* the wire error tails observed are
    `0x0003` (not found, dominant), `0x00AC` (not supported), `0x0002`
-   (out-of-scope), `0x0E11` (already exists), `0x0E15` (not commandable), `0x0009`
-   (one occurrence, meaning unconfirmed); the AP2 error-class names exist
+   (out-of-scope), `0x0E11` (already exists), `0x0E15` (not commandable), `0x0E12`
+   (a few occurrences, an already-exists-adjacent record-state rejection, meaning
+   unconfirmed), `0x0009` (one occurrence, meaning unconfirmed); the AP2 error-class names exist
    (not-supported, bad-tag-value, bad-packet-length, etc.). *Missing:*
    the complete value→class map and the meaning of less-common codes (e.g.
    `0x0009`); whether per-opcode error namespaces exist. *Test:* drive each

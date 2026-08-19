@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import threading
 import time
 import traceback
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from typing import Any, Callable, Hashable, Tuple
 import datetime
 from tkinter import ttk
@@ -114,6 +114,76 @@ class QueueWriter:
             self._buf = ""
 
 
+class _ThreadLocalStdio:
+    """Stream proxy that routes writes to a per-thread target.
+
+    ``contextlib.redirect_stdout`` rebinds the process-wide ``sys.stdout``, so a
+    worker thread capturing scanner output also swallows prints from the main
+    thread (and from any other thread) for the duration of the task. With one
+    task in flight that mostly shows up as stray GUI output landing in a task
+    log; with a listener and a scan running together the two interleave, and an
+    exception during teardown can leave ``sys.stdout`` pointing at a dead
+    QueueWriter for the rest of the process.
+
+    This proxy is installed on ``sys.stdout``/``sys.stderr`` once, then each
+    thread registers its own sink. Threads with no sink registered fall through
+    to the real stream, so the console keeps working normally.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._local = threading.local()
+
+    def set_sink(self, sink) -> None:
+        self._local.sink = sink
+
+    def clear_sink(self) -> None:
+        self._local.sink = None
+
+    def _target(self):
+        return getattr(self._local, "sink", None) or self._real
+
+    def write(self, s):
+        return self._target().write(s)
+
+    def flush(self):
+        target = self._target()
+        if hasattr(target, "flush"):
+            target.flush()
+
+    def isatty(self):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+# Installed once at import. Idempotent: re-importing will not double-wrap.
+if not isinstance(sys.stdout, _ThreadLocalStdio):
+    sys.stdout = _ThreadLocalStdio(sys.stdout)
+if not isinstance(sys.stderr, _ThreadLocalStdio):
+    sys.stderr = _ThreadLocalStdio(sys.stderr)
+
+
+@contextmanager
+def _thread_stdio(sink):
+    """Route this thread's stdout/stderr to `sink` for the duration."""
+    out, err = sys.stdout, sys.stderr
+    set_out = isinstance(out, _ThreadLocalStdio)
+    set_err = isinstance(err, _ThreadLocalStdio)
+    if set_out:
+        out.set_sink(sink)
+    if set_err:
+        err.set_sink(sink)
+    try:
+        yield
+    finally:
+        if set_out:
+            out.clear_sink()
+        if set_err:
+            err.clear_sink()
+
+
 class TaskRunner:
     """Submits scanner calls to a single daemon worker thread.
 
@@ -201,7 +271,7 @@ class TaskRunner:
         start = time.time()
         writer = QueueWriter(self.log_queue)
         try:
-            with redirect_stdout(writer), redirect_stderr(writer):
+            with _thread_stdio(writer):
                 result = func(*args, **kwargs)
                 writer.flush()
             if self.stop_event.is_set():

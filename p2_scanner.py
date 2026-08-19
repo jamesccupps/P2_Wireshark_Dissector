@@ -78,10 +78,37 @@ import csv
 import re
 import secrets
 from datetime import datetime
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from typing import Optional, Dict, List, Tuple, Any, Callable
 
 import firmware_registry  # APOGEE_P2_SPEC.md §30 — fast-path dialect lookup
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A note on `APOGEE_P2_SPEC.md §N` citations throughout this file.
+#
+# APOGEE_P2_SPEC.md is the internal working spec this tooling was built against.
+# It is NOT shipped in this repository, and its section numbering does NOT
+# correspond to the published PROTOCOL.md. Treat those citations as provenance
+# markers ("this constant came from a specific documented observation"), not as
+# links a reader can follow.
+#
+# The published, self-contained reference is PROTOCOL.md in this repo. Where a
+# claim here matters to a reader, the equivalent PROTOCOL.md section is:
+#   frame layout / framing over TCP ......... §6.1
+#   message classes & dialects .............. §6.2
+#   direction byte .......................... §6.3
+#   routing slots ........................... §6.4
+#   sequence & request/response pairing ..... §6.5
+#   success vs error responses, error codes . §7.2
+#   connection & session model .............. §7.3
+#   string TLV / scope tag / value fields ... §8.1-§8.3
+#   date/time stamp ......................... §8.3.4
+#   opcode catalog .......................... §9.5
+#   COV body & condition block .............. §12.3
+#   alarm report / ack opcodes .............. §13.6
+#   firmware & revision identity ............ §16.5
+#   destructive opcodes (documented, not implemented) §16.6, §17.4
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Single source of truth for the scanner library version. Keep in sync
 # with pyproject.toml's [project].version. `import p2_scanner` users can
@@ -238,6 +265,53 @@ class ScannerInputError(ValueError):
     directly; those who don't care will get a normal Python traceback.
     """
     pass
+
+
+# Sanity bound for any string that lands in a NUL-terminated routing slot.
+# Not a protocol constant — the true panel-side field width isn't pinned in
+# PROTOCOL.md. 64 is comfortably above every observed identity (the
+# conventional form is 15 chars, e.g. `P2SCAN-LAP|5033`) while still catching
+# a config typo or a pasted blob before it reaches the wire.
+MAX_WIRE_NAME = 64
+
+
+def _wire_name(value: Optional[str], field: str,
+               max_len: int = MAX_WIRE_NAME) -> bytes:
+    """Validate and ASCII-encode a name bound for a NUL-terminated P2 slot.
+
+    The four routing slots are delimited by NUL bytes, so a name that itself
+    contains a NUL emits an extra delimiter and desynchronizes the panel's
+    four-slot parse — the frame is then misrouted or dropped, with no error
+    surfaced to us. Non-ASCII raises UnicodeEncodeError deep in the payload
+    builder, which escapes the ScannerInputError contract the CLI relies on
+    for its exit-code-2 behavior. Both are caught here, at the one boundary
+    where a Python string becomes wire bytes.
+
+    Empty is permitted: P2_NETWORK/P2_SITE are legitimately empty before a
+    site config is loaded, and an empty slot is a valid frame.
+
+    Raises ScannerInputError on any violation.
+    """
+    if value is None:
+        value = ''
+    if not isinstance(value, str):
+        raise ScannerInputError(
+            f"{field} must be a string, got {type(value).__name__}")
+    if '\x00' in value:
+        raise ScannerInputError(
+            f"{field} contains an embedded NUL byte at index "
+            f"{value.index(chr(0))}; NUL is the routing-slot delimiter and "
+            f"cannot appear inside a name")
+    try:
+        encoded = value.encode('ascii')
+    except UnicodeEncodeError as exc:
+        raise ScannerInputError(
+            f"{field} must be ASCII; {value!r} contains a non-ASCII "
+            f"character at index {exc.start}") from exc
+    if len(encoded) > max_len:
+        raise ScannerInputError(
+            f"{field} is {len(encoded)} bytes; the limit is {max_len}")
+    return encoded
 
 
 def save_config(filepath: str):
@@ -940,10 +1014,10 @@ class P2Connection:
         it, so reusing the original seq after a timeout is fine for our own tracking
         but pointless — the first seq's response will never come.
         """
-        net = self.network.encode('ascii')
-        src = node_name.encode('ascii')
-        scanner = self.scanner_name.encode('ascii')
-        site = P2_SITE.encode('ascii')
+        net = _wire_name(self.network, 'BLN name (network)')
+        src = _wire_name(node_name, 'node name')
+        scanner = _wire_name(self.scanner_name, 'scanner name')
+        site = _wire_name(P2_SITE, 'site name')
 
         routing = (
             b'\x00' +
@@ -1092,9 +1166,9 @@ class P2Connection:
     def _build_routing(self, dest_node: str, is_request: bool = True) -> bytes:
         """Build the P2 routing header. P2 puts destination first, then source."""
         flag = b'\x00' if is_request else b'\x01'
-        src = self.scanner_name.encode('ascii')
-        dst = dest_node.encode('ascii')
-        net = self.network.encode('ascii')
+        src = _wire_name(self.scanner_name, 'scanner name')
+        dst = _wire_name(dest_node, 'destination node name')
+        net = _wire_name(self.network, 'BLN name (network)')
         return flag + net + b'\x00' + dst + b'\x00' + net + b'\x00' + src + b'\x00'
 
     def _send_message(self, msg: P2Message) -> bool:
@@ -2513,19 +2587,10 @@ def sniff_pcap(pcap_file: str, output_format: str = "table") -> List[Dict]:
     all_points = []
     # Cross-panel topology observations — populated from 0x4634 routing tables
     routing_tables = []  # [{'src_panel': ..., 'peers': [{'name': ..., 'cost': ...}]}]
-    cov_sources = collections.Counter() if 'collections' in dir() else {}
-    # Local fallback if collections wasn't imported at top level
-    try:
-        import collections as _coll
-        cov_sources = _coll.Counter()
-    except Exception:
-        cov_sources = {}
+    cov_sources: 'Counter[str]' = Counter()
 
     def _inc(d, k):
-        if hasattr(d, 'update') and isinstance(d, dict) and not hasattr(d, 'most_common'):
-            d[k] = d.get(k, 0) + 1
-        else:
-            d[k] += 1
+        d[k] += 1
 
     for line in result.stdout.strip().split('\n'):
         parts = line.split('\t')
@@ -6726,7 +6791,8 @@ def listen_for_push_notifications(port: int = 5033, duration: Optional[int] = No
                                   output_format: str = 'table',
                                   output_file: Optional[str] = None,
                                   ack_enabled: bool = True,
-                                  verbose: bool = False) -> None:
+                                  verbose: bool = False,
+                                  bind_address: str = '0.0.0.0') -> None:  # noqa: S104 - explicit back-compat default, warned at runtime, overridable via --listen-bind
     """Bind to TCP port (default 5033 — Siemens-canonical supervisor port
     per white paper 149-1006) and passively collect PXC push notifications.
 
@@ -6761,6 +6827,10 @@ def listen_for_push_notifications(port: int = 5033, duration: Optional[int] = No
 
     out_lock = threading.Lock()
     out_stream = open(output_file, 'a', buffering=1) if output_file else None
+    # In-flight connection counter, guarded by its own lock. A single-element
+    # list so the nested handler can mutate it without a `nonlocal`.
+    _inflight = [0]
+    _inflight_lock = threading.Lock()
 
     def emit(event: Dict):
         line = (_json.dumps(event) if output_format == 'json'
@@ -6870,16 +6940,32 @@ def listen_for_push_notifications(port: int = 5033, duration: Optional[int] = No
                 csock.close()
             except Exception:
                 pass
+            with _inflight_lock:
+                _inflight[0] -= 1
             if verbose:
                 print(f"  [{port}] disconnect {peer[0]}:{peer[1]}")
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(('0.0.0.0', port))
+    # Bind to the operator-selected interface. Defaults to 0.0.0.0 for
+    # backward compatibility, but a scanner host is routinely dual-homed
+    # (corporate LAN on one NIC, automation VLAN on the other) and this
+    # listener answers P2 — it should not be reachable from the corporate
+    # side just because that is where the default route lives. Pass the
+    # automation-VLAN address via --listen-bind to pin it.
+    try:
+        srv.bind((bind_address, port))
+    except OSError as exc:
+        srv.close()
+        raise ScannerInputError(
+            f"cannot bind {bind_address}:{port} — {exc}") from exc
     srv.listen(32)
     srv.settimeout(1.0)
 
-    print(f"  Listening on TCP {port} for P2 push notifications...")
+    print(f"  Listening on {bind_address}:{port} for P2 push notifications...")
+    if bind_address == '0.0.0.0':  # noqa: S104 - comparison, not a bind
+        print("  [WARN] bound to all interfaces; use --listen-bind <ip> to "
+              "restrict to the automation VLAN")
     print(f"  Scanner identity: {SCANNER_NAME}  |  BLN: {P2_NETWORK or '(not set)'}")
     print(f"  {'Press Ctrl+C to stop' if duration is None else f'Running for {duration}s'}")
     print()
@@ -6895,6 +6981,24 @@ def listen_for_push_notifications(port: int = 5033, duration: Optional[int] = No
                 csock, peer = srv.accept()
             except socket.timeout:
                 continue
+            # Bound in-flight connections. accept() will happily keep taking
+            # sockets past MAX_PEER_THREADS; without this they queue inside the
+            # executor holding an open fd each, so a flood exhausts the process
+            # fd limit even though only 32 are ever serviced. Refusing past the
+            # cap is the honest signal to the peer.
+            with _inflight_lock:
+                at_capacity = _inflight[0] >= MAX_PEER_THREADS
+            if at_capacity:
+                if verbose:
+                    print(f"  [{port}] refusing {peer[0]}:{peer[1]} — "
+                          f"{MAX_PEER_THREADS} connections already in flight")
+                try:
+                    csock.close()
+                except OSError:
+                    pass
+                continue
+            with _inflight_lock:
+                _inflight[0] += 1
             executor.submit(handle_connection, csock, peer)
     except KeyboardInterrupt:
         print("\n  Stopped.")
@@ -7063,6 +7167,11 @@ Known nodes: """ + ', '.join(f"{n}={ip}" for n, ip in sorted(KNOWN_NODES.items()
                              'No SECONDS = run until Ctrl+C.')
     parser.add_argument('--listen-port', type=int, default=5033,
                         help='Port for --listen-push (default: 5033 — Siemens-canonical supervisor port per 149-1006; override if your site uses a different port, e.g. 5034 for DMA-collision installs)')
+    parser.add_argument('--listen-bind', metavar='IP', default='0.0.0.0',  # noqa: S104 - documented default; see listen_for_push_notifications
+                        help='Local interface address for --listen-push '
+                             '(default: 0.0.0.0, all interfaces). Set this to '
+                             'the automation-VLAN address on a dual-homed host '
+                             'so the listener is not exposed on the corporate side.')
     parser.add_argument('--listen-output', metavar='FILE',
                         help='Write captured events to FILE (default: stdout)')
     parser.add_argument('--listen-no-ack', action='store_true',
@@ -7170,6 +7279,7 @@ Known nodes: """ + ', '.join(f"{n}={ip}" for n, ip in sorted(KNOWN_NODES.items()
     if args.listen_push is not None:
         listen_for_push_notifications(
             port=args.listen_port,
+            bind_address=args.listen_bind,
             duration=args.listen_push if args.listen_push > 0 else None,
             output_format='json' if args.format == 'json' else 'table',
             output_file=args.listen_output,
