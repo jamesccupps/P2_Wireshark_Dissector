@@ -302,17 +302,6 @@ This split — a passive dissector plus a read-oriented scanner, with destructiv
 documented but not shipped runnable — is deliberate: it helps a defender understand and
 secure their own system without handing an attacker a turnkey weapon.
 
-## Security
-
-See [SECURITY.md](SECURITY.md). Vulnerabilities in **P2 itself or in Siemens equipment**
-go to Siemens ProductCERT, not to this repository; bugs in **this tooling** (a frame that
-crashes a parser, unvalidated input reaching the wire) go to GitHub issues.
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md). The dissector and scanner version independently
-(`P2_DISSECTOR_VERSION` in `p2.lua`; `p2_scanner.__version__`).
-
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests welcome — especially captures that
