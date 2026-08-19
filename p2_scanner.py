@@ -376,11 +376,13 @@ def load_config(filepath: str) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 # These tables (COMMON_POINTS / HEATING_POINTS / REHEAT_POINTS / HW_VALVE_POINTS
 # / FAN_POINTS / SUPPLY_TEMP_POINT) are the **legacy fallback** point catalog,
-# used by `get_point_table` ONLY when `tecpoints.json` is missing or doesn't
-# contain the requested application. With the H-8 packaging fix
-# (`p2_scanner_data/tecpoints.json` shipped via setuptools package-data) this
-# fallback is effectively dead for normal installs — the catalog covers all
-# 1024 apps, including 2020-2027.
+# used by `get_point_table` ONLY when the full catalog cannot be loaded at all.
+# In practice that never happens: the complete 1024-application catalog is
+# EMBEDDED IN THIS FILE as a gzip+base64 blob (`_TECPOINTS_GZ_B64`, ~386 KB
+# encoded, ~8.7 MB expanded) and is the last entry in the loader's search
+# order, so a bare copy of p2_scanner.py with no data files beside it still
+# resolves every application. That is deliberate: one file, nothing to install,
+# nothing to forget to copy. An external tecpoints.json still overrides it.
 #
 # Kept on disk for:
 #   - resilience when running an out-of-tree script without the data package
@@ -770,8 +772,14 @@ def _load_tecpnts_db() -> Optional[Dict]:
       3. CWD `tecpoints.json` (legacy convenience for users who copied the
          file into their working directory).
       4. Legacy `tecpnts.json` at the same locations.
+      5. **The catalog embedded in this module** (`_TECPOINTS_GZ_B64`). This is
+         the one that actually serves nearly every install: it makes the
+         scanner a single self-contained file. Anything found above overrides
+         it, so a site can ship a newer or trimmed catalog without editing
+         this module.
 
-    Returns the parsed catalog or None when no source is reachable.
+    Returns the parsed catalog. In practice never None, because step 5 is
+    always available; None is reserved for a corrupted embedded blob.
     """
     import os
 
