@@ -34,6 +34,9 @@
   - [5.1 EPing — Ethernet-BLN availability probe (liveness, not a beacon)](#51-eping--ethernet-bln-availability-probe-liveness-not-a-beacon)
   - [5.2 Multicast availability channel (optional, off by default) — and the beacon myth](#52-multicast-availability-channel-optional-off-by-default--and-the-beacon-myth)
   - [5.3 Node-name-table replication (the self-organizing BLN)](#53-node-name-table-replication-the-self-organizing-bln)
+  - [5.3.3 Peer identity lives in three separate stores](#533-peer-identity-lives-in-three-separate-stores)
+  - [5.3.4 Deletion is tombstone-based](#534-deletion-is-tombstone-based)
+  - [5.3.5 Removing an entry, and why not to reach for a power cycle](#535-removing-an-entry-and-why-not-to-reach-for-a-power-cycle)
   - [5.4 What a fresh client learns, and what it cannot](#54-what-a-fresh-client-learns-and-what-it-cannot)
   - [5.5 FLN discovery (P1WhoAreYou)](#55-fln-discovery-p1whoareyou)
   - [5.6 Open items — discovery & FLN timing](#56-open-items--discovery--fln-timing)
@@ -117,6 +120,8 @@
   - [17.4 Ungated destructive operations](#174-ungated-destructive-operations)
   - [17.5 Registration versus impersonation](#175-registration-versus-impersonation)
   - [17.6 Guidance for implementers and owner-operators](#176-guidance-for-implementers-and-owner-operators)
+  - [17.7 Detecting BLN-name enumeration](#177-detecting-bln-name-enumeration)
+
 - [18. Appendices](#18-appendices)
   - [Appendix A — Value-enum reference](#appendix-a--value-enum-reference)
   - [Appendix B — Opcode-family index](#appendix-b--opcode-family-index)
@@ -789,6 +794,75 @@ Adjacent to the replication family is the full EBLN configuration/management opc
 The host-table add/remove pair (`0x462D`/`0x462E`) is the explicit write path for the node-name table whose contents §5.3 says auto-replicate BLN-wide. Companion node-state operations in the `0x003x` range govern membership at the routing layer: `0x0032` `AP2_REMOTE_NODE_CHECK`, `0x0033` `AP2_GET_COMPLETE_NODE_STATE`, `0x0034` `AP2_SET_NODE_STATE`, `0x0035` `AP2_SET_COMPLETE_NODE_STATE`, and `0x0030`/`0x0031` `AP2_SET_GLOBAL_DATA` / `AP2_GET_GLOBAL_DATA` [S]. The node lifecycle these drive is enumerated in `Node_table_event_enum` — including `node_added`, `node_failed`, and `node_ostracized` (a force-evict of a node from the BLN, a node-availability denial mechanism) [S].
 
 > **Security note (struct-derived, not a wire claim).** The EBLN config block and the node-state setters are full, unauthenticated-protocol write paths to a panel's network identity, BLN membership, port configuration, multicast, host table, and Telnet enablement, gated only by the BLN-name admission check (see §6). `0x4620`/`0x4621`/`0x462B`/`0x4638` (name/IP/BLN/MAC mutation), the host-table writers (`0x462D`/`0x462E`), the node-state setters (`0x0034`/`0x0035`), and node-ostracize are destructive to availability and identity. They are documented here for completeness; legitimate tooling for owner-operators should treat them as read-only-by-default and must not exercise the mutating members against production panels.
+
+#### 5.3.3 Peer identity lives in three separate stores
+
+A peer name is not held in one place. Three distinct stores exist, and which of
+them contain an entry for a given name determines whether — and from which
+panels — outbound sessions are initiated. Conflating them is the usual reason a
+removal appears to work and then does not. [W]
+
+| Store | Scope | Survives restart? | Populated by | Reached via |
+|---|---|---|---|---|
+| **Node-name table** | BLN-shared, replicated | Yes — entries are `(Permanent)` | Any accepted handshake, on any panel | `nodeNametable` sub-shell: `Display` / `Add` / `Remove` |
+| **Runtime peer state** | Per-panel, volatile | No | A handshake terminating on that panel | not directly; cleared on restart |
+| **Persistent active-peer state** | BLN-shared, replicated | Yes — survives cold restart and power-off | A handshake, propagated BLN-wide | `Fieldpanels` sub-shell: `Log` / `dElete` / `Modify` |
+
+The node-name table is a flat `name → IP (Permanent)` mapping. The persistent
+active-peer state is a `BLN → site → peer` hierarchy that the firmware treats as
+the set of peers this BLN should actively maintain sessions with — so an entry
+there causes every panel to initiate outbound sessions to that name and to
+re-establish them after a restart. [W]
+
+The practical consequence: clearing the node-name table alone does not stop
+outbound sessions, because the persistent active-peer state still lists the peer.
+Both BLN-shared stores must be cleared, and in the order given in §5.3.5.
+
+#### 5.3.4 Deletion is tombstone-based
+
+Removal via `Remove` (node-name-table shell) or `dElete` (Fieldpanels shell)
+does not simply drop a local row. It generates a **tombstone** — a deletion
+marker that propagates BLN-wide over the same replication mechanism as an
+addition, and which every receiving panel honours by removing its local copy. [W]
+
+This is why removal is a **single-panel operation, not a per-panel sweep**.
+Deleting on one panel is sufficient; the tombstone does the rest, within
+`Intrasite_poll_repl_period` (60 s) or `Intersite_poll_repl_period` (100 s).
+
+The tombstone itself persists for `Tombstone_lifetime` (86 400 s = 24 h), so that
+a panel offline during the deletion window still receives the removal when it
+returns. The corollary is a real operational constraint: **every panel on the BLN
+must come online and apply the tombstone within 24 hours.** A panel absent longer
+than that can re-propagate an entry that every other panel has already forgotten.
+
+#### 5.3.5 Removing an entry, and why not to reach for a power cycle
+
+There is **no protocol-level removal**. No opcode deregisters a peer; the write
+paths in §5.3.2 add, and nothing on the wire subtracts. Removal is a console
+operation. [W]
+
+Order matters:
+
+1. Console into **any one** panel on the BLN.
+2. In the `Fieldpanels` sub-shell, `dElete` the entry from the BLN → site → peer
+   hierarchy (the persistent active-peer state).
+3. In the `nodeNametable` sub-shell, `Remove` the same name.
+4. Wait for tombstone propagation (§5.3.4), then verify on a *different* panel —
+   `nodeNametable Display`, and the field-panel listing.
+
+**Reversing steps 2 and 3 strands the field-panel entry.** Recovering a stranded
+entry requires a privilege level above the normal engineering account. Do the
+field-panel delete first. [W]
+
+> **Do not use a power cycle as a cleanup.** It does not work and it carries real
+> risk. It does not work because the BLN-shared stores are non-volatile: a
+> restarted panel is repopulated by peers that were not restarted, so entries
+> return. And older PXC hardware is known to sometimes fail to reload after a
+> power interruption, entering a `Not ready` state that requires a
+> vendor-supervised reflash from a backup configuration to recover — observed
+> once on a production panel during the investigation that produced this
+> section. The console procedure above is non-disruptive and is the correct
+> mechanism. [W]
 
 ### 5.4 What a fresh client learns, and what it cannot
 
@@ -3801,6 +3875,76 @@ their own hardware. [I]
     lock them down independently of the P2 segment.
 
 ---
+
+### 17.7 Detecting BLN-name enumeration
+
+§17.2 establishes that the BLN name is the only admission gate, and §6.4 that a
+wrong name draws a TCP RST while a right one does not. That asymmetry is a
+discovery oracle: an unauthenticated client can learn the BLN name by guessing,
+and read the answer off the TCP layer without ever completing an exchange. This
+section is how an owner-operator sees that happening on their own network. [W]
+
+**What the traffic looks like.** Enumeration produces a distinctive shape that
+legitimate traffic does not:
+
+- **Many short-lived connections to TCP/5033 from one source**, each carrying a
+  single frame and then ending. A real supervisor holds a long-lived connection
+  and pipelines many operations over it.
+- **A high proportion terminated by RST from the panel**, typically 50–250 ms
+  after the client's PSH. A healthy client population produces almost none.
+- **A different slot-3 value on nearly every connection.** This is the strongest
+  single indicator, and it is decisive: a legitimate device knows its own BLN
+  name and sends the same one every time. A stream of distinct slot-3 values from
+  one source is enumeration and nothing else.
+- **Sequence numbers that do not advance** across those connections, because
+  each attempt is a fresh session that never gets far enough to establish one.
+- **Slot-4 values that are structurally plausible but varied** — a client
+  sweeping candidate supervisor identities alongside candidate BLN names.
+
+**A detection rule.** On a span or tap carrying the automation VLAN:
+
+```
+# Connections to 5033 that were reset by the panel
+tcp.port == 5033 && tcp.flags.reset == 1
+
+# Count distinct BLN names presented per source. p2.bln2 is the enforced slot.
+# One source presenting more than a handful is enumeration.
+tshark -r capture.pcapng -X lua_script:p2.lua -Y 'p2.bln2' \
+       -T fields -e ip.src -e p2.bln2 | sort -u | cut -f1 | uniq -c | sort -rn
+```
+
+Worked example, from a capture of the enumeration described above:
+
+```
+     14  192.0.2.101  SITEBLN      <- the panel: one name, always the same
+      1  192.0.2.50   CORPBLN      <- client: wrong guess
+      1  192.0.2.50   BLDGBLN      <- client: wrong guess
+      1  192.0.2.50   ACMEBLN      <- client: wrong guess
+     23  192.0.2.50   SITEBLN      <- client: correct, and now used for everything
+```
+
+The shape is unmistakable and needs no threshold tuning to read by eye: a run of
+single-frame wrong guesses from one source, then sustained traffic on one name.
+The transition between those two states is the discovery succeeding.
+A threshold of **more than three distinct BLN names from one source in an hour**
+is generous and has no legitimate explanation on a commissioned site. The dissector registers the four routing slots as `p2.bln1`, `p2.dst`,
+`p2.bln2` and `p2.src`; `p2.bln2` is the one the panel actually checks.
+
+**Why the silent case matters more than the RST case.** Detection tuned only to
+resets will miss the moment that matters. A *correct* guess does not draw a RST —
+the panel accepts the connection, stays silent, and the attacker learns the
+answer from the absence of a reset. So the meaningful alert is not "many resets"
+but "many resets from a source, **then a connection that was not reset**." That
+transition is the discovery succeeding, and it is the last moment at which the
+event is still only reconnaissance. [I]
+
+**What detection cannot do.** None of this prevents the enumeration; the oracle
+is a property of the protocol's admission check and there is no configuration
+that removes it. Detection buys the operator notice, and notice is worth having,
+because the interval between a successful BLN discovery and a registered peer
+(§17.5) can be a single further connection. Segmenting TCP/5033 so that only
+known supervisor and panel addresses can reach it is the actual mitigation;
+detection is what tells you the segmentation has a hole in it. [I]
 
 ## 18. Appendices
 
