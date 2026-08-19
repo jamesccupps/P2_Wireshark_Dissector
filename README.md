@@ -13,6 +13,17 @@ equipment. This repository contains three things:
 The dissector is built and validated from wire captures; the opcode names are the
 protocol's AP2 function-code vocabulary.
 
+> **v2.6 — accuracy pass.** The `0x29` / `0x2A` carrier labels are corrected: they were
+> named "peer maintenance" and "peer COV-subscribe," and the corpus establishes neither
+> function. They are now **session carrier** and **peer-session carrier (panel↔panel)**,
+> matching PROTOCOL.md §6.2; both carry the `EBLN_PING` (`0x4640`) identity exchange.
+> Error code `0x0E12` is named `record_state_rejected (unconfirmed)` — observed a handful
+> of times, adjacent to already-exists, precise meaning not pinned — and opcode `0x0030`
+> `AP2_SET_GLOBAL_DATA` is added. **Bug fix:** the error-tail read guarded on frame
+> length rather than on the post-slot offset, so a truncated `dir==0x05` frame could
+> render two header bytes as a phantom error code (observed: a 13-byte frame reporting
+> "ERROR 0x0105"). It now guards on the slot offset.
+>
 > **v2.5 — response correlation + more body decoders.** Responses carry no opcode on the
 > wire (only requests do) but echo their request's sequence; the dissector now keeps a
 > per-TCP-stream `{sequence → opcode}` map and **labels and decodes responses** — the
@@ -206,7 +217,7 @@ Requires Python 3.10+ and the standard library only (the GUI additionally needs
 | `--pxc` | For --cold-discover: known PXC IP (skips port scan) |
 | `--network` | P2 network name (auto-learned if not set) |
 | `--port` | P2 ALN port (default: 5033). Override only where the configured P2 port is not 5033 — e.g. a site where a Datamate Advanced co-install bumped the s… |
-| `--scanner-name` | Scanner identity on P2 network (overrides config; default from config or {SCANNER_NAME!r}) |
+| `--scanner-name` | Scanner identity on P2 network (overrides config; default from config, else the built-in scanner identity) |
 | `--config` | Load site config from JSON file |
 | `--save` | Save learned config to JSON file |
 | `--site-hint` | For --cold-discover: override BACnet-inferred prefix |

@@ -1,7 +1,22 @@
 -- p2.lua — Siemens APOGEE P2 (Protocol II) Wireshark dissector
--- Version: 2.5  (2026-06-29)  -- seq-state response correlation + response-body decoders
+-- Version: 2.6  (2026-08-19)  -- carrier-label correction, error/opcode names, tail-guard fix
 --
 -- Changelog
+--   2.6  Accuracy pass against the corpus.
+--        * 0x29 / 0x2A carrier labels corrected. They were named "peer maintenance"
+--          and "peer COV-subscribe"; the corpus establishes neither function. They
+--          are now "session carrier" and "peer-session carrier (panel<->panel)",
+--          matching PROTOCOL.md 6.2. Both carry the EBLN_PING 0x4640 identity
+--          exchange.
+--        * Error 0x0E12 named "record_state_rejected (unconfirmed)" -- observed a
+--          few times, adjacent to already-exists, precise meaning not pinned.
+--          Rendering it as a known-but-unpinned code beats bare hex.
+--        * Opcode 0x0030 AP2_SET_GLOBAL_DATA added.
+--        * BUG FIX: the error-tail read guarded on total>=2 and then read
+--          tvb(total-2,2). On a truncated dir==0x05 frame whose routing slots run to
+--          the end there is no tail, so that lifted two header/slot bytes and
+--          rendered a phantom error code (observed: a 13-byte frame reporting
+--          "ERROR 0x0105"). Now guards on off+2, matching the tree item.
 --   2.5  Response correlation via sequence state. Responses (direction 0x01 success /
 --        0x05 error) carry NO opcode on the wire — only the request does — but a response
 --        echoes its request's sequence number. The dissector now keeps a per-TCP-stream
@@ -89,7 +104,8 @@
 -- is 234.5.6.7:8 (off by default), not a discovery beacon.
 
 -- Dissector version. Tracks the p2.lua decode surface only; the scanner
--- versions independently (p2_scanner.__version__). See CHANGELOG.md.
+-- versions independently (p2_scanner.__version__). History is in the Changelog
+-- comment block at the top of this file.
 local P2_DISSECTOR_VERSION = "2.6"
 
 local p2 = Proto("p2", "Siemens APOGEE P2 (Protocol II)")

@@ -90,7 +90,9 @@ import firmware_registry  # APOGEE_P2_SPEC.md §30 — fast-path dialect lookup
 # It is NOT shipped in this repository, and its section numbering does NOT
 # correspond to the published PROTOCOL.md. Treat those citations as provenance
 # markers ("this constant came from a specific documented observation"), not as
-# links a reader can follow.
+# links a reader can follow. The same applies to the occasional reference to
+# OPCODES.md (an internal opcode audit, since folded into PROTOCOL.md 9) and to
+# PUNCHLIST_REPO_HEALTH.md (an internal tracking document). Neither ships here.
 #
 # The published, self-contained reference is PROTOCOL.md in this repo. Where a
 # claim here matters to a reader, the equivalent PROTOCOL.md section is:
