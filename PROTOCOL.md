@@ -699,7 +699,7 @@ A panel may alternatively host a BACnet MS/TP field bus in place of P1 (`Fln_typ
 
 > **[OPEN] Serial-BLN P2 link framing bytes.** Only the line parameters (8/N/1, baud tiers, trunk numbering) are established for the dedicated serial BLN. The byte-level link framing that carries a P2 logical frame over RS-485 (start/sync delimiting, address byte, CRC/checksum, the medium's segmentation) is **not** observed in the present evidence and is not specified here. An AEM Channel-1 capture (TCP/3001) would expose these bytes, since the AEM tunnels the serial stream verbatim.
 
-> **[OPEN] FLN/P1 frame bytes.** The P1 fieldbus discovery transaction (P1WhoAreYou), addressing (drop + application number), physical layer (RS-485 2-wire), and baud are documented, but the P1 frame byte layout itself is unobserved. The on-wire P1 frame structure, the WhoAreYou request/response bytes, and the per-poll cadence/retry behavior require a P1-bus capture or a route-through capture from the BLN.
+> **[OPEN] FLN/P1 frame bytes.** The P1 fieldbus discovery transaction (P1WhoAreYou), addressing (drop + application number), physical layer (RS-485 2-wire), and baud are documented, but the P1 frame byte layout itself is unobserved. The on-wire P1 frame structure, the WhoAreYou request/response bytes, and the per-poll cadence/retry behavior require a P1-bus capture or a route-through capture from the BLN. **The route-through opcode is now named: `0x0313 AP2_P1_ROUTE`, with `0x0314` alongside it** (§9.1.1). Fifteen distinct field-device operations tunnel through `0x0313`, so a capture containing it carries P1 payloads inside a P2 frame — which is the cheapest route to these bytes, and needs no access to the RS-485 segment itself. Neither opcode occurs in any capture in the present corpus.
 
 > **[OPEN] P2 segmentation thresholds and reassembly rules.** The ~256-byte figure from vendor connection-test material is a *connection-test ping* size, **not** a maximum P2 data-packet cap — single P2 frames are observed with `total_len` up to ≈1,587 bytes (a ~1,530-byte body of packed records plus header+slots) in one response, so a single frame's `total_len` is bounded only by the u32 length field (§6.7) [W]. The P2 application layer still carries an explicit more-follows segmentation flag and segment-mapping at the ASDU layer for results large enough to exceed an implementation ceiling [S], but the exact segmentation threshold and the more-follows flag offset/reassembly rules are not pinned on the wire. Needs a multi-segment upload capture for confirmation.
 
@@ -1977,6 +1977,80 @@ The complete command vocabulary of the protocol is defined by the vendor's `AP2_
 Of the 630 defined values, **135 are observed in the capture corpus** (530,715 P2 frames across 108 captures); the remaining 495 are defined-but-unobserved (overwhelmingly configuration, database-management, upload, and BACnet/LON-integration operations that a passive supervisor↔panel capture does not exercise). Every defined opcode is enumerable from the catalog below; "not observed" means absent from this corpus, not undefined. The corpus combines passive supervisor↔panel and panel↔panel site captures with a smaller set of active read/enumeration test captures; opcode counts are corpus frequencies, not a claim about steady-state operation. [W][S]
 
 Rows that were seen on the wire are tagged **[W]** and carry their frame count; defined-but-unobserved rows are tagged **[S]** (struct/metadata-derived from the vendor enum — definitional truth). Wire counts in the catalog come from the corpus census; per-opcode response shapes, error tails, and message-class distributions are in §9.7.
+
+### 9.1.1 The wire opcode is the bottom of a three-tier model
+
+An implementer reading only the wire sees one identifier per request. The stack
+that produces it carries three, and knowing that resolves several things this
+document previously treated as anomalies. [S]
+
+```
+  __Rpc<Operation>          the supervisor-side operation, by name
+        |
+        v
+  CPI function code         "Common Protocol Interface" dispatch id
+        |
+        v
+  AP2 function code         what appears on the wire (§6)
+```
+
+The command object exposes both lower tiers side by side —
+`GetAP2FunctionCode` / `SetAP2FunctionCode` alongside `GetCPIFunctionCode`,
+with a `BLN2CPI` translation — so the two codes are genuinely distinct fields,
+not two names for one value. [S]
+
+Scale: **353 CPI codes carry a recovered operation name**, and **339 CPI→AP2
+mappings** resolve onto **261 distinct wire opcodes**. The names are plainly
+descriptive (`__RpcRegisterCOVxx`, `__RpcCancelCOVxx`, `__RpcColdStartCabinet`,
+`__RpcMakeNodeOffline`, `__RpcBACnetWhoIs`, `__RpcBPing`), which makes the CPI
+tier the most legible statement of *what operations exist* that this protocol
+has. [S]
+
+#### The mapping is not one-to-one, and eight opcodes prove it
+
+For 253 of the 261 wire opcodes the mapping is injective and the wire opcode
+does identify the operation. **Eight do not**, and the exceptions are
+structural rather than incidental:
+
+| Wire opcode | CPI codes mapping to it | What it is |
+|---|---:|---|
+| `0x0313` `AP2_P1_ROUTE` | **15** | a P1 fieldbus tunnel |
+| `0x0034` | 3 | |
+| `0x0220`, `0x005B`, `0x0275`, `0x0314`, `0x0547`, `0x0548` | 2 each | |
+
+`0x0313` is the clear case and it explains itself: the fifteen operations that
+share it are UC upload, UC point/PPCL/TOD definition and readback, TEC point
+and report info, a P1 LAN line test, and a trace-bit clear — every one of them
+an operation *against a field device rather than the panel*. The wire opcode
+does not name the operation because its job is to say **"route this onto P1"**.
+The operation is inside the payload. `0x0314` pairs with it and includes an
+explicit pass-through. [S]
+
+**For a dissector this is the important consequence:** labelling a frame from
+its AP2 opcode alone is correct for 253 opcodes and wrong for `0x0313` in
+particular, where it collapses fifteen distinct operations into one name. Such
+frames must be decoded a level deeper or labelled as tunnelled.
+
+#### A second discriminator: sub-opcodes
+
+Some operations additionally write a **sub-opcode** into the body, which acts
+as a further selector beneath the wire opcode — for example `0x0240` carries a
+sub-code distinguishing a write-with-quality, and `0x0273` distinguishes a
+value-less write from a point probe. Sub-codes are known for roughly twenty
+opcodes across the point, cabinet and node families. Their byte offset within
+the body is opcode-specific and is **[OPEN]**. [S]
+
+#### The message-structure catalog
+
+The stack defines **505 distinct ASDU body structures**, named on a strict
+convention: an operation contributes `<OPERATION>_REQ` and, where it answers
+with data, `<OPERATION>_RESP`, with shared field groups as `<NAME>_TYPE`. The
+names track the families of §9.4 exactly — `ALARM_ACK_REQ`/`_RESP`,
+`ANNUNCIATE_COV_REQ`, `BACKUP_FLASH_DBASE_REQ`, `BACNET_MGT_READ_BBMD_REQ`/
+`_RESP`, `ADD_CONTROLLER_REQ`, and so on. The convention is worth knowing on
+its own: **a `_REQ` without a matching `_RESP` is an operation that answers
+with status only**, which is a cheap way to predict whether a request returns a
+body before sending one. [S]
 
 ### 9.2 Naming, families, and value layout
 
