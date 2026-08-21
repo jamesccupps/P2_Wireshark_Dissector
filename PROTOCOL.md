@@ -740,10 +740,10 @@ The replication exchange is a small family of AP2 function codes. In the current
 
 | Opcode | AP2 name | Role | Status in corpus | Tag |
 |---|---|---|---|---|
-| `0x4633` | `AP2_EBLN_REPL_NOTIFY` | "I have changes" notification to peers | rare; empty bodies; did not fire on live DB change | [S] |
+| `0x4633` | `AP2_EBLN_REPL_NOTIFY` | "I have changes" notification to peers | 23 frames; **22 of 23 request bodies empty** (the notification carries no payload); symmetric, 48% each direction | [W] |
 | `0x4634` | `AP2_EBLN_REPL_PULL` | pull replicated data (carries the node-table version digest; leaks node membership) | routinely observed (the dominant replication opcode) | [W] |
-| `0x4635` | `AP2_EBLN_REPL_PULL_MORE` | continuation pull (segmented replication payload) | rare; empty bodies (≈130 frames) | [W] |
-| `0x4636` | `AP2_EBLN_REPL_CHANGES` | changed-records delta exchange | rare; empty bodies (≈179 frames); did not fire on live DB change | [W] |
+| `0x4635` | `AP2_EBLN_REPL_PULL_MORE` | continuation pull (segmented replication payload) | 130 frames; request bodies 8–12 B, **none empty**; 64% panel-initiated | [W] |
+| `0x4636` | `AP2_EBLN_REPL_CHANGES` | changed-records delta exchange | **the live replication carrier**: 340 frames (170 requests + 170 replies) in a single passive supervisor capture, bodies 331–1551 B, **none empty**; bidirectional (62% supervisor→panel, 37% panel→supervisor) | [W] |
 | `0x464C` | `AP2_EBLN_REPL_DIAG_NODELIST` | replication-diagnostic node list | observed once | [W] |
 
 `0x4634` (`EBLN_REPL_PULL`) is the mechanism by which a node advertises/obtains the current node roster — the same roster that constitutes BLN membership; its request carries the full version digest and the matched response is an empty (`0 B`) success ack (§5.3 step 3). The actual changed-record delta propagation observed on the wire rides the `DBCHANGE_*`/`UPL_ADDED_*`/`UPL_DEL_*` family on the second channel, not these `0x463x` opcodes.
@@ -768,7 +768,7 @@ The `u32` after each name is that node's **change generation** — it increments
 
 1. You add (or rename) a node entry on panel **A**. A inserts the row, **bumps its own per-node version** (and the header table-version).
 2. On its next replication round A sends its full digest to its peers via `EBLN_REPL_PULL` (`0x4634`) — observed flowing *mutually* in every direction (panel→panel, panel→supervisor, supervisor→panel), so every node periodically advertises its whole table to every other node. [W]
-3. Each receiver compares the advertised per-node versions against its own. If they already match, it answers with an **empty (0-byte) success ACK** — the steady-state case (every matched `0x4634` response in the capture was empty: the digest *request* carries the full version vector, the response is just an ack). [W] If a peer is behind on some node (A's version is newer, or A carries an entry the peer lacks), it fetches the delta. Two delta paths are seen. The **commonly observed** one, during live database activity, is the ordinary database-change opcode family flowing on the `0x2E`/`0x2F` second channel: `DBCHANGE_*` (e.g. `0x0956 DBCHANGE_CONTROLLER`), `UPL_ADDED_*` (`0x0971 POINT`, `0x0974 TREND`, `0x0976 TEC`, …), and `UPL_DEL_*` (`0x0961`/`0x0964`/`0x0966`/…) — i.e. the changed records propagate as the same add/delete operations the supervisor uses, addressed peer→peer. [W] The dedicated replication-delta opcodes — `EBLN_REPL_NOTIFY` (`0x4633`, "I have changes"), `EBLN_REPL_CHANGES` (`0x4636`, changed records), `EBLN_REPL_PULL_MORE` (`0x4635`, paging) — also exist and appear in the corpus, but **rarely and with empty bodies**, and did not fire during captures that contained live DB changes; treat them as the formal mechanism while recognizing that observed record propagation went via the `DBCHANGE_*`/`UPL_ADDED_*`/`UPL_DEL_*` family. [W][S]
+3. Each receiver compares the advertised per-node versions against its own. If they already match, it answers with an **empty (0-byte) success ACK** — the steady-state case (every matched `0x4634` response in the capture was empty: the digest *request* carries the full version vector, the response is just an ack). [W] If a peer is behind on some node (A's version is newer, or A carries an entry the peer lacks), it fetches the delta. Two delta paths are seen. The **commonly observed** one, during live database activity, is the ordinary database-change opcode family flowing on the `0x2E`/`0x2F` second channel: `DBCHANGE_*` (e.g. `0x0956 DBCHANGE_CONTROLLER`), `UPL_ADDED_*` (`0x0971 POINT`, `0x0974 TREND`, `0x0976 TEC`, …), and `UPL_DEL_*` (`0x0961`/`0x0964`/`0x0966`/…) — i.e. the changed records propagate as the same add/delete operations the supervisor uses, addressed peer→peer. [W] The dedicated replication-delta opcodes — `EBLN_REPL_NOTIFY` (`0x4633`, "I have changes"), `EBLN_REPL_CHANGES` (`0x4636`, changed records), `EBLN_REPL_PULL_MORE` (`0x4635`, paging) — are **also a live carrier**, not merely a formal one. A single passive supervisor capture holds 340 `0x4636` frames with bodies of 331–1551 bytes and **none empty** — the supervisor continuously distributing host-table state across the BLN. An earlier reading of this document called them rare and empty-bodied; that was a corpus-wide frame-count artifact and is withdrawn. Both paths are real: the `DBCHANGE_*`/`UPL_ADDED_*`/`UPL_DEL_*` family carries record propagation on the second channel, and the `EBLN_REPL_*` family carries the anti-entropy digest and delta. [W][S]
 4. Each peer that merges the new entry then re-advertises it on its own next round, so the addition **ripples across the entire mesh until every panel and the supervisor converge** — typically within a poll cycle or two given the ~10 s notify / ~30 s poll cadence above. A removed entry lingers as a tombstone for ~24 h before it is reaped, which is also how a deletion propagates without a node that missed the change silently re-adding it.
 
 Because the key is the **exact node-name string**, adding a name that differs only in case or spelling creates a *separate* replicated entry rather than updating the existing one — the capture shows two co-existing supervisor rows differing only in case, each independently versioned and mesh-replicated. Obtaining this roster via `0x4634` is also the pre-auth membership-disclosure path of §17.3.
@@ -804,9 +804,11 @@ removal appears to work and then does not. [W]
 
 | Store | Scope | Survives restart? | Populated by | Reached via |
 |---|---|---|---|---|
-| **Node-name table** | BLN-shared, replicated | Yes — entries are `(Permanent)` | Any accepted handshake, on any panel | `nodeNametable` sub-shell: `Display` / `Add` / `Remove` |
+| **Node-name table** | **Per-panel** (see note) | Yes — entries are `(Permanent)` | Any handshake carrying the correct BLN — **accepted or silently rejected** | `nodeNametable` sub-shell: `Display` / `Add` / `Remove` |
 | **Runtime peer state** | Per-panel, volatile | No | A handshake terminating on that panel | not directly; cleared on restart |
 | **Persistent active-peer state** | BLN-shared, replicated | Yes — survives cold restart and power-off | A handshake, propagated BLN-wide | `Fieldpanels` sub-shell: `Log` / `dElete` / `Modify` |
+
+**Scope correction.** The node-name table was previously described here as BLN-shared and replicated. Console evidence contradicts that: after a name-guessing campaign against one panel, that panel's `NODE NAME TABLE REPORT` listed ~150 probe identities while a peer panel on the same BLN, checked minutes later, listed only the 13 legitimate entries. The names *are* carried in `0x4636` replication traffic addressed to eight peers, but peers do not materialise every replicated change record as a node-name-table row; what governs that is **[OPEN]**. The *persistent active-peer state* below does propagate — three phantom entries reached a panel that was never probed. [W]
 
 The node-name table is a flat `name → IP (Permanent)` mapping. The persistent
 active-peer state is a `BLN → site → peer` hierarchy that the firmware treats as
@@ -884,7 +886,34 @@ Access from the BLN to an FLN device is **route-through**: a client connects to 
 
 > **[OPEN] Per-frame retry/ACK timing.** All established timing is at the discovery/replication layer (EPing periods/timeouts; replication notify/poll/cycle; the binary Extended-Timeout pre-Rev-2.1 compatibility flag). P2 *frame-level* retry counts and per-frame ACK/sequence timeouts are not established and should not be inferred from the discovery-layer periods.
 
-> **[OPEN] Exact replication payload offsets.** The replication opcodes (`0x4633`–`0x4636`) and their roles are wire-confirmed, but the byte-level layout of the pull-response roster and the changed-records delta (record framing, per-entry fields, the COV/condition block carried in change records) is not fully mapped from the read-only corpus. The vendor ASDU structures (`AP2_Ebln_Repl_*`) define the field set [S]; confirming the exact on-wire offsets needs a capture of an active add/remove replication event.
+**`0x4636` body layout.** Mapped from the read-only corpus; 1,412 of 1,412 grains decode under the constraint that each record must tile the buffer exactly. [W]
+
+```
+u16   reconciliation
+u32   boc_usn_changed
+u8    more_data
+u16   srce_cycle_number
+u16   srce_cycle_pdu_number
+u16   n_utdv                     "up-to-dateness vector" entry count
+      utdv[] :  TLV node name | u32 USN          <- the version vector
+u16   n_grain
+      grain[] :
+        TLV   record key         "&<origin>&MMDDYYHHMMSS&<counter>"
+        u32   local USN
+        u8    replication command type
+        u8    grain type
+        TLV   target             host-table name; MAY be zero-length (BLN scope)
+        u16   embedded length
+              u16 opcode | TLV scope ("SYST") | 23 3f ff ff ff | TLV name | tail
+        u32   counter
+        u32   origin time        unix epoch seconds
+        TLV   origin node
+        u32   origin USN
+```
+
+Field names follow the vendor's `ATOMGrainMetaData` / `ATOMReplicationUpToDatenessVector` structures, which also define `tombstone time` and `holdback time` members corresponding to the `Tombstone_lifetime` and `Holdback_delay` trunk settings of §5.3. [S] A zero-length target TLV is legal and marks a BLN-scope rather than host-scope record; a decoder that rejects empty TLV values silently drops those records. [W]
+
+> **[OPEN]** The COV/condition block carried inside change records for point-value updates is still not mapped; the grains observed carry host-table and configuration operations. Confirming it needs a capture taken during live point-value replication.
 ## 6. Frame Format (Wire)
 
 This section defines the P2 on-wire frame: the exact byte layout, the message-type
@@ -1820,7 +1849,7 @@ A subset of opcodes mutate panel firmware state, node-table membership, point va
 
 ### 9.5 The catalog
 
-The catalog below is generated by joining the vendor `AP2_Function_Code` enum (the 630 distinct opcode values) with the corpus census (135 wire-observed values, by frame count). Columns: hex opcode, name(s), observed wire count (or `-`), notes (destructive flag where applicable), and evidence tag ([W] wire-observed, [S] enum-defined). Within each family, rows are sorted by opcode value. The 16 wire values that do **not** appear here — `0x0000`, `0x0002`, `0x0453`, `0x0510`, `0x0C44`, `0x4443`, `0x4641`, `0x4642`, `0x4643`, `0x4647`, `0x464A`, `0x464B`, `0x464D`, `0x464E`, `0x464F`, `0x4650` — are **not** real function codes: `0x0000`/`0x0002` are below the enum's first defined value, `0x0C44`/`0x4443` are slot-walk misalignments of `0x4640`, and the rest are single-shot speculative probe artifacts from active test captures (they resolve to no enum member and should be treated as parser noise, not undocumented operations). [W][S]
+The catalog below is generated by joining the vendor `AP2_Function_Code` enum (the 630 distinct opcode values) with the corpus census (135 wire-observed values, by frame count). Columns: hex opcode, name(s), observed wire count (or `-`), notes (destructive flag where applicable), and evidence tag ([W] wire-observed, [S] enum-defined). Within each family, rows are sorted by opcode value. Sixteen wire values do **not** appear in the catalog, and they fall into three groups rather than one. `0x0000`/`0x0002` are below the enum's first defined value and `0x0C44`/`0x4443` are slot-walk misalignments of `0x4640` — those four are genuinely parser artifacts. [W] `0x0453` and `0x0510` drew `not_found`, so the panel does not implement them. [W] **The remaining ten — `0x4641`, `0x4642`, `0x4643`, `0x4647`, `0x464A`, `0x464B`, `0x464D`, `0x464E`, `0x464F`, `0x4650` — are real panel operations, and an earlier reading of this document that dismissed them as noise is withdrawn.** Absence from `AP2_Function_Code` proves nothing: that enum is the **supervisor-side** vocabulary and does not describe what a panel implements. Classify by what the panel did. `0x464A`–`0x4650` each answered `dir=0x01` **success with distinct structured bodies** (0 B, 22 B, 125 B, a 12,073-byte declared node table, 117 B, 26 B, 217 B respectively), and `0x4641` answered success, while `0x0510` — equally absent from the enum — answered `not_found` from the same panel in the same campaign. A panel that returns 12 KB of structured node table for one value and `not_found` for another is not treating them alike. `0x4642`/`0x4643` answered `not_supported`, i.e. a handler was reached and refused; `0x4647` returned nothing at all and remains **[OPEN]**. Low frame count is not evidence of unreality — it measures how often the *supervisor* uses an operation, and a panel-side operation the supervisor never invokes is expected to appear exactly once, when probed. [W]
 
 <!-- BEGIN GENERATED CATALOG (do not hand-edit; regenerate with working/dll_analysis gen_table.py joining AP2_Function_Code_enum.txt + observed_opcodes_named.txt) -->
 
@@ -2506,7 +2535,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x4633 | AP2_EBLN_REPL_NOTIFY | 23 |  | [W] |
 | 0x4634 | AP2_EBLN_REPL_PULL | 3938 |  | [W] |
 | 0x4635 | AP2_EBLN_REPL_PULL_MORE | 130 |  | [W] |
-| 0x4636 | AP2_EBLN_REPL_CHANGES | 179 |  | [W] |
+| 0x4636 | AP2_EBLN_REPL_CHANGES | 179 | corpus-wide count; a single passive capture alone holds 170 requests + 170 replies — see §5.3 | [W] |
 | 0x4637 | AP2_EBLN_POINT_LOCATION_GET | - |  | [S] |
 | 0x4638 | AP2_EBLN_MAC_ADDRESS_SET | - | **DESTRUCTIVE** (set MAC address) | [S] |
 | 0x4639 | AP2_EBLN_MII_CONFIGURE | - |  | [S] |
@@ -3596,22 +3625,49 @@ The replication-direction mechanics (notify/pull/changes push) live in the `0x46
 
 ### 16.2 On-disk (.P2) panel-database format
 
-A panel database serialized to disk (file extension `.P2`, e.g. `P2_Archive` snapshots) uses **TLV record framing persisted to a file** — broadly the same style of encoding the panel exchanges on the wire, written to disk. This subsection is observed from a **small sample of saved `.P2` archive files** (not from wire traffic) and is included only to help an operator read their own database exports; treat it as indicative rather than exhaustive. [I]
+A panel database serialized to disk (file extension `.P2`, e.g. `P2_Archive` snapshots) uses **TLV record framing persisted to a file** — broadly the same style of encoding the panel exchanges on the wire, written to disk. This subsection is observed from **panel database exports and controller backups** (not from wire traffic) and is included only to help an operator read their own database exports; treat it as indicative rather than exhaustive. [I]
 
-Record framing (observed in `.P2` archive files across MBC-10 / SCU / PXCC snapshots — a limited sample, on the order of a few hundred records for a compact panel): [I]
+Record framing (observed across 38 `.P2` archives and 7 Desigo CC device backups spanning MBC-10 / SCU / PXCC / PXCM platforms and 2018–2025 — **39,456 records**): [W]
 
 | Element | Value | Tag |
 |---|---|---|
 | Record delimiter | **SYN `0x16`** at the start of each record | [I] |
 | Field encoding | ASCII-hex fields | [I] |
-| Record terminator | CRLF | [I] |
+| Record terminator | **CRLF in Insight `.P2` exports; CR only in Desigo CC device backups.** A reader MUST split on the leading SYN, not on a line terminator — assuming CRLF silently yields **zero** records from a device backup rather than an error | [W] |
 | Record-type byte | at offset ~6 within the record | [I] |
 | — `0x41` | a PPCL line record | [I] |
 | — `0x02`–`0x06` | point-definition records | [I] |
 | Format byte | `0x02` = legacy generation / `0x03` = BACnet-era generation | [I] |
 | Subtype byte | `1`=LDI, `2`=LAI, `4`=analog, `6`=LDO, `0x15`=enum | [I] |
 
-**Note — distinct numbering.** The `.P2` on-disk record-subtype byte (1=LDI, 2=LAI, 4=analog, 6=LDO, 0x15=enum) is a **separate numbering** from the wire `Point_type` enum of §11.2 / Appendix A (where 2=LDO, 3=LAI, 4=LAO); the two encode the same point taxonomy but are not byte-for-byte equal and MUST NOT be cross-mapped (e.g. on-disk `2`=LAI but wire `2`=LDO). The format byte (`0x02`/`0x03`) is the on-disk reflection of the firmware-generation split described in §16.5. [I] **[OPEN]** The full record-type byte enumeration and the exact field order within each `.P2` record type beyond the leading bytes are not pinned; this would need a per-record decode pass against a known panel DB.
+**Note — distinct numbering.** The `.P2` on-disk record-subtype byte (1=LDI, 2=LAI, 4=analog, 6=LDO, 0x15=enum) is a **separate numbering** from the wire `Point_type` enum of §11.2 / Appendix A (where 2=LDO, 3=LAI, 4=LAO); the two encode the same point taxonomy but are not byte-for-byte equal and MUST NOT be cross-mapped (e.g. on-disk `2`=LAI but wire `2`=LDO). The format byte (`0x02`/`0x03`) is the on-disk reflection of the firmware-generation split described in §16.5. [I] **Record layout (per-record decode pass, 39,456 records across 38 panel databases and 7 Desigo CC device backups).** There are **two** record layouts, distinguished by where the scope preamble `01 00 04 "SYST" 23 3f ff ff ff` falls. That preamble is present in **97.9%** of records and is the same scope selector the wire uses (§8). [W]
+
+```
+Layout A   preamble at offset 8      6,169 records
+  u16 length | u32 class | u16 OPCODE | 01 00 04 "SYST" 23 3f ff ff ff | body
+
+Layout B   preamble at the end      29,294 records
+  u16 length | u32 class | u8 type | u8[3] | TLVs ... | 01 00 04 "SYST" 23 3f ff ff ff
+```
+
+Only Layout A carries a u16 opcode at a fixed offset; in Layout B the two bytes preceding the preamble are body content, and reading them as an opcode manufactures spurious entries. [W]
+
+Layout B has two record types: `0x02` point records (17,932) and **`0x41` PPCL records (11,362)** carrying program name, `Enabled` flag and source line — **3 TLVs in 9,073 records and 4 in 2,289**, so a reader must not assume three. [W]
+
+**Layout A body shape**, common to every opcode examined: [W]
+
+| Offset | Field | Type | Notes |
+|---|---|---|---|
+| +0 | flags / sub-count | u16 BE | frequently `0x0000` |
+| +2 | point name | TLV | e.g. `11` bytes |
+| — | descriptor | TLV | human-readable label |
+| — | opcode-specific fields | mixed | see below |
+
+Numeric fields in these bodies are **IEEE-754 big-endian `f32`**, consistent with §1.4.2. Verified statistically: of 24,885 four-byte groups with a float-shaped exponent byte, 34% decode to a finite exact multiple of 0.1 against a ~10% random-byte baseline, rising to **65–76%** in the point-definition records — and the decoded values are engineering quantities (setpoints, limits, timers, deadbands). [W]
+
+**Enumerated point state.** A point-definition record references its enum type as a **signed** `int16` BE at **`body[-8:-6]`** — eight bytes from the end, followed by a 6-byte trailer, in 116 of 116 records. The identifier is **negative**, indexing an enum library keyed by point type (`LDI`/`LDO`/`LOOAP`/… in the −1…−21 band, BACnet variants near −107, application enums from −1000). A decoder that searches for positive identifiers finds nothing. [W]
+
+**[OPEN]** Which individual `f32` slot is which named attribute (high limit vs low limit vs deadband vs slope) is **not** determined. The ordering is consistent within an opcode but unlabelled; resolving it needs a database export covering the same points as an available `.P2` export, which no sample to hand does.
 
 ### 16.3 Application catalog (controller applications)
 

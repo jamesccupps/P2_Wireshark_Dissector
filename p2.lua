@@ -642,6 +642,23 @@ local OPCODES = {
   [0x450F] = "AP2_TOD_CMD_DISPLAY",
   [0x461F] = "AP2_EBLN_FP_NAMES_DISPLAY",
   [0x4620] = "AP2_EBLN_FP_NAME_SET",
+
+  -- EBLN management/replication set, 0x4620-0x4642.
+  -- Names recovered from the command string pool of a shipped EBLN
+  -- diagnostic binary, ordered by opcode; validated against five
+  -- independently wire-established bindings (0x4640, 0x4636, 0x4634,
+  -- 0x462E, 0x462D), which all agree on one base. Read/write kind is
+  -- from the command name. 0x4633-0x4636 and 0x4640 are wire-observed;
+  -- the rest have never been seen in captured traffic, so any
+  -- occurrence is anomalous by construction (see PROTOCOL.md 17).
+  [0x4623] = "AP2_EBLN_FP_DISPLAY",   -- read
+  [0x4624] = "AP2_EBLN_STORAGE_NODES_REPLACE",   -- write
+  [0x4625] = "AP2_EBLN_STORAGE_NODES_DISPLAY",   -- read
+  [0x4626] = "AP2_EBLN_REPORT_PRINTER_REPLACE",   -- write
+  [0x4627] = "AP2_EBLN_REPORT_PRINTER_DISPLAY",   -- read
+  [0x4630] = "AP2_EBLN_NODE_ADD",   -- write
+  [0x4631] = "AP2_EBLN_NODE_REMOVE",   -- write
+  [0x4632] = "AP2_EBLN_NODE_LIST_DISPLAY",   -- read
   [0x4621] = "AP2_EBLN_FP_IP_CONFIGURE",
   [0x4622] = "AP2_EBLN_FP_TCP_PORTS_CONFIGURE",
   [0x4628] = "AP2_EBLN_TRUNK_SETTINGS_REPLACE",

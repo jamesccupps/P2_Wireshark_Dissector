@@ -879,6 +879,58 @@ class P2Message:
     OP_BULK_WRITE      = 0x4222  # BulkPropertyWrite — the canonical opcode for SYST setpoint writes; 0x0240 against SYST returns 0x0E15
     OP_PROPERTY_ECHO   = 0x0241  # SYST-scoped PropertyEcho / DefaultPropertyResolve — see OPCODES.md (May 2026 paired-response audit)
     OP_STATUS_QUERY    = 0x0050  # leaks supervisor name (bare form) without authentication; useful cold-discovery primitive
+    # ---- EBLN management set, 0x4620-0x4642 ------------------------------
+    # Validated span 0x4620-0x4640. Names from the AP2 function enumeration,
+    # corroborated by the command
+    # string pool of a shipped EBLN diagnostic binary (ordered by opcode and
+    # validated against five independently wire-established bindings).
+    #
+    # Only 0x4633-0x4636 and 0x4640 have ever been seen in captured traffic.
+    # The rest do not occur in normal operation at all, which cuts two ways:
+    # any occurrence is anomalous and worth alerting on, and nothing in the
+    # protocol restricts them to a supervisor -- the identity check is the
+    # same for every caller, so "supervisor-only" is a property of which tool
+    # ships them, not an enforced one.
+    OP_EBLN_FP_NAME_SET          = 0x4620
+    OP_EBLN_FP_IP_CONFIGURE      = 0x4621
+    OP_EBLN_FP_TCP_PORTS_CONFIG  = 0x4622
+    OP_EBLN_FP_DISPLAY           = 0x4623
+    OP_EBLN_STORAGE_NODES_REPL   = 0x4624
+    OP_EBLN_STORAGE_NODES_DISP   = 0x4625
+    OP_EBLN_REPORT_PRINTER_REPL  = 0x4626
+    OP_EBLN_REPORT_PRINTER_DISP  = 0x4627
+    OP_EBLN_TRUNK_SETTINGS_REPL  = 0x4628
+    OP_EBLN_TRUNK_SETTINGS_DISP  = 0x4629   # yields the TRUNK_SETTINGS report
+    OP_EBLN_FP_SITE_NAME_SET     = 0x462A
+    OP_EBLN_FP_BLN_NAME_SET      = 0x462B   # sets the BLN name -- the only gate
+    OP_EBLN_FP_MULTICAST_CONFIG  = 0x462C
+    OP_EBLN_HOSTTABLE_ADD        = 0x462D
+    OP_EBLN_HOSTTABLE_REMOVE     = 0x462E
+    OP_EBLN_HOSTTABLE_DISPLAY    = 0x462F   # the (Permanent) name->IP table
+    OP_EBLN_NODE_ADD             = 0x4630
+    OP_EBLN_NODE_REMOVE          = 0x4631
+    OP_EBLN_NODE_LIST_DISPLAY    = 0x4632
+    OP_EBLN_REPL_NOTIFY          = 0x4633
+    OP_EBLN_REPL_PULL            = 0x4634   # == OP_ROUTING_TABLE above; see note
+    OP_EBLN_REPL_PULL_MORE       = 0x4635
+    OP_EBLN_REPL_CHANGES         = 0x4636
+    OP_EBLN_POINT_LOCATION_GET   = 0x4637
+    OP_EBLN_MAC_ADDRESS_SET      = 0x4638
+    OP_EBLN_MII_CONFIGURE        = 0x4639
+    OP_EBLN_MII_DISPLAY          = 0x463A
+    OP_EBLN_IP_DISPLAY           = 0x463B
+    OP_EBLN_PORTS_DISPLAY        = 0x463C
+    OP_EBLN_MULTICAST_DISPLAY    = 0x463D
+    OP_EBLN_MAC_ADDRESS_DISPLAY  = 0x463E
+    OP_EBLN_TELNET_ENABLE        = 0x4644   # AP2 enum; NOT 0x4641
+    OP_EBLN_TELNET_DISABLE       = 0x4645   # AP2 enum; NOT 0x4642
+    #
+    # Naming note: OP_ROUTING_TABLE (0x4634) above was named from observed
+    # behaviour ("BLN routing-table announce/push"). The AP2 name for the same
+    # opcode is Repl Pull, which fits the traffic -- 1,267 requests, 59% of them
+    # panel-initiated, pulling replication changes. Both constants are kept; the
+    # older one is not renamed because callers depend on it.
+
     OP_PROPERTY_QUERY  = 0x4200  # PropertyQuery (small ~30-40B browse form OR 222B preallocated deep-read form)
 
     # Byte-sequence markers used by pcap/stream scanners looking for these opcodes.
@@ -938,6 +990,63 @@ class P2Message:
         payload = data[12:total_len]
         return cls(msg_type, sequence, payload)
 
+
+
+# ---------------------------------------------------------------------------
+# EBLN read/write split, and the operations this tool will not emit.
+#
+# This is an ALLOWLIST, not a blocklist. A blocklist cannot protect against an
+# opcode nobody has named yet: a May 2026 sweep sent 0x4641 blind and the panel
+# returned success -- that opcode is Telnet Enable, and the same sweep walked a
+# range containing BLN Name Set and MAC Address Set; 0x4644 Telnet Enable was
+# sent and returned success. Naming them afterwards is what made the risk
+# visible, so the guard is expressed positively.
+
+EBLN_READS = frozenset({
+    P2Message.OP_EBLN_FP_DISPLAY,            P2Message.OP_EBLN_STORAGE_NODES_DISP,
+    P2Message.OP_EBLN_REPORT_PRINTER_DISP,   P2Message.OP_EBLN_TRUNK_SETTINGS_DISP,
+    P2Message.OP_EBLN_HOSTTABLE_DISPLAY,     P2Message.OP_EBLN_NODE_LIST_DISPLAY,
+    P2Message.OP_EBLN_POINT_LOCATION_GET,    P2Message.OP_EBLN_MII_DISPLAY,
+    P2Message.OP_EBLN_IP_DISPLAY,            P2Message.OP_EBLN_PORTS_DISPLAY,
+    P2Message.OP_EBLN_MULTICAST_DISPLAY,     P2Message.OP_EBLN_MAC_ADDRESS_DISPLAY,
+})
+
+EBLN_WRITES = frozenset({
+    P2Message.OP_EBLN_FP_NAME_SET,           P2Message.OP_EBLN_FP_IP_CONFIGURE,
+    P2Message.OP_EBLN_FP_TCP_PORTS_CONFIG,   P2Message.OP_EBLN_STORAGE_NODES_REPL,
+    P2Message.OP_EBLN_REPORT_PRINTER_REPL,   P2Message.OP_EBLN_TRUNK_SETTINGS_REPL,
+    P2Message.OP_EBLN_FP_SITE_NAME_SET,      P2Message.OP_EBLN_FP_BLN_NAME_SET,
+    P2Message.OP_EBLN_FP_MULTICAST_CONFIG,   P2Message.OP_EBLN_HOSTTABLE_ADD,
+    P2Message.OP_EBLN_HOSTTABLE_REMOVE,      P2Message.OP_EBLN_NODE_ADD,
+    P2Message.OP_EBLN_NODE_REMOVE,           P2Message.OP_EBLN_MAC_ADDRESS_SET,
+    P2Message.OP_EBLN_MII_CONFIGURE,         P2Message.OP_EBLN_TELNET_ENABLE,
+    P2Message.OP_EBLN_TELNET_DISABLE,
+})
+
+# Denial-of-service risk, independent of read/write: a single well-formed
+# 0x4636 carrying the standard SYST scope body has been observed to take a
+# panel's P2 task out for ~18 s -- longer than a real power cycle of the same
+# panel. 0x4647 shows the same signature.
+EBLN_STALL_RISK = frozenset({0x4636, 0x4647})
+
+REFUSED_OPCODES = EBLN_WRITES | EBLN_STALL_RISK
+
+
+def check_emit_allowed(opcode: int) -> None:
+    """Raise if an opcode must never be emitted by this tool.
+
+    Called on the send path. Deliberately not overridable by a flag: a
+    determined caller can edit the source, but nobody does it by accident.
+    """
+    if opcode in EBLN_STALL_RISK:
+        raise PermissionError(
+            f"0x{opcode:04X} is a denial-of-service risk (observed ~18 s panel "
+            f"outage) and is never emitted by this tool.")
+    if opcode in EBLN_WRITES:
+        raise PermissionError(
+            f"0x{opcode:04X} is an EBLN write/configuration operation and is "
+            f"never emitted by this tool. Use the panel console if you intend "
+            f"to change configuration.")
 
 class P2Connection:
     """Manages a TCP connection to a PXC controller using the P2 protocol."""
