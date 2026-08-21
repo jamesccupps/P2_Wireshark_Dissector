@@ -2045,14 +2045,32 @@ frames must be decoded a level deeper or labelled as tunnelled.
 > observed to do, **the observed behaviour wins** — the naming layer is a lead,
 > not evidence. [S]
 
-#### A second discriminator: sub-opcodes
+#### The second selector exists - and never reaches the wire
 
-Some operations additionally write a **sub-opcode** into the body, which acts
-as a further selector beneath the wire opcode — for example `0x0240` carries a
-sub-code distinguishing a write-with-quality, and `0x0273` distinguishes a
-value-less write from a point probe. Sub-codes are known for roughly twenty
-opcodes across the point, cabinet and node families. Their byte offset within
-the body is opcode-specific and is **[OPEN]**. [S]
+The command object carries a **second 16-bit selector** beside the opcode: the
+AP2 function code sits at object offset `+0x04` and this value at `+0x06`. It is
+populated for **134 operations**, and it is tempting to call it a sub-opcode and
+go looking for it in the body.
+
+**It is not in the body.** Nine operations with a known selector value were
+checked against their captured request bodies - `0x0271` (0x0010), `0x0273`
+(0x0011), `0x0272` (0x0012), `0x0241` (0x0030), `0x0294` (0x0704), `0x0295`
+(0x0702) among them. In **none** of them does the value appear anywhere in the
+request body; the single apparent hit was a TLV length header matching by
+coincidence. The field is internal to the sender and is dropped before framing.
+[W][S]
+
+That is a more interesting result than a sub-opcode would have been, because of
+what it implies for the many-to-one opcodes above. **The receiving panel does
+not get the selector either.** Where several operations share one wire opcode
+the panel cannot be distinguishing them by a discriminator field - it must be
+dispatching on the shape and content of the body itself, or the operations are
+genuinely identical from the panel's point of view and differ only in how the
+supervisor handles the reply. For `0x0313` that fits the tunnel reading: the
+panel forwards to P1 and does not care which supervisor operation asked. [W/I]
+
+An implementer should therefore not go looking for a hidden selector byte on
+the wire. There is not one.
 
 #### The message-structure catalog
 
