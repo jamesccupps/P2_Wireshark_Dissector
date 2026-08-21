@@ -443,7 +443,33 @@ Node-name length has two regimes, keyed to the firmware's string encoding (cross
 - **ASCII regime (all P2/IP revisions):** node names are plain ASCII, ≤ 30 characters, NUL-terminated in the routing slots. [W][S]
 - **RAD-50-packed regime (pre-IP / legacy field-controller and supervisor revisions):** names are packed three characters per 16-bit word from the 40-symbol RAD-50 alphabet, which budgets a **node-name field to ≤ 15 characters**. A system name is modeled as **Base + Suffix**, with the base length-bounded, corroborating the ≤15-character node-name basis. The documented 15-character node-name limit is also why the session handshake's ≥15-character self-identity acceptance threshold lands where it does (cross-ref the handshake admission rules). [S][D]
 
-An implementer targeting a TCP/5033 (EBLN) deployment uses ASCII throughout and may use the full ≤30-character node name; the ≤15 limit applies only to legacy RAD-50 platforms and to fields that retain the packed budget. A peer presenting RAD-50-packed names is a pre-IP revision and is out of scope for an ASCII TCP/5033 client. [I]
+**Correction — the ≤15 limit is not only a legacy artifact.** An earlier
+revision of this document concluded that "the ≤15 limit applies only to legacy
+RAD-50 platforms". That is wrong. On a current Ethernet BLN the limit is keyed
+to the **role of the named party**, not to the string codec, and both limits are
+documented rules for present-day configuration: [D]
+
+| Named party | Max length | Character set | Other rules |
+|---|---:|---|---|
+| **Supervisor node name** | **15** | letters, or letters and digits | must not be all digits; no spaces, underscores, periods or special characters; unique; case-insensitive |
+| **Field panel node name** | **30** | letters, digits and **hyphens** | no other punctuation; unique on the network; **it is the pingable DNS host name** |
+| **BLN system name** | **30** | letters and digits | no periods, spaces or special characters; must match at panel and supervisor or they will not communicate |
+
+Two consequences. First, the hyphen is legal in a panel node name and illegal in
+a supervisor node name, and the underscore is illegal in both — so a validator
+cannot use one rule for the routing slots. Second, **the ≤15 supervisor limit is
+the documented origin of the 15-character self-identity threshold** in the
+session handshake: the handshake is checking a supervisor identity against the
+longest one that can legitimately exist. The earlier text reached that
+conclusion by inference; it is a documented rule.
+
+The panel node name "replaces the node number on a dedicated (P2) BLN" — which
+states the architectural split of §3.3.1 from the vendor's own side: a serial
+BLN addresses by **number**, an Ethernet BLN by **name**, and the name is a DNS
+name rather than a protocol-internal identifier. [D]
+
+A peer presenting RAD-50-packed names is a pre-IP revision and is out of scope
+for an ASCII TCP/5033 client. [I]
 
 ### 3.4 Named scopes and their constraints
 
@@ -716,6 +742,34 @@ architecture the trunk was designed around, and it is why trunk numbering
 ## 5. Discovery, Liveness & Replication
 
 A P2 BLN is a **self-organizing peer network**. There is no central registry: nodes find and monitor one another using a liveness probe (EPing), an optional multicast availability channel, and a node-name/IP table that auto-replicates across the whole BLN. Below the BLN, the panel discovers its FLN devices with the P1WhoAreYou transaction. This section defines each mechanism, its wire opcode where one exists, and its documented timing.
+
+### 5.0 Documented timer defaults, and how they scale
+
+The discovery and replication timers of §5.1–§5.3 have documented defaults, and
+four of them are **not constants — they scale with the number of panels on the
+BLN**. All values in seconds. [D]
+
+| Setting | Intra-site | Inter-site |
+|---|---:|---:|
+| EPing period | 10 | **60 + panel count**, capped at 900 |
+| EPing timeout | 5 | 5 |
+| Replication notification period | 10 | **10 + panel count**, capped at 900 |
+| Replication polling period | 30 | **180 + panel count**, capped at 900 |
+| Replication cycle timeout | 75 | **75 + panel count**, capped at 900 |
+| Holdback delay | 10 | 10 |
+| Tombstone lifetime | 86400 | 86400 |
+
+The intra-site column is what a single-site capture shows, and it is the column
+this document's observed timings match. The scaling rule applies only to the
+inter-site timers, and the guidance is to leave the defaults alone **below 50
+panels** — so a small deployment runs entirely on the constants above.
+
+Two things follow for an implementer. A client that infers "the EPing period is
+10 seconds" from a capture has measured the intra-site default and should not
+generalise it. And the 900-second cap means the inter-site timers stop scaling
+at 720–840 panels depending on the setting, which is far above the
+liveness-addressable node ceiling of §14.2 — the cap is not the binding limit on
+BLN size.
 
 ### 5.1 EPing — Ethernet-BLN availability probe (liveness, not a beacon)
 
