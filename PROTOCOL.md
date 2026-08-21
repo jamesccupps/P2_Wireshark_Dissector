@@ -2072,17 +2072,46 @@ panel forwards to P1 and does not care which supervisor operation asked. [W/I]
 An implementer should therefore not go looking for a hidden selector byte on
 the wire. There is not one.
 
-#### The message-structure catalog
+#### The message-structure catalog, and three command shapes
 
 The stack defines **505 distinct ASDU body structures**, named on a strict
 convention: an operation contributes `<OPERATION>_REQ` and, where it answers
 with data, `<OPERATION>_RESP`, with shared field groups as `<NAME>_TYPE`. The
-names track the families of §9.4 exactly — `ALARM_ACK_REQ`/`_RESP`,
+names track the families of §9.4 exactly - `ALARM_ACK_REQ`/`_RESP`,
 `ANNUNCIATE_COV_REQ`, `BACKUP_FLASH_DBASE_REQ`, `BACNET_MGT_READ_BBMD_REQ`/
-`_RESP`, `ADD_CONTROLLER_REQ`, and so on. The convention is worth knowing on
-its own: **a `_REQ` without a matching `_RESP` is an operation that answers
-with status only**, which is a cheap way to predict whether a request returns a
-body before sending one. [S]
+`_RESP`, `ADD_CONTROLLER_REQ`. [S]
+
+Every operation is wrapped in one of exactly **three command shapes**, and the
+shape is declared rather than inferred: [S]
+
+| Shape | Operations | Meaning |
+|---|---:|---|
+| request-only | **189** | fire-and-forget; the operation returns status, never a body |
+| request-response | **151** | the operation returns a body |
+| response-only | **4** | no request exists - these are unsolicited, panel-originated |
+
+This is worth more to an implementer than the name convention, because it
+answers a question you otherwise have to discover by sending: **will this
+operation come back with data?** For 189 of 340 the answer is no, and a client
+that waits for a body will wait forever. The four response-only structures are
+the counterpart - messages a panel emits with nothing having asked, which is
+the same category as the COV and alarm notifications of §12 and §13.
+
+A rough read/write split falls out of the verb the operation name starts or
+ends with. Of 343 request structures, roughly **112 are unambiguously reads**
+(`REPORT` 63, `UPLOAD` 61, `READ`, `GET`, `ENUM`, `LOOK`, `DISPLAY`, `QUERY`),
+**170 are writes** (`DEFINE` 38, `DELETE`, `ADD`, `REMOVE`, `REPLACE`, `SET`,
+`MODIFY`, `CLEAR`, `RESET`, `INITIALIZE`, `COLDSTART`), **23 are notifications**
+(`POST` 21, `ANNUNCIATE`), and **38 resist classification** by name alone
+(`PASS_THROUGH`, `NET_MGT`, `CHARACTERIZE`, `OSTRACIZE_NODE`, `LON_WINK` and
+similar). [S/I]
+
+> **Do not turn that split into a safety allowlist.** The verb classification is
+> a property of the *operation name*; a tool needs the *wire opcode*, and the
+> name-to-opcode binding is exactly the layer shown unreliable above. A
+> classification that is 90% right is worse than none when the 10% contains a
+> write. Safety allowlists in this project are built per-opcode from observed
+> behaviour, and should stay that way.
 
 ### 9.2 Naming, families, and value layout
 
