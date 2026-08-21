@@ -3511,6 +3511,57 @@ PPCL statements fall into functional categories; the panel stores each statement
 | Communications | `EPHONE`/`DPHONE` (enable/disable phone — dial-up alarming), `MMI` (man-machine-interface control) | [S] |
 | Special function / math | `ASSIGN` (expression assignment), `LSTSQR`, plus the arithmetic and logical operators of §14.4 | [S] |
 
+#### The token names are not the source spelling
+
+The table above and the 71-entry token set are **enum member names**. Program
+source does not spell them that way, and a parser built from the enum will fail
+on real program text. Measured over **64 control programs, 10,451 lines, of
+which 4,731 are statements**: [W]
+
+| Enum token | Spelling in source | Occurrences of each |
+|---|---|---|
+| `WHOPDBSWITCH` | `DBSWIT` | `DBSWITCH` **0**, `DBSWIT` 101 |
+| `WHOPINITTOT` | `INITTO` | `INITTOT` **0**, `INITTO` 19 |
+| `WHOPRELEASE` | `RELEAS` | `RELEAS` 51 as a statement |
+| `WHOPDISABLE` | `DISABL` | `DISABL` 3 as a statement |
+
+**No statement keyword in the corpus exceeds six characters.** The length
+distribution of the leading keyword over all 4,731 statement lines is
+2 ×2,132, 3 ×637, 4 ×745, 5 ×297, **6 ×480, and nothing longer**. Six is a hard
+ceiling, not a tendency — the same six-character limit §14.2 describes for
+legacy point references applies to the keyword field itself. An implementer
+should match on the six-character form and treat the enum names as identifiers,
+not syntax. [W]
+
+#### Statement frequency, and one statement the enum does not name
+
+What programs actually use, by count: [W]
+
+```
+IF     1872   GOTO    530   ON      260   SET     195   TIMAVG  169
+GOSUB   166   OFF     161   OIP     152   WAIT    139   SAMPLE   93
+TABLE    89   DBSWIT   78   LOOP     62   MIN      47   MAX      44
+RETURN   38   DAY      38   NIGHT    36   RELEAS   31   DEFINE   18
+INITTO   15   LSTSQR   14   EMON     12   ONPWRT   11   ENABLE    8
+LOCAL     6   DISABL    3   TODMOD    2   SSTO      2
+```
+
+Twenty-nine distinct statements account for all 4,731 lines. The long tail of
+the token set — the emergency, PDL, phone, alarm-limit and COV-control families
+— appears in none of these programs, which says something about what production
+control logic is made of but nothing about what the language supports.
+
+**`OIP` is used 152 times and is not in the vendor statement-type enum.** Its
+form is `OIP (<identifier>, "<point name>")`. The enum has exactly two unnamed
+members, `WHOPUNKNOWN1` and `WHOPUNKNOWN2` (values 61 and 62), so the token set
+itself records that not every statement is named in it.
+
+This is the same situation as the EBLN opcodes of §5.3.1 and resolves the same
+way: **absence from a vendor enum is not evidence that something is not real.**
+A statement appearing 152 times across a production corpus is real; a parser
+that rejects it because the enum lacks it will fail on ordinary programs. What
+`OIP` *does* is not established here and is not guessed. [W] **[OPEN]**
+
 ### 14.4 Expressions, operator precedence, and the command parameter array
 
 **Operator precedence**, highest to lowest (a conformant compiler/decompiler must honor this chain): [D]
