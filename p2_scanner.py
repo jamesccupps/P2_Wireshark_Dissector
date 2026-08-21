@@ -82,6 +82,7 @@ from collections import Counter, OrderedDict
 from typing import Optional, Dict, List, Tuple, Any, Callable
 
 import firmware_registry  # APOGEE_P2_SPEC.md §30 — fast-path dialect lookup
+import p2_data            # compiled-in opcode / point-type / enum tables
 
 # ─────────────────────────────────────────────────────────────────────────────
 # A note on `APOGEE_P2_SPEC.md §N` citations throughout this file.
@@ -2607,6 +2608,22 @@ def scan_device(host: str, device: str, points: Optional[List[str]] = None,
                         val = result['value']
                         result['value_text'] = info['on_label'] if val >= 0.5 else info['off_label']
                     result['point_type'] = info.get('type', 'unknown')
+                # Panel-level points are not in the TEC library. Fall back
+                # to the compiled-in tables: a point type implies a default
+                # enumeration (the enum whose id is the negation of the type
+                # code), so a digital point renders as OFF/ON rather than
+                # 0.0/1.0 even with no application number to look up.
+                if not result.get('value_text'):
+                    txt = p2_data.resolve_state_text(
+                        result.get('value'),
+                        point_type=result.get('point_type_code'),
+                        enum_id=result.get('enum_id'))
+                    if txt:
+                        result['value_text'] = txt
+                if not result.get('point_type'):
+                    mn = p2_data.point_type_name(result.get('point_type_code'))
+                    if mn:
+                        result['point_type'] = mn
                 # Attach the subpoint slot number for Desigo-style '(29)'
                 # display. Handled even when point_info is missing, in case
                 # someone's scanning with only the legacy JSON.
