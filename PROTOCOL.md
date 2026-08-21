@@ -4057,6 +4057,41 @@ The **master application/point-team library** is the set of point-team descripto
 
 The FLN device classes an application can target are the `FLN_Device_Type` enum: `DPU`=0, `MPU`=1, `TCU`=2, `TEC`=3, `UC`=4, `PXM`=5, `FSCS`=6, `GATEWAY`=7, `FLOAT_GATEWAY`=8, `P1BIM`=9 (P1 Bus Interface Module), `GLOBAL_IO`=10. [S]
 
+#### 16.3.1 Foreign devices get the same point model, and a uniform diagnostics team
+
+The application catalog is not limited to APOGEE field controllers. A panel
+reaching a device over a gateway — Modbus serial and Modbus TCP, BACnet, KNX,
+an Allen-Bradley Ethernet link, a chiller or rooftop vendor's own bus, a fire
+system, a guest-room controller — represents that device with **the same
+point-team model**: an application number resolving to an ordered member list,
+each member typed and scaled exactly as §11 describes. Roughly seventeen device
+families are carried this way. [S]
+
+What matters to an implementer is that they are not each modelled differently.
+**Sixteen of the seventeen families carry a common diagnostics team**, so a
+client that understands it can report on a gateway-attached device of any
+downstream protocol without knowing that protocol. The shared members group as:
+
+| Group | Members |
+|---|---|
+| Identity | address, application number, licence, ready |
+| Traffic counters | transmissions, responses, no-responses, good packets, bad packets, unknown packets, NAK count, bad-transmit count, bad-sequence count, overrun count |
+| Link errors | framing errors, parity errors, hardware errors, break received |
+| Polling | poll frequency, poll delay, poll-suppress minutes, start delay, timeout, response interval, max retries |
+| Command queue | commands pending, command-queue maximum |
+| Failure behaviour | comm-fail, point-fail mode, fail-on-comm-fail-off, disable-command-fail-point-off |
+| Selection filters | a `SEL *` family selecting which points a diagnostic view reports on — out of service, failed, in alarm, dropped, logged, COV, commanded, command-COV, in use, FLN, character-mode |
+| Controls | diagnostic control, data control, point-update control, print control |
+| Units | seconds, minutes, ticks |
+
+Two consequences worth stating. First, the counter set is **serial-link
+shaped** — framing errors, parity errors, break-received, NAK counts — and it
+is present even on families whose downstream transport is Ethernet, so those
+members read as zero rather than as absent. Second, `TIMEOUT`,
+`RESPONSE INTTICKS` and the poll timers are per-device **configuration**
+exposed as points, which means gateway tuning is reachable through the ordinary
+point-command path rather than through any special operation. [S]
+
 ### 16.4 Reading a controller application from a live panel
 
 The upload opcodes for the application/team model: `0x0986 AP2_UPL_ALL_TEC` (upload all TEC application data), `0x400F AP2_TEAM_DESC_UPLOAD` (upload a point-team descriptor), `0x4015/0x4016 AP2_TEAM_DESC_DB_CHANGE / TEAM_MEMBER_DB_CHANGE` (team DB-change replication). Walking `0x0986` for a panel returns its loaded controller applications, which a client resolves against the master `.ptd`/DBF library by application number + revision. [S]
