@@ -866,6 +866,90 @@ field-panel delete first. [W]
 > section. The console procedure above is non-disruptive and is the correct
 > mechanism. [W]
 
+### 5.3.1 The EBLN diagnostic reads, and what each one returns
+
+The `0x464A`–`0x4650` block is the EBLN replication diagnostic set. None of
+these values appears in the supervisor-side `AP2_Function_Code` enum except
+`0x464C`, and none occurs in ordinary traffic — a supervisor never issues them.
+They are nonetheless implemented: every one below answered `dir=0x01` **success**
+with a distinct structured body opening with the standard `SYST` scope preamble.
+
+| Opcode | Body | What the body contained |
+|---|---:|---|
+| `0x464A` | 0 B | empty success |
+| `0x464B` | 22 B | scope + a single node name |
+| `0x464C` | 125 B | scope + a list of nine node names |
+| `0x464D` | 12,073 B declared | **replication data store** — see below |
+| `0x464E` | 117 B | scope + two replication grain keys, each with node name and USN |
+| `0x464F` | 26 B | scope + one node name + a 4-byte tail |
+| `0x4650` | 217 B | scope + default-panel tag, panel number, eleven node names, and the supervisor identity in both plain and `<name>\|<port>` form — **the host table** |
+
+`0x4642` and `0x4643` answered `not_supported`: a handler was reached and
+refused. `0x4647` returned nothing at all and remains **[OPEN]**.
+
+**`0x464C` is the NodeList report**, established from three independent
+directions rather than inferred: the vendor function enum names it
+`AP2_EBLN_REPL_DIAG_NODELIST`; the panel firmware's own resource names an
+*EBLN Replication NodeList Report* with columns `Node Name | Connection |
+Replication`; and the captured body is exactly a list of node names. [W][S]
+
+**`0x464D` is the replication data store.** The 4,380 bytes that arrived before
+the client reset contain **57 replication grain keys** in the
+`&<origin>&MMDDYYHHMMSS&<counter>` form of §5.3, from eight distinct origin
+nodes. At that density the full declared 12,073 bytes carries on the order of
+150 grains. [W]
+
+**`0x4650` puts the host table on the wire.** This matters for anyone reasoning
+about who can see that table: it is not surfaced in supervisor operator tooling,
+but it is retrievable over P2 by any peer that satisfies the BLN check of §4.
+"Not visible" is true of the operator UI and false of the protocol. [W]
+
+#### The report catalogue
+
+The panel's own firmware resource names the reports this family produces. Six
+concern replication:
+
+```
+EBLN Replication Partners Report
+EBLN Replication NodeList Report        Node Name | Connection | Replication
+EBLN Replication Poll Schedule Report   Node_Name | Last_Polled_Time |
+                                        Is_Partner | Reconcile_Pending
+EBLN Replication Add Data Store Report
+EBLN Replication Delete Data Store Report
+EBLN Replication Diagnostic view
+```
+
+alongside `TRUNK_SETTINGS_REPORT`, `Ethernet TCP/IP Port Configuration Report`,
+`Ethernet Setup Report`, `MII (Media Independent Interface) Report`,
+`MAC Address Report`, `MultiCast Address Report` and
+`MTU (MAXIMUM TRANSFER UNIT) REPORT`. [S]
+
+**Which opcode emits which named report is deliberately left unstated** for all
+but `0x464C`. Six report names and seven responding opcodes invite a positional
+mapping, and a positional mapping across a range whose gaps are unknown is
+exactly the reasoning that produced a wrong Telnet binding earlier in this
+document's history. Where a body's content identifies it, that is recorded
+above; where it does not, the gap stands.
+
+#### Intra-site and inter-site are configured separately
+
+The trunk settings the panel exposes are, in resource order:
+
+```
+Intrasite_eping_period          Intersite_eping_period
+Intrasite_eping_timeout         Intersite_eping_timeout
+Intrasite_notif_repl_period     Intersite_notif_repl_period
+Intrasite_poll_repl_period      Intersite_poll_repl_period
+Intrasite_repl_cycle_timeout    Intersite_repl_cycle_timeout
+Tombstone_lifetime              Holdback_delay
+```
+
+Every replication timer exists **twice** — once for peers on the same site and
+once for peers on another — and `Tombstone_lifetime` / `Holdback_delay` are
+shared. The distinction does not appear in captured traffic because every
+observed peer was intra-site; a deployment spanning sites will show the second
+column's timers governing its cross-site exchanges. [S]
+
 ### 5.4 What a fresh client learns, and what it cannot
 
 Because membership lives in the replicated node table rather than a beacon, a client's discovery path is:
@@ -3145,11 +3229,12 @@ For digital and enumerated points the wire/value field carries a small integer *
 >
 > | Source | PTYPE values observed | Population |
 > |---|---|---|
-> | DataMate point table | 1, 2, 3, 4, and rarely 10, 11, 12, 34 | 76,355 rows |
-> | Point-team descriptors, **P1** family | 1, 2, 3, 4 only | 71,306 points / 714 applications |
-> | Point-team descriptors, **MSTP** family | 1, 2, 3, **16, 17, 20** | 268 points / 2 applications |
+> | DataMate P1 point table | 1, 2, 3, 4; rarely 10, 11, 12, 34 | 76,355 rows / 1,021 applications |
+> | DataMate **MSTP** point table | 1, 2, 3, 4 | 26,539 rows / 227 applications |
+> | Point-team descriptors, P1 family | 1, 2, 3, 4 | 71,306 points / 714 applications |
+> | Point-team descriptors, two outlier applications | 1, 2, 3, **16, 17, 20** | 268 points / **2** applications |
 >
-> The MSTP family therefore uses a **different PTYPE set from the P1 family** in the same library — it drops 4 and introduces 16/17/20 — so a reader must branch on the application's family, not just on the value. [W]
+> **The overwhelmingly common set is 1–4 everywhere**, including across all 227 MSTP applications in the vendor's own MSTP point table. The values 16/17/20 occur in exactly **two** applications, whose numbers sit far outside the range every other source uses and which appear in no point table, no application table and no shipped catalog. Treat 16/17/20 as an outlier encoding tied to those two definitions, not as a family-wide alternative — an earlier revision of this document generalised them to "the MSTP family" and that was wrong. [W]
 >
 > The four rare DataMate values are all confined to drive/VFD applications and are legible from their own rows: **12** marks the application-number subpoint (`PTNUM 2`, "APPLICATION") and drive parameter-number/limit points; **10** and **34** are momentary command points carrying action labels rather than states (`RST ON`/`RSTOFF`, `RESET`/`NO`) — which is why `PTYPE 34` is `RESET FAULT` and has nothing to do with command-priority 34 = smoke; **11** occurs once, on a parameter-data read. Twenty rows in total. [W]
 
@@ -3866,6 +3951,49 @@ The FLN device classes an application can target are the `FLN_Device_Type` enum:
 
 The upload opcodes for the application/team model: `0x0986 AP2_UPL_ALL_TEC` (upload all TEC application data), `0x400F AP2_TEAM_DESC_UPLOAD` (upload a point-team descriptor), `0x4015/0x4016 AP2_TEAM_DESC_DB_CHANGE / TEAM_MEMBER_DB_CHANGE` (team DB-change replication). Walking `0x0986` for a panel returns its loaded controller applications, which a client resolves against the master `.ptd`/DBF library by application number + revision. [S]
 
+### 16.4.1 `AP2_SERVICES_RENDERED` — the capability document
+
+Immediately after the `0x010C` identity read sit two further operations:
+`0x010D` `AP2_SERVICES_RENDERED` and `0x010E`
+`AP2_SERVICES_RENDERED_CHANGED`. [S] Neither appears in any capture in the
+corpus, so their bodies were unknown; the response is however an **XML
+document** whose template is fixed, and its shape is therefore known without a
+capture: [S]
+
+```xml
+<?xml version="1.0" encoding="ASCII" standalone="yes"?>
+<ServicesRendered>
+  <Panel Name="...">
+    <PanelBasics>
+      <ID_STRING>...</ID_STRING>
+      <RevString>... nnnn - ...</RevString>
+      <LinkDate>...</LinkDate>
+      <HardwareType>...</HardwareType>
+      <BuildNumber>...</BuildNumber>
+      <Platform>...</Platform>
+      <VersionNumber>...</VersionNumber>
+    </PanelBasics>
+    <Services>
+      <OperatorActivityLogging Enabled="..." />
+      <AlarmBuffer Enabled="..." />
+      <FLNTopology />
+    </Services>
+  </Panel>
+</ServicesRendered>
+```
+
+`<Services>` is a variable element list, emitted through a generic
+`<name attr="value" />` / `<name>value</name>` writer, so a client must parse it
+as an open set rather than expect exactly the three elements above. A panel
+that does not implement the operation answers with a refusal naming itself
+rather than an empty document.
+
+Two things follow for an implementer. First, this is a **richer identity read
+than `0x010C`** — it adds hardware type, platform, build number and a
+services list, and it is self-describing. Second, `0x010E` implies a **change
+notification**: the capability set is expected to vary at runtime, not only
+between models.
+
 ### 16.5 Firmware and revision identity
 
 A panel reports its identity in the `AP2_CABINET_DISPLAY` response (opcode `0x010C`, `AP2_Cabinet_Display_Response`). The leading fields: [W/S]
@@ -3979,7 +4107,8 @@ protocol operation, not a bug to be triggered.
 | Panel network config: IP settings, MAC (configured + hardware), link/MII state, BACnet settings | Same `0x010C` response carries `ip_addr_settings`, `configured_mac_address`, `hardware_mac_address`, `link_status`, BACnet sub-structures | [S] |
 | Supervisor / host name | `0x0050` (DISK_LOG-family status query) returns the supervisor name to an unauthenticated peer | [W] |
 | Node roster (every peer's name, IP, and state) | The full node-name table is obtainable via `0x4634` REPL_PULL with no authentication — the body is the replicated roster (8-byte header + per-node `TLV(node-name)` then `u32` version entries, `$paneldefault` first; §5.3); `0x464C` REPL_DIAG_NODELIST returns a node list | [W] |
-| Operator names / routing table contents | **[OPEN]** single-shot responses observed once at `0x464E` / `0x4650`; these are **not enum-confirmed function codes** (they resolve to no AP2 enum member and are treated as probe noise — see §9.5), so they are not presented here as confirmed disclosure opcodes | [OPEN] |
+| **Host table — peer names and the supervisor identity** | `0x4650` returns the host table in a 217-byte body: a default-panel tag, the panel number, every peer node name, and the supervisor both by name and in its `<name>\|<port>` suffixed form. Absence from the AP2 enum is not evidence of unreality — that enum is supervisor-side. Classify by what the panel returned. An earlier revision called this probe noise; **withdrawn**. | [W] |
+| Replication grain keys, origin nodes and USNs | `0x464E` returns a 117-byte body containing replication grain keys with node name and USN; `0x464D` streams the **replication data store** — see §5.3.1 | [W] |
 | Point existence, names, values, descriptors, units, alarm config | Read/browse/enumerate families `0x0220` / `0x0271` / `0x0273` / `0x0981` and the `0x09xx` enumerate family | [W] |
 | Complete node-state table | `0x33` GET_COMPLETE_NODE_STATE returns `node_table : Node_complete_state[]` | [S] |
 | PPCL control-program source | PPCL upload family (`0x4133` and the program-report opcodes) returns program text | [W][I] |

@@ -923,6 +923,8 @@ class P2Message:
     OP_EBLN_PORTS_DISPLAY        = 0x463C
     OP_EBLN_MULTICAST_DISPLAY    = 0x463D
     OP_EBLN_MAC_ADDRESS_DISPLAY  = 0x463E
+    OP_EBLN_REPL_DIAG_NODELIST   = 0x464C   # AP2 enum + firmware report
+                                            # name + captured body all agree
     OP_EBLN_TELNET_ENABLE        = 0x4644   # AP2 enum; NOT 0x4641
     OP_EBLN_TELNET_DISABLE       = 0x4645   # AP2 enum; NOT 0x4642
     #
@@ -1010,6 +1012,7 @@ EBLN_READS = frozenset({
     P2Message.OP_EBLN_POINT_LOCATION_GET,    P2Message.OP_EBLN_MII_DISPLAY,
     P2Message.OP_EBLN_IP_DISPLAY,            P2Message.OP_EBLN_PORTS_DISPLAY,
     P2Message.OP_EBLN_MULTICAST_DISPLAY,     P2Message.OP_EBLN_MAC_ADDRESS_DISPLAY,
+    P2Message.OP_EBLN_REPL_DIAG_NODELIST,
 })
 
 EBLN_WRITES = frozenset({
@@ -1024,6 +1027,23 @@ EBLN_WRITES = frozenset({
     P2Message.OP_EBLN_TELNET_DISABLE,
 })
 
+# Deliberately NOT in EBLN_READS: 0x464A, 0x464B, 0x464D, 0x464E, 0x464F and
+# 0x4650. Every one of them answered success with a structured body when
+# probed, so it is tempting to call them reads. Do not.
+#
+# The panel firmware names six EBLN replication reports, and two of them are
+# "Add Data Store" and "Delete Data Store". Which opcode emits which report
+# is unknown -- six names against seven responding opcodes, over a range
+# whose gaps are unknown. Guessing a positional mapping across an opcode
+# range with unknown gaps is exactly what produced a wrong Telnet binding
+# earlier in this project. If the guess is wrong here the cost is not a
+# mislabelled constant, it is emitting a data-store mutation at a customer
+# site. 0x464C is in the allowlist because three independent sources agree
+# on it; the rest wait for evidence.
+#
+# Note also that "returned data and appeared to change nothing" is not proof
+# of being side-effect-free. It is proof of nothing observed from outside.
+
 # Denial-of-service risk, independent of read/write: a single well-formed
 # 0x4636 carrying the standard SYST scope body has been observed to take a
 # panel's P2 task out for ~18 s -- longer than a real power cycle of the same
@@ -1032,13 +1052,30 @@ EBLN_STALL_RISK = frozenset({0x4636, 0x4647})
 
 REFUSED_OPCODES = EBLN_WRITES | EBLN_STALL_RISK
 
+# The EBLN replication diagnostic block. Every value here answered success with
+# a structured body when probed, and all but 0x464C are unidentified: the panel
+# firmware names six replication reports, two of which are "Add Data Store" and
+# "Delete Data Store". Until a specific opcode is tied to a specific report,
+# this range is closed rather than open -- an allowlist, because the failure
+# mode of guessing wrong is a data-store mutation on someone's panel.
+EBLN_DIAGNOSTIC_RANGE = range(0x4646, 0x4651)
+
 
 def check_emit_allowed(opcode: int) -> None:
     """Raise if an opcode must never be emitted by this tool.
 
-    Called on the send path. Deliberately not overridable by a flag: a
-    determined caller can edit the source, but nobody does it by accident.
+    Called from P2Connection._send_message on every outbound frame.
+    Deliberately not overridable by a flag: a determined caller can edit the
+    source, but nobody does that by accident.
+
+    Coverage, stated honestly: a few standalone helpers (dialect probe, cold
+    discovery) build raw frames and call sock.sendall directly, bypassing this
+    check. Audited at the time of writing -- the only EBLN opcodes any of them
+    emit are 0x4634 REPL_PULL and 0x4640 PING, both permitted. If you add a
+    raw-frame path, route it through here.
     """
+    if opcode is None:
+        return
     if opcode in EBLN_STALL_RISK:
         raise PermissionError(
             f"0x{opcode:04X} is a denial-of-service risk (observed ~18 s panel "
@@ -1048,6 +1085,14 @@ def check_emit_allowed(opcode: int) -> None:
             f"0x{opcode:04X} is an EBLN write/configuration operation and is "
             f"never emitted by this tool. Use the panel console if you intend "
             f"to change configuration.")
+    if opcode in EBLN_DIAGNOSTIC_RANGE and opcode not in EBLN_READS:
+        raise PermissionError(
+            f"0x{opcode:04X} is in the EBLN replication diagnostic block and "
+            f"has not been identified. Two of the six reports this family "
+            f"produces are 'Add Data Store' and 'Delete Data Store', and the "
+            f"opcode-to-report mapping is unknown, so this tool will not send "
+            f"it. 0x464C is permitted because three independent sources agree "
+            f"it is the read-only NodeList report.")
 
 class P2Connection:
     """Manages a TCP connection to a PXC controller using the P2 protocol."""
@@ -1292,9 +1337,16 @@ class P2Connection:
         return flag + net + b'\x00' + dst + b'\x00' + net + b'\x00' + src + b'\x00'
 
     def _send_message(self, msg: P2Message) -> bool:
-        """Send a P2 message over the TCP connection."""
+        """Send a P2 message over the TCP connection.
+
+        Every outbound frame passes check_emit_allowed() first. The check
+        lived here unenforced for one release -- defined, documented in the
+        commit message, and called from nowhere. A safety guard that is not
+        on the path is not a safety guard.
+        """
         if not self.sock:
             return False
+        check_emit_allowed(getattr(msg, "opcode", None))
         try:
             self.sock.sendall(msg.to_bytes())
             return True
