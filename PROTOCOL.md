@@ -3616,8 +3616,24 @@ Two name-length limits apply, and they are distinct:
 | `DAY` | day-of-week / day index | [S] |
 | `ALMCNT` | current alarm count | [S] |
 | `SECND1`–`SECND7` | per-second / scheduling helper points | [S] |
-| `#ALMPRI` | alarm-priority indicator | [S] |
-| per-node liveness booleans, BLN link-status point | one liveness boolean per node + a BLN link indicator | [D] |
+| `ALMCNT`, `ALMCT2` | alarm counters | [D] |
+| `TIME`, `CRTIME` | current time; current real time | [D] |
+| `DAY`, `DAYOFM`, `MONTH` | day-of-week, day-of-month, month | [D] |
+| `HOLIDA` | holiday indicator | [D] |
+| `FAILED` | failure indicator | [D] |
+| `LINK` | BLN link-status point | [D] |
+| **`NODE1` … `NODE99`** | per-node liveness booleans — **the set is reserved to 99** | [D] |
+
+Both the `$`-prefixed and bare forms are reserved: `$LOC1`–`$LOC15` and
+`LOC1`–`LOC15`, `$ARG1`–`$ARG15` and `ARG1`–`ARG15`, and `SECND1`–`SECND7`
+alongside `SECNDS`. None may be used as a point name. [D]
+
+**The liveness point set caps at 99, and that is the only hard node-count
+figure in this document.** It bounds the *liveness model* — a program cannot
+reference a hundredth node's boolean because no such reserved name exists. It
+does **not** by itself establish the capacity of the host/node-name table of
+§5.3, which is a separate structure; treat 99 as the ceiling on
+liveness-addressable nodes and the table's own limit as **[OPEN]**.
 
 ### 14.3 Statement / keyword vocabulary
 
@@ -3633,6 +3649,57 @@ PPCL statements fall into functional categories; the panel stores each statement
 | COV / trend | `ENCOV` (enable COV), `DISCOV` (disable COV) — runtime COV-subscription control from within a program (cross-ref §12/§13 COV) | [S] |
 | Communications | `EPHONE`/`DPHONE` (enable/disable phone — dial-up alarming), `MMI` (man-machine-interface control) | [S] |
 | Special function / math | `ASSIGN` (expression assignment), `LSTSQR`, plus the arithmetic and logical operators of §14.4 | [S] |
+
+#### The reserved word set
+
+The complete set of names a program may not use as a point name, grouped by
+role. This is the language's actual surface, and it is the authority for
+spelling — the token names of the table above are identifiers, not syntax. [D]
+
+| Role | Words |
+|---|---|
+| Flow | `IF` `THEN` `ELSE` `GOTO` `GOSUB` `RETURN` `LOOP` `WAIT` `SAMPLE` `ONPWRT` `TABLE` `DBSWIT` |
+| Point command | `ON` `OFF` `AUTO` `SET` `RELEAS` `FAST` `SLOW` `MIN` `MAX` `DCR` `ACT` `DEACT` |
+| Enable / alarm | `ENABLE` `DISABL` `ENALM` `DISALM` `ALARM` `NORMAL` `LLIMIT` `HLIMIT` |
+| Emergency | `EMON` `EMOFF` `EMSET` `EMFAST` `EMSLOW` `EMAUTO` |
+| Energy / time | `DAY` `NIGHT` `DAYMOD` `NGTMOD` `TOD` `TODMOD` `TODSET` `HOLIDA` `DC` `SSTO` `SSTOCO` `PDL` `PDLDAT` `PDLDPG` `PDLMTR` `PDLSET` `TIMAVG` `INITTO` `TOTAL` `PRFON` |
+| Comms | `EPHONE` `DPHONE` `OIP` |
+| Comparison, word form | `EQ` `NE` `LT` `LE` `GT` `GE` `EQUAL` `LESS` |
+| Logical, word form | `AND` `OR` `NAND` `XOR` |
+| Operators, dotted form | `.EQ.` `.NE.` `.LT.` `.LE.` `.GT.` `.GE.` `.AND.` `.OR.` `.NAND.` `.XOR.` `.ROOT.` |
+| Math | `SIN` `COS` `TAN` `ATN` `LOG` `EXP` `SQRT` `ROOT` `COM` |
+| Command priority | `@NONE` `@OPER` `@PDL` `@EMER` `@SMOKE`, and the bare `NONE` `OPER` `PDL` `EMER` `SMOKE` |
+
+Two things an implementer should take from this. **Every comparison and logical
+operator has two spellings** — a bare word and a dot-delimited form — and both
+are reserved, so a tokenizer must accept `.GT.` and `GT` as the same operator.
+And **the dotted forms include `.ROOT.`**, an operator with no bare-word
+comparison analogue, which a grammar derived only from the word list will miss.
+
+#### `OIP` — a program can execute operator functions
+
+§14.3's frequency table shows `OIP` used 152 times across the corpus and absent
+from the statement-type enum. It is a reserved word, and its role is specific:
+[D]
+
+```
+OIP (Trigger, Sequence)
+```
+
+It **mimics an operator sequence normally typed at a terminal**, executing most
+operator functions from inside a control program. `Trigger` is a point; the
+sequence runs once on its OFF→ON transition and will not run again until the
+trigger is cycled. It does not run on the first pass after a power failure, an
+enable, or a database load — only on a fresh transition. A malformed sequence
+makes the statement report `FAILED` at execution time rather than at edit time.
+
+The consequence is worth stating plainly, because it changes what "PPCL is
+writable" means. Adding a program line is an ordinary wire operation
+(`0x4100 AP2_PPCL_ADD_LINE`, wire-observed), and a line may contain `OIP`.
+**A peer that can write a PPCL line can therefore execute operator console
+functions on the panel**, gated only by getting a trigger point to transition.
+Editing control logic and issuing operator commands are not separate
+capabilities. See §17. [W][D]
 
 #### The token names are not the source spelling
 
@@ -4321,6 +4388,7 @@ protocol operation, not a bug to be triggered.
 | Point existence, names, values, descriptors, units, alarm config | Read/browse/enumerate families `0x0220` / `0x0271` / `0x0273` / `0x0981` and the `0x09xx` enumerate family | [W] |
 | Complete node-state table | `0x33` GET_COMPLETE_NODE_STATE returns `node_table : Node_complete_state[]` | [S] |
 | PPCL control-program source | PPCL upload family (`0x4133` and the program-report opcodes) returns program text | [W][I] |
+| **Operator-function execution via control logic** | PPCL's `OIP` statement mimics an operator terminal sequence and executes most operator functions from inside a program (§14.3). Program lines are added over the wire with `0x4100 AP2_PPCL_ADD_LINE`. Writing a line and writing an operator command are therefore the **same capability**, not two — any control on program editing that assumes it is merely logic modification is mis-scoped | [W][D] |
 
 The supervisor's TCP/5033 listener accepts arbitrary inbound connections and
 parses attacker-supplied frames; it does not return data to a non-peer but is a
