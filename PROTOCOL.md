@@ -2031,6 +2031,20 @@ its AP2 opcode alone is correct for 253 opcodes and wrong for `0x0313` in
 particular, where it collapses fifteen distinct operations into one name. Such
 frames must be decoded a level deeper or labelled as tunnelled.
 
+> **Reliability caveat, and it matters.** The *structure* above — three tiers,
+> the counts, and `0x0313` as a tunnel — rests on agreement between several
+> independent facts: fifteen CPI names that form one semantically coherent
+> family, an opcode independently named `AP2_P1_ROUTE`, and a command object
+> that exposes both code spaces. **Individual CPI→opcode assignments are a
+> different matter and should not be treated as authoritative.** Six were spot
+> checked against captured request bodies and at least three are plainly wrong:
+> one operation whose body carries a point name and descriptor was assigned a
+> holiday-schedule name, one whose body is nothing but the scope preamble with
+> a two-byte reply was assigned a schedule read, and a wildcard query was
+> assigned a write. Where a derived name disagrees with what a panel was
+> observed to do, **the observed behaviour wins** — the naming layer is a lead,
+> not evidence. [S]
+
 #### A second discriminator: sub-opcodes
 
 Some operations additionally write a **sub-opcode** into the body, which acts
