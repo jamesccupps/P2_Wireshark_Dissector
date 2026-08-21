@@ -1307,8 +1307,27 @@ On a response (`dir == 0x01` or `0x05`) the destination and source contents swap
 P2SCAN]` produces a reply addressed `[BLNNAME, P2SCAN, BLNNAME, NODE1]`. Slots 0 and 2 are stable
 (both the BLN name); slots 1 and 3 reverse. The BLN name appears **twice** in every frame; both
 copies carry the same value, and a conformant node MUST populate both. [W] The vendor framing logs
-the routing as name/channel/trunk/cabinet, with the trunk corresponding to the BLN; the doubled
-`[BLN, dst, BLN, src]` shape reflects an inter-BLN cross-trunk broker in the routing layer. [S]
+the routing as name/channel/trunk/cabinet, with the trunk corresponding to the BLN. [S]
+
+**Why the BLN name appears twice — a better answer, and a way to test it.** The routing object in
+the supervisor's own stack does not model four independent slots. It models **four roles**: a trunk
+id, a panel id, a supervisor id, and an object name. [S] Read against that, the wire's four slots
+are not `[BLN, dst, BLN, src]` but **two `(trunk, node)` pairs** — each identity carried together
+with the trunk it lives on. The duplication is then not redundancy at all; it is one field per pair,
+and both pairs happen to name the same trunk on a single-BLN network.
+
+That is a **falsifiable prediction**: on a frame that crosses between two BLNs, slots 0 and 2 should
+carry **different** trunk names. The present corpus cannot test it — across **206,050** trusted
+four-slot frames, slots 0 and 2 are identical in **206,045**, and every one of the five exceptions
+is a deliberately malformed research probe rather than production traffic. Every capture to hand is
+single-BLN, so the pair reading is **untested, not confirmed**. A capture taken where two BLNs
+exchange traffic would settle it in one frame. [W] **[OPEN]**
+
+Two further details from the same object model. Names decompose into a **base plus a suffix** with
+an explicit truncate operation — which is the mechanism behind the length limits of §3.3.2 rather
+than a separate rule — and there are **two distinct name types**, a *system* name and a *user* name,
+each with its own base/suffix pair. §3.4's system-name-versus-user-name distinction is therefore
+structural in the implementation, not merely a UI convention. [S]
 
 Implementation note: node names may differ in letter case between a request and its reply (e.g.
 `node1` vs `NODE1`). Case variation is cosmetic and does not affect routing. [W]
