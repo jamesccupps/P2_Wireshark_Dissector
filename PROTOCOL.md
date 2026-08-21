@@ -3139,7 +3139,19 @@ An `intercept_adjustment` (f32) accompanies the sensor type for field trim of th
 
 For digital and enumerated points the wire/value field carries a small integer **state index**, not a string. The index is resolved for display against a named **text group / state-text set** (the `State_text_table`), stored once per panel as a shared catalog and referenced by name from the point or team member. [S/D] Example sets: 2000 = {Off, On}; 2001 = {Normal, Alarm}; generic sets like {Clean, Dirty}. [D] A digital point's present value is encoded as the float `0.0` (OFF) or `1.0` (ON) in the value field (§12.3); an enumerated point's present value is the integer state index carried in that same float field. [D] An implementer renders the value by taking the index and looking it up in the referenced state-text group; the wire never carries the display string for a value. [D]
 
-> Implementation caution: the TEC-template "PTYPE" field seen in DataMate DBF/ISB data (1 = DI, 2 = DO, 3 = AI, 4 = AO, plus 10/11/12/34) is a **template-local** taxonomy, NOT the §11.2 `Point_type` L-codes and NOT priority values. The 1–4 alignment with LDI/LDO/LAI/LAO is coincidental for those four only (e.g. `PTYPE 34 = RESET-FAULT`, unrelated to command-priority 34 = smoke). Do not cross-map PTYPE to L-codes. [D]
+> Implementation caution: the TEC-template "PTYPE" field is a **template-local** taxonomy, NOT the §11.2 `Point_type` L-codes and NOT priority values. The 1–4 alignment with LDI/LDO/LAI/LAO is coincidental for those four only. Do not cross-map PTYPE to L-codes. [D]
+>
+> Censused rather than sampled, because the value set depends on where you look and on the controller family: [W]
+>
+> | Source | PTYPE values observed | Population |
+> |---|---|---|
+> | DataMate point table | 1, 2, 3, 4, and rarely 10, 11, 12, 34 | 76,355 rows |
+> | Point-team descriptors, **P1** family | 1, 2, 3, 4 only | 71,306 points / 714 applications |
+> | Point-team descriptors, **MSTP** family | 1, 2, 3, **16, 17, 20** | 268 points / 2 applications |
+>
+> The MSTP family therefore uses a **different PTYPE set from the P1 family** in the same library — it drops 4 and introduces 16/17/20 — so a reader must branch on the application's family, not just on the value. [W]
+>
+> The four rare DataMate values are all confined to drive/VFD applications and are legible from their own rows: **12** marks the application-number subpoint (`PTNUM 2`, "APPLICATION") and drive parameter-number/limit points; **10** and **34** are momentary command points carrying action labels rather than states (`RST ON`/`RSTOFF`, `RESET`/`NO`) — which is why `PTYPE 34` is `RESET FAULT` and has nothing to do with command-priority 34 = smoke; **11** occurs once, on a parameter-data read. Twenty rows in total. [W]
 
 #### 11.5.4 Logical type → BACnet object type (optional cross-reference)
 
