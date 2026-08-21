@@ -3203,6 +3203,65 @@ EngValue = (DigitizedValue × Slope) + Intercept
 
 The FLN raw-count form is distinct from the BLN f32 value form: on the fieldbus an analog value is a raw integer whose register width is the point's `P1MaxRange` (most commonly 0–255, i.e. an 8-bit count), while the value seen at the BLN layer and in the COV payload is the scaled `f32` (§12.3). [D] Worked example: a digitized count of 1954 with slope 0.03125 and intercept −5.0 yields `1954 × 0.03125 + (−5.0) = 56.0625`, displayed as 56.06. [D]
 
+#### 11.5.1.1 The raw count is not 0–255 on a panel input, and the full scale is not a power of two
+
+§11.5.1 gives the transform and notes that FLN raw counts are commonly 8-bit.
+Panel-resident analog points are different, and the constants are unobvious:
+[D/S]
+
+| Signal class | Full-scale count | Zero offset |
+|---|---:|---:|
+| Analog input, current | 25,600 or 24,576 (hardware-generation dependent) | 3,584 or 6,144 |
+| Analog input, voltage | 25,600 | 3,584 |
+| Analog output | 30,720 | 0 |
+
+So a 4–20 mA input spans a raw count of 3,584…25,600 rather than 0…full-scale:
+the zero offset **is** the live-zero of the 4 mA floor, expressed in counts. An
+implementer computing engineering values from raw counts without the offset
+gets a reading that is wrong by the live-zero and right at full scale, which is
+the hardest kind of scaling error to notice.
+
+Analog points carry a **sub-type** finer than the `LAI`/`LAO` distinction of
+§11.2, and the sub-type — not the point type — selects the transform:
+
+| Input | | Output | |
+|---|---|---|---|
+| `AII` | current | `AOI` | current |
+| `AIV` | voltage | `AOV` | voltage |
+| `AIP` | pneumatic | `AOP` | pneumatic |
+| `AI100K` | 100 kΩ thermistor | `AOV16` | voltage, 16-unit span |
+| | | `AOR` | resistive / floating |
+
+#### 11.5.1.2 Slope and intercept are hardware-generation-relative
+
+A point's slope and intercept are **not portable between hardware
+generations**. Moving a point from one termination generation to another
+requires re-deriving both from the originals, and the vendor's own tooling
+carries a conversion table keyed by `(source sub-type, target sub-type,
+generation)` to do it. Five generations are covered. [S]
+
+The conversions have three shapes:
+
+- **Identity** — `slope' = slope`, `intercept' = intercept`. The majority, and
+  what the most recent generations use among themselves.
+- **Span rescale** — `slope' = (a/b) × slope` where `a/b` is the ratio of the
+  two full-scale counts, e.g. `3200/25600` or `25600/24576`.
+- **Span rescale with offset correction** — the same, plus an intercept term
+  that re-references the live zero:
+  `intercept' = intercept + (z − (a/b) × o) × slope`, where `z` is the target
+  engineering zero and `o` the source zero offset in counts.
+
+The pneumatic and resistive outputs carry their own fixed ratios
+(`20/18 × 255/30720` for `AOP`, `135/30720` for `AOR`, `10/16 × 255/30720` for
+`AOV16`), and current output additionally shifts the intercept by −4 on one
+generation — the 4 mA live zero again, this time in engineering units rather
+than counts.
+
+The practical consequence for anyone reading a point database: **a slope and
+intercept are only meaningful alongside the sub-type and the termination
+generation that produced them.** Two points with identical slope/intercept on
+different generations do not represent the same transfer function. [S]
+
 #### 11.5.2 Sensor types
 
 An analog **input** carries a sensor type fixing its physical signal class; an analog output does not. The `Sensor_type` enumeration: [S]
