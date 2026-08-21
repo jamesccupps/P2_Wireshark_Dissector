@@ -3846,7 +3846,21 @@ An implementer building a command line must count parameters against the 16-slot
 | `@SMOKE` | SMOKE | 0x22 (34) | [S] |
 | `@EMER` | EMER (emergency) | 0x20 (32) | [S] |
 | `@PDL` | PDL (peak-demand limiting) | 0x05 (5) | [S] |
-| `@NONE` | NONE (release / lowest) | 0x00 (0) | [S] |
+| `@NONE` | **PPCL** — the level a control program owns (also the release / lowest level) | 0x00 (0) | [S/D] |
+
+**`@NONE` is the PPCL priority, not the absence of one.** The five levels
+answer *who owns this point* — the control program, the operator, peak-demand
+limiting, emergency, or smoke control — and `@NONE` names the control program.
+It is simultaneously the lowest rung and the level at which every ordinary PPCL
+command lands, which is why a program's writes are the first thing any operator
+action displaces. Reading it as "no priority" makes the ladder's bottom look
+empty when it is in fact the default owner of most points. [D]
+
+An `@`-indicator is also a **test**, not only a command: a statement may ask
+whether a point currently sits at a given priority as well as drive it there.
+And a PPCL statement admits **at most 16 parameters**, with the `@`-indicator
+consuming one of them — a limit worth knowing before generating statements
+programmatically. [D]
 
 A PPCL program that commands a point at, say, `@EMER` overrides any standard NONE-priority sequence and holds the point until a `RELEASE` (or `@NONE`) at an equal-or-higher priority frees it. Exactly these five `@` levels exist; the intermediate host levels (`host_2`..`host_6`, values 10/15/20/25/30) and `tec_ovrd` (1) appear in the full `User_command_priority` enum but are not exposed as PPCL `@`-indicators. (Cross-ref §8 for the full priority ladder and the read-vs-write `scope_byte` dispatch.) [S]
 
