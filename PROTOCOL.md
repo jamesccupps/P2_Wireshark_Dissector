@@ -677,6 +677,40 @@ A panel may alternatively host a BACnet MS/TP field bus in place of P1 (`Fln_typ
 
 > **[OPEN] P2 segmentation thresholds and reassembly rules.** The ~256-byte figure from vendor connection-test material is a *connection-test ping* size, **not** a maximum P2 data-packet cap — single P2 frames are observed with `total_len` up to ≈1,587 bytes (a ~1,530-byte body of packed records plus header+slots) in one response, so a single frame's `total_len` is bounded only by the u32 length field (§6.7) [W]. The P2 application layer still carries an explicit more-follows segmentation flag and segment-mapping at the ASDU layer for results large enough to exceed an implementation ceiling [S], but the exact segmentation threshold and the more-follows flag offset/reassembly rules are not pinned on the wire. Needs a multi-segment upload capture for confirmation.
 
+### 4.6 The serial trunk is token-passing, and its parameters are named
+
+The frame bytes remain open (§4.5), but the **medium-access discipline** is
+settled: the serial trunk driver is configured with a token hold time and a
+local node address, which is a token-passing MAC, not a master/slave poll.
+[S] The driver's parameter set, with the values it ships with:
+
+| Parameter | Default | What it governs |
+|---|---:|---|
+| `BaudRate` | 9600 | line rate (the tiers of §4.3) |
+| `OurNode` | 255 | this station's trunk address; 255 is the unset/broadcast value |
+| `TokenHoldTime` | 1000 | how long a station may hold the token |
+| `TryTime` | 1000 | retry interval for an unacknowledged transmission |
+| `XTryTime` | 2500 | extended retry interval |
+| `QuickAckTimeout` | 5 | short acknowledgement window |
+| `ClientTrnxTimeout` | 30 | client-side transaction timeout |
+| `ServerTrnxTimeout` | 40 | server-side transaction timeout |
+| `IdleTime` | 20000 | idle-line threshold |
+| `InterCharTime` | 16 | inter-character gap — the frame delimiter on an RS-485 line with no start byte |
+| `FScanAnnounce` | 16 | fast-scan announce interval |
+
+Two of these are structurally informative. **`InterCharTime`** implies the
+serial framing delimits by an inter-character silence gap rather than a start
+delimiter, which is consistent with §4.5 finding no start/sync byte — there may
+not be one to find. And the **two distinct transaction timeouts**, client 30
+and server 40, mean the responder is given a longer budget than the requester
+waits, so a server that answers between those two values produces a response
+the client has already abandoned.
+
+The driver exposes **eight channels** and up to four installed adapters, each
+with a legacy ISA I/O base and a shared upper-memory segment. That is the
+architecture the trunk was designed around, and it is why trunk numbering
+(§4.3) is per-channel rather than per-host. [S]
+
 ---
 
 ## 5. Discovery, Liveness & Replication
@@ -1549,6 +1583,36 @@ where the peer actually reported an error. [W] A robust client treats `dir == 0x
 application-layer "operation failed with code N," distinct from transport-level RST/FIN (connection
 rejected/closed) and from silence (no reply). A 0-byte `dir == 0x01` is a positive acknowledgement,
 not an empty/failed result. [W][I]
+
+### 7.3a The stack's service primitives
+
+Beneath the opcode catalog the P2 stack presents a small, named set of service
+primitives. They are worth stating because they explain *why* the opcode
+families are shaped as they are: [S]
+
+| Primitive | Role |
+|---|---|
+| `Request` / `Response` | the ordinary confirmed exchange of §7.1 |
+| `ReturnData` | the data-bearing half of a response, separable from its status |
+| `ReadConfirmedInd` | a confirmed indication delivered to the application |
+| `ReadEventInd` | an **unconfirmed** event indication — the COV/alarm path of §12 and §13 |
+| `GetFirst` / `GetNext` / `CancelGetNext` | the enumeration cursor |
+| `NetMgrRequest` | network-management request, distinct from ordinary data |
+| `SourceData` | the originating-side data path |
+
+The **`GetFirst` / `GetNext` / `CancelGetNext` triple is the same cursor idiom**
+§7.2's continuation discussion describes at the application layer: enumeration
+is a stack-level concept, not a per-opcode convention, which is why the
+`UPL_ALL_*` family and the browse families all cursor the same way. The third
+member matters to an implementer and is easy to miss — **a cursor can be
+abandoned explicitly.** A client that walks half an enumeration and disconnects
+leaves the server holding cursor state that a `CancelGetNext` would have
+released.
+
+The stack selector also enumerates the transports the same service layer can
+sit on — Protocol II, Ethernet, Profibus, a remote link, and an "other"
+catch-all — which is the layering §2 describes, from the implementation's own
+side. [S]
 
 ### 7.3 Connection and session model
 
