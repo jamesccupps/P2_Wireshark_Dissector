@@ -3296,6 +3296,40 @@ The boolean run (fields 5–10) is the wire source of the point operating-state 
 
 The point types are the L-type vocabulary: ldi=Digital Input, ldo=Digital Output, lai=Analog Input, lao=Analog Output, l2sl/l2sp=2-State Latched/Pulsed, looal/looap=On/Off/Auto Latched/Pulsed, lfssl/lfssp=Fast-Slow-Speed Latched/Pulsed, lpaci=Pulse-Accumulator/Counter Input, ldao=Dual Analog Output, lenum=Enumerated, lfmssl/lfmssp=Fast-Multi-Speed variants, ppcl_lai=PPCL-resident analog. Analog points carry per-point Slope + Intercept for engineering-unit conversion, applied by the client from the point table — not carried on each value frame. [S][I]
 
+#### 10.4.1 Do not read the supervisor's point object as the wire model
+
+The supervisor keeps its own logical-point class, and it is much larger than
+`Point_base` — on the order of 200 accessors against the twelve fields above.
+It is tempting to treat that as a fuller description of the protocol's point.
+**It is not, and the difference is not merely one of detail: the class is a
+merge of two protocols.** Alongside genuine P2 attributes it carries BACnet
+ones, and nothing in a method name distinguishes them:
+
+| Accessor | Actually belongs to |
+|---|---|
+| `GetInitialPriority`, `IsNormClosed`, `HasProof` / `GetProofNum`, `GetProofDelay` | P2 point configuration |
+| `GetTimeDelay` | BACnet — the `TO-OFFNORMAL` / `TO-NORMAL` dwell against `High_Limit`/`Low_Limit` |
+| `GetRelinquishDefault` | BACnet — the value taken when priorities 1–16 are all empty |
+| `Get/SetBACnet*` (a dozen of them), `LogicalPt2BacMap` | BACnet mapping, explicitly |
+
+An implementer mining that class for P2 field names will import BACnet
+semantics without noticing. Only accessors corroborated against P2-side
+documentation or the wire belong in a P2 decoder. [S][D]
+
+What the class *is* good for is confirming that the static configuration
+attributes live in the point-definition record rather than in `Point_base` or
+in the COV push (§13.1): **initial priority** (the priority a point holds at
+start-up; pre-APOGEE panels accept only `NONE` or `OPER`), **normally-closed**
+(a physical-DI wiring sense — whether the contacts are closed with no energy
+applied), and **proof present / proof point address / proof delay** (the
+monitored input that verifies a commanded output actually moved, §11.3). These
+are point-definition fields, not value-frame fields. [D]
+
+Two method names on the same class are worth noting for a different reason:
+`FormatDefinePointRequest` and `FormatReadTotalizedVal` are request *builders*.
+The supervisor's encoder layer names its operations after the operation, not
+after the opcode — which is the CPI tier of §9.1.1 seen from above. [S]
+
 ### 10.5 CABINET_DISPLAY — firmware / identity block (0x010C)
 
 `AP2_CABINET_DISPLAY` response (0x010C) is the panel's full firmware-and-identity block — the single richest unauthenticated read in the protocol (230/231 B on the wire; observed returning a firmware string such as `PME1252 / PXME V<rev> APOGEE / <link date>`). Field order is the wire order, and the layout below is now wire-confirmed — the on-wire field order matches the struct in this section exactly. [W]
