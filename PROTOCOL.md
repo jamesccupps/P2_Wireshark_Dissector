@@ -30,10 +30,15 @@
   - [4.3 Serial BLN datalink (dedicated RS-485 trunk)](#43-serial-bln-datalink-dedicated-rs-485-trunk)
   - [4.4 FLN / P1 field bus (RS-485 two-wire)](#44-fln--p1-field-bus-rs-485-two-wire)
   - [4.5 Open items — serial and field-bus framing](#45-open-items--serial-and-field-bus-framing)
+  - [4.6 The serial trunk is token-passing, and its parameters are named](#46-the-serial-trunk-is-token-passing-and-its-parameters-are-named)
+  - [5.0 Documented timer defaults, and how they scale](#50-documented-timer-defaults-and-how-they-scale)
 - [5. Discovery, Liveness & Replication](#5-discovery-liveness--replication)
   - [5.1 EPing — Ethernet-BLN availability probe (liveness, not a beacon)](#51-eping--ethernet-bln-availability-probe-liveness-not-a-beacon)
   - [5.2 Multicast availability channel (optional, off by default) — and the beacon myth](#52-multicast-availability-channel-optional-off-by-default--and-the-beacon-myth)
   - [5.3 Node-name-table replication (the self-organizing BLN)](#53-node-name-table-replication-the-self-organizing-bln)
+  - [5.3.6 The EBLN diagnostic reads, and what each one returns](#536-the-ebln-diagnostic-reads-and-what-each-one-returns)
+  - [5.3.1 Replication opcodes](#531-replication-opcodes)
+  - [5.3.2 EBLN configuration & node-management opcodes (struct-derived)](#532-ebln-configuration--node-management-opcodes-struct-derived)
   - [5.3.3 Peer identity lives in three separate stores](#533-peer-identity-lives-in-three-separate-stores)
   - [5.3.4 Deletion is tombstone-based](#534-deletion-is-tombstone-based)
   - [5.3.5 Removing an entry, and why not to reach for a power cycle](#535-removing-an-entry-and-why-not-to-reach-for-a-power-cycle)
@@ -52,13 +57,14 @@
 - [7. Service Model & Message Types](#7-service-model--message-types)
   - [7.1 The ASDU service model](#71-the-asdu-service-model)
   - [7.2 Success vs error responses](#72-success-vs-error-responses)
+  - [7.3a The stack's service primitives](#73a-the-stacks-service-primitives)
   - [7.3 Connection and session model](#73-connection-and-session-model)
+  - [8.1 The string TLV](#81-the-string-tlv)
 - [8. Body Encoding Primitives](#8-body-encoding-primitives)
-  - [8.1 The string TLV [W]](#81-the-string-tlv-w)
-  - [8.2 Scope tag and command priority [W][S]](#82-scope-tag-and-command-priority-ws)
-  - [8.3 Numeric value fields [W][S]](#83-numeric-value-fields-ws)
-  - [8.4 String character encoding — RAD-50 vs ASCII [S][D]](#84-string-character-encoding--rad-50-vs-ascii-sd)
-  - [8.5 ASDU field convention [S]](#85-asdu-field-convention-s)
+  - [8.2 Scope tag and command priority](#82-scope-tag-and-command-priority)
+  - [8.3 Numeric value fields](#83-numeric-value-fields)
+  - [8.4 String character encoding — RAD-50 vs ASCII](#84-string-character-encoding--rad-50-vs-ascii)
+  - [8.5 ASDU field convention](#85-asdu-field-convention)
 - [9. Function-Code (Opcode) Catalog](#9-function-code-opcode-catalog)
   - [9.1 The AP2 function code](#91-the-ap2-function-code)
   - [9.1.1 The wire opcode is the bottom of a three-tier model](#911-the-wire-opcode-is-the-bottom-of-a-three-tier-model)
@@ -115,8 +121,10 @@
 - [16. Database, Bulk Transfer, On-Disk (.P2) Format, Application Catalog & Firmware](#16-database-bulk-transfer-on-disk-p2-format-application-catalog--firmware)
   - [16.1 Bulk database transfer](#161-bulk-database-transfer)
   - [16.2 On-disk (.P2) panel-database format](#162-on-disk-p2-panel-database-format)
+  - [16.2.1 The supervisor-side device-backup container](#1621-the-supervisor-side-device-backup-container)
   - [16.3 Application catalog (controller applications)](#163-application-catalog-controller-applications)
   - [16.4 Reading a controller application from a live panel](#164-reading-a-controller-application-from-a-live-panel)
+  - [16.4.1 `AP2_SERVICES_RENDERED` — the capability document](#1641-ap2_services_rendered--the-capability-document)
   - [16.5 Firmware and revision identity](#165-firmware-and-revision-identity)
   - [16.6 Cabinet lifecycle and destructive opcodes](#166-cabinet-lifecycle-and-destructive-opcodes)
 - [17. Security Considerations](#17-security-considerations)
@@ -145,7 +153,7 @@ P2 ("Protocol II") is the application-layer network protocol of the Siemens APOG
 - **Peer model.** On the backbone (the BLN, also called the ALN) every member — supervisor and panel alike — is an equal node, and any node may originate traffic. "Request" and "response" describe the role of a *frame*, not of a node.
 - **Frame.** Big-endian throughout: `u32 total_len | u32 message_type (low byte = message class) | u32 sequence | u8 direction | four NUL-terminated ASCII routing slots [BLN, dst-node, BLN, src-node] | (request/push frames only) u16 opcode | body`. The opcode is present only on `direction == 0x00` frames; a response is matched to its request by the echoed sequence number.
 - **Dialect.** The message class is a legacy/modern pair fixed by a panel's firmware generation — data `0x33`/`0x34`, second channel `0x2E`/`0x2F`, peer carriers `0x29`/`0x2A` — not by direction. A client reads a panel's firmware once (via `CABINET_DISPLAY`, opcode `0x010C`) and selects the dialect and the string encoding (ASCII vs RAD-50) from it; there is no on-wire negotiation.
-- **Operations.** A 2-byte function code (the "AP2 function code") selects the operation; about 630 are defined and 135 are observed on the wire in the reference corpus. The high-volume operations are the COV value push (`0x0274`), the liveness/identity heartbeat (`0x4640`), point command and read (`0x0240` / `0x0220`), COV subscribe/unsubscribe (`0x0271` / `0x0273`), and the database upload/replication family.
+- **Operations.** A 2-byte function code (the "AP2 function code") selects the operation; about 630 are defined and **125** are observed on the wire in the reference corpus (§9.5). The high-volume operations are the COV value push (`0x0274`), the liveness/identity heartbeat (`0x4640`), point command and read (`0x0240` / `0x0220`), COV subscribe/unsubscribe (`0x0271` / `0x0273`), and the database upload/replication family.
 - **Encoding.** Strings are length-prefixed TLVs (`01 00 <len> <ascii>`); analog values are IEEE-754 single-precision big-endian floats; command priority rides a scope tag. Bodies are ordered, positionally-typed field structures (ASDUs).
 - **Control logic.** Panels run a resident, line-numbered control language — Powers Process Control Language (PPCL); the supervisor reads, edits, and uploads it over P2 but never executes it (§14).
 - **Security.** P2 carries no authentication and no encryption; the only admission gate is a matching BLN name. Any party with network reachability and the BLN name can read points, command points, and reconfigure panels. §17 covers the implications and an owner-operator hardening posture.
@@ -967,7 +975,7 @@ field-panel delete first. [W]
 > section. The console procedure above is non-disruptive and is the correct
 > mechanism. [W]
 
-### 5.3.1 The EBLN diagnostic reads, and what each one returns
+#### 5.3.6 The EBLN diagnostic reads, and what each one returns
 
 The `0x464A`–`0x4650` block is the EBLN replication diagnostic set. None of
 these values appears in the supervisor-side `AP2_Function_Code` enum except
@@ -1621,7 +1629,7 @@ The model has two transaction shapes, which map directly onto the direction byte
 
 The stack-selector layer's read primitives confirm the split: `ReadConfirmedInd` (confirmed
 request/response) versus `ReadEventInd` (asynchronous event indication). [S] The dominant Event-class
-transaction is the change-of-value push `0x0274` (`COV_ANNUNCIATE`): 121,446 frames in the corpus —
+transaction is the change-of-value push `0x0274` (`COV_ANNUNCIATE`): 48,393 request frames in the corpus under the criteria of §9.5 —
 almost all acknowledged with a 0-byte success, a small minority unanswered. [W] COV itself is a
 register/cancel **subscription** — a peer arms COV with `COV_ENABLE` (`0x0271`) / disarms with
 `COV_DISABLE` (`0x0273`), after which the panel emits `COV_ANNUNCIATE` events. [W][S] The
@@ -1859,8 +1867,7 @@ The primitives are:
 | String character encoding | RAD-50 vs ASCII codec selection | §8.4 |
 | ASDU field convention | How ordered typed fields realize on the wire | §8.5 |
 
-### 8.1 The string TLV [W]
-
+### 8.1 The string TLV
 The universal container for a string, name, or scope-name field is a tag-length-value (TLV) structure. It is the single most common primitive in any P2 body. [W]
 
 | Offset | Field | Type | Value/Notes | [tag] |
@@ -1887,8 +1894,7 @@ Notation used throughout §9: `S<n>` abbreviates a string TLV `01 00 <n> <n cont
 
 The TLV's `TEXT_` content is what realizes a logical name on the wire. In the vendor's own ASDU field model (§8.5) a name field decomposes into a `name_space` selector plus `name` and `suffix` `TEXT_` fields; on the wire each `TEXT_` field is a string TLV, and a multi-component name is carried as consecutive TLVs. [S]
 
-### 8.2 Scope tag and command priority [W][S]
-
+### 8.2 Scope tag and command priority
 Most addressable requests open with a **scope tag**: a scope-name string TLV (§8.1) immediately followed by a 5-byte selector of the form `<scope_byte> 3F FF FF FF`. [W]
 
 ```
@@ -1936,8 +1942,7 @@ Priority semantics an implementer must honor:
 
 The `Point_priority_enum` superset extends the command ladder of §8.2.1 with the BACnet 16-level priority array, values **101–116** (`bacnet_1` … `bacnet_16`), where `bacnet_1` (101) is highest within that band. Later, BACnet-capable controllers also expose an MMI/BACnet priority band in the 8–16 region (`APP_PRIORITY` / `MMI_PRIORITY` enums on BACnet-TEC platforms). A point on such a controller resolves its effective command from the combined ladder: the legacy P2 command priorities (0–35) and the BACnet array (101–116) coexist in one priority space, with the same higher-value-wins `>=` arbitration. The classic P2 wire `scope_byte` carries only the 0–35 legacy band; the 101–116 band is reached through the point's BACnet command path on controllers that implement it. [S][I]
 
-### 8.3 Numeric value fields [W][S]
-
+### 8.3 Numeric value fields
 #### 8.3.1 Integers [W]
 
 Integer fields embedded in bodies are big-endian. Both 16-bit (`u16 BE`) and 32-bit (`u32 BE`) fields occur — 2-byte error codes, 2-byte record markers and element counts, and 4-byte counts or identifiers in enumeration and routing bodies. (Header `total_len`, `msg_type`, and `sequence` are `u32 BE`; the AP2 function code and the error code are `u16 BE` — see §6.) The vendor field model uses the signed/unsigned 8/16/32 widths of the `Native_type_enum` (§8.3.3), and counts are typically `UNSIGNED16` / `UNSIGNED_16`, e.g. an array length preceding a variable-length element list. [W][S]
@@ -1996,8 +2001,7 @@ form is distinct from the `eBLN_Node` `baseTime`/`offset` clock-sync fields (§1
 separate `u32` time base plus a `u16` zone offset used for replication time alignment, not a calendar
 stamp. [W][S]
 
-### 8.4 String character encoding — RAD-50 vs ASCII [S][D]
-
+### 8.4 String character encoding — RAD-50 vs ASCII
 String content inside a TLV (§8.1) is carried in one of two character encodings, selected **per firmware platform**, not per frame. The encoding in force is a fixed property of the device's firmware revision (`STRING_TYPE = RAD50 | ASCII`, keyed per platform class in the firmware revision library). A node uses one string encoding for its whole revision. [D]
 
 #### 8.4.1 The RAD-50 codec [S]
@@ -2038,8 +2042,7 @@ String fields have encoding-dependent capacity budgets. Name fields (point name,
 
 **Codec-enforced byte maxima (cross-validated).** The ASCII serializer applies a fixed maximum byte length per string field, and the same caps recur across dozens of independent operation bodies — so they are reliable worst-case widths for an encoder, not per-opcode accidents. The dominant cap is **31 bytes (0x1F) for object / point / program-name fields** (seen on the command, COV, cabinet, EBLN, and enum families alike — it is by far the most common string cap; this is the byte width of the 30-character object-name field above, i.e. 30 usable characters within a 31-byte budget), with **13 bytes for a short descriptor or secondary name** (the 12-character descriptor above in its field budget), roughly **21 bytes for an operator credential / logon identity**, and a **free-text band of ~248–257 bytes** for message text, license strings, point descriptions, and PPCL program-line text. (This 31-byte object-name cap is distinct from the ≤15-byte **node**-name limit above — they are different fields: the node name is the access-gate identity in the routing slot / node-name table, while the 31-byte cap governs point, object, and program names inside the body.) An encoder SHOULD truncate to these maxima before framing; an over-length field is the most common reason a panel silently rejects an otherwise well-formed write. [D][I]
 
-### 8.5 ASDU field convention [S]
-
+### 8.5 ASDU field convention
 A P2 body is an **Application Service Data Unit (ASDU)** — the payload the request/response service carries. Each ASDU body is a sequence of **ordered, typed fields** in declaration order (an AsnBase-style structure: there are 1,144 such request/response/sub-type structures defined in the vendor type system). There is no per-field tag/name on the wire beyond what each primitive carries; field identity is **positional**, fixed by the structure definition for that opcode. A parser walks an ASDU left to right, consuming each field per its declared type. [S]
 
 Field-type-to-primitive mapping:
@@ -2086,7 +2089,7 @@ The AP2 function code is a 16-bit big-endian value that sits on the wire immedia
 
 The complete command vocabulary of the protocol is defined by the vendor's `AP2_Function_Code` enumeration: **641 named members across 630 distinct opcode values** (a handful of values carry two names — historical aliases such as `AP2_DUMMY_CMD`/`AP2_REV_STRING` at 0x0100, or the `CONTROLLER`/`TEC` doublets). The enum's numeric values **are** the wire opcodes: cross-checking every opcode seen on the wire against the enum, all matched exactly. [S]
 
-Of the 630 defined values, **135 are observed in the capture corpus** (530,715 P2 frames across 108 captures); the remaining 495 are defined-but-unobserved (overwhelmingly configuration, database-management, upload, and BACnet/LON-integration operations that a passive supervisor↔panel capture does not exercise). Every defined opcode is enumerable from the catalog below; "not observed" means absent from this corpus, not undefined. The corpus combines passive supervisor↔panel and panel↔panel site captures with a smaller set of active read/enumeration test captures; opcode counts are corpus frequencies, not a claim about steady-state operation. [W][S]
+Of the 630 defined values, **125 are observed in the capture corpus** (206,050 trusted P2 frames across the 85 captures that carry P2; see §9.5 for the counting criteria and for why an earlier figure of 135 was withdrawn); the remaining 505 are defined-but-unobserved (overwhelmingly configuration, database-management, upload, and BACnet/LON-integration operations that a passive supervisor↔panel capture does not exercise). Every defined opcode is enumerable from the catalog below; "not observed" means absent from this corpus, not undefined. The corpus combines passive supervisor↔panel and panel↔panel site captures with a smaller set of active read/enumeration test captures; opcode counts are corpus frequencies, not a claim about steady-state operation. [W][S]
 
 Rows that were seen on the wire are tagged **[W]** and carry their frame count; defined-but-unobserved rows are tagged **[S]** (struct/metadata-derived from the vendor enum — definitional truth). Wire counts in the catalog come from the corpus census; per-opcode response shapes, error tails, and message-class distributions are in §9.7.
 
@@ -2260,9 +2263,13 @@ the wire. There is not one.
 
 #### The message-structure catalog, and three command shapes
 
-The stack defines **505 distinct ASDU body structures**, named on a strict
-convention: an operation contributes `<OPERATION>_REQ` and, where it answers
-with data, `<OPERATION>_RESP`, with shared field groups as `<NAME>_TYPE`. The
+The supervisor's own symbol vocabulary names **505 request structures** on a
+strict convention: an operation contributes `<OPERATION>_REQ` and, where it
+answers with data, `<OPERATION>_RESP` (158 of those), with shared field groups
+as `<NAME>_TYPE`. That is a second, coarser view of the same surface the
+type-system catalog of §10.1 describes in 1,144 structures; the two use
+different suffixes because they come from different layers of the stack, and
+neither count contradicts the other. The
 names track the families of §9.4 exactly - `ALARM_ACK_REQ`/`_RESP`,
 `ANNUNCIATE_COV_REQ`, `BACKUP_FLASH_DBASE_REQ`, `BACNET_MGT_READ_BBMD_REQ`/
 `_RESP`, `ADD_CONTROLLER_REQ`. [S]
@@ -2326,7 +2333,7 @@ A subset of opcodes mutate panel firmware state, node-table membership, point va
 
 **Database / flash / memory / license / COLBAS.** `AP2_RESTORE_FLASH_DBASE` (0x5331, overwrites the panel flash DB), `AP2_CLEAR_FLASH_DBASE` (0x5332, erases it), `AP2_CABINET_MEMORY_MODIFY` (0x012F, direct memory write), `AP2_LICENSE_MANAGER_DELETE`/`DELETE_ALL` (0x0111/0x0112), `AP2_COLBAS_WRITE`/`ABORT` (0x4A03/0x4A04). `AP2_BACKUP_FLASH_DBASE` (0x5330) is a read/export and is **not** destructive. [S]
 
-*Correction of record (COV pair).* `AP2_COV_ENABLE` (0x0271) and `AP2_COV_DISABLE` (0x0273) are the change-of-value subscription enable/disable pair — **not** "ReadExtended"/"PointExistenceProbe" as an earlier behavioral reading labeled them. `AP2_COV_ANNUNCIATE` (0x0274) is the actual COV report (the highest-volume opcode in the corpus, 121,446 frames), and `AP2_COV_DELETE_STUB` (0x0272) tears down a subscription stub. These are not destructive but are corrected here because the wrong names propagated into earlier notes. [W][S]
+*Correction of record (COV pair).* `AP2_COV_ENABLE` (0x0271) and `AP2_COV_DISABLE` (0x0273) are the change-of-value subscription enable/disable pair — **not** "ReadExtended"/"PointExistenceProbe" as an earlier behavioral reading labeled them. `AP2_COV_ANNUNCIATE` (0x0274) is the actual COV report (the highest-volume opcode in the corpus, 48,393 request frames under the §9.5 criteria), and `AP2_COV_DELETE_STUB` (0x0272) tears down a subscription stub. These are not destructive but are corrected here because the wrong names propagated into earlier notes. [W][S]
 
 ### 9.4 Family overview
 
@@ -2568,834 +2575,847 @@ the block's age rather than of its non-existence.
 
 The catalog below is generated by joining the vendor `AP2_Function_Code` enum (the 630 distinct opcode values) with the corpus census. A recount under stated criteria — trusted frames only, `dir == 0x00` only, content-deduplicated captures — gives **125 distinct wire-observed function codes across 104,752 request/push frames**, of which 112 now carry a name. (Three further values appear only in frames the parser marked untrusted after a resynchronisation: `0x0631`, `0x1826`, `0x2226`. `0x1826` is precisely the fictitious opcode a mid-record resync manufactures — a TLV length `0x18` followed by ASCII `&` — and is the reason the trusted flag exists. An earlier edition cited 135 wire-observed values; that figure is not reproducible from the current evidence base under any definition tried, and 125 replaces it.) Columns: hex opcode, name(s), observed wire count (or `-`), notes (destructive flag where applicable), and evidence tag ([W] wire-observed, [S] enum-defined). Within each family, rows are sorted by opcode value. Sixteen wire values do **not** appear in the catalog, and they fall into three groups rather than one. `0x0000`/`0x0002` are below the enum's first defined value and `0x0C44`/`0x4443` are slot-walk misalignments of `0x4640` — those four are genuinely parser artifacts. [W] `0x0453` and `0x0510` drew `not_found`, so the panel does not implement them. [W] **The remaining ten — `0x4641`, `0x4642`, `0x4643`, `0x4647`, `0x464A`, `0x464B`, `0x464D`, `0x464E`, `0x464F`, `0x4650` — are real panel operations, and an earlier reading of this document that dismissed them as noise is withdrawn.** Absence from `AP2_Function_Code` proves nothing: that enum is the **supervisor-side** vocabulary and does not describe what a panel implements. Classify by what the panel did. `0x464A`–`0x4650` each answered `dir=0x01` **success with distinct structured bodies** (0 B, 22 B, 125 B, a 12,073-byte declared node table, 117 B, 26 B, 217 B respectively), and `0x4641` answered success, while `0x0510` — equally absent from the enum — answered `not_found` from the same panel in the same campaign. The `0x464D` reply is the sharpest case and needs stating precisely: the panel answered, and its response header **declared** 12,073 bytes of node table, of which **4,380 arrived** before the client reset the connection. No complete frame exists, so a strict framer reports the exchange as unanswered — it was not. A panel that begins streaming 12 KB of structured node table for one value and answers `not_found` to another is not treating them alike. `0x4642`/`0x4643` answered `not_supported`, i.e. a handler was reached and refused; `0x4647` returned nothing at all and remains **[OPEN]**. Low frame count is not evidence of unreality — it measures how often the *supervisor* uses an operation, and a panel-side operation the supervisor never invokes is expected to appear exactly once, when probed. [W]
 
-<!-- BEGIN GENERATED CATALOG (do not hand-edit; regenerate with working/dll_analysis gen_table.py joining AP2_Function_Code_enum.txt + observed_opcodes_named.txt) -->
+<!-- BEGIN GENERATED CATALOG (do not hand-edit; regenerate with working/sweep/s91_gencatalog.py, which joins p2_data.py with the census of working/sweep/s90_census.py) -->
 
 #### Family: NODE/STATE
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0030 | AP2_SET_GLOBAL_DATA | - |  | [S] |
-| 0x0031 | AP2_GET_GLOBAL_DATA | - |  | [S] |
-| 0x0032 | AP2_REMOTE_NODE_CHECK | - |  | [S] |
-| 0x0033 | AP2_GET_COMPLETE_NODE_STATE | - |  | [S] |
-| 0x0034 | AP2_SET_NODE_STATE | - | **DESTRUCTIVE** (set node state) | [S] |
-| 0x0035 | AP2_SET_COMPLETE_NODE_STATE | - | **DESTRUCTIVE** (set complete node state) | [S] |
-| 0x0326 | AP2_GET_LOGGER_STATE | - |  | [S] |
-| 0x0328 | AP2_GET_BUFFERALARM_STATE | - |  | [S] |
-| 0x5301 | AP2_GET_FLN_TOPOLOGY | - |  | [S] |
-| 0x5304 | AP2_GET_MEC_EXPBUS_TOPOLOGY | - |  | [S] |
+| 0x0030 | AP2_SET_GLOBAL_DATA | - || [F] |
+| 0x0031 | AP2_GET_GLOBAL_DATA | - || [S] |
+| 0x0032 | AP2_REMOTE_NODE_CHECK | - || [S] |
+| 0x0033 | AP2_GET_COMPLETE_NODE_STATE | - || [S] |
+| 0x0034 | AP2_SET_NODE_STATE | - |**DESTRUCTIVE** (set node state)| [F] |
+| 0x0035 | AP2_SET_COMPLETE_NODE_STATE | - |**DESTRUCTIVE** (set complete node state)| [S] |
+| 0x0326 | AP2_GET_LOGGER_STATE | - || [S] |
+| 0x0328 | AP2_GET_BUFFERALARM_STATE | - || [S] |
+| 0x5301 | AP2_GET_FLN_TOPOLOGY | - || [S] |
+| 0x5304 | AP2_GET_MEC_EXPBUS_TOPOLOGY | - || [S] |
 
 #### Family: CABINET
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x003E | AP2_CABINET_TIMEOUT_NORMAL | - |  | [S] |
-| 0x003F | AP2_CABINET_TIMEOUT_EXTENDED | - |  | [S] |
-| 0x0041 | AP2_CABINET_ADD | - | **DESTRUCTIVE** (add cabinet to node table) | [S] |
-| 0x0042 | AP2_CABINET_REMOVE | - | **DESTRUCTIVE** (remove cabinet from node table) | [S] |
-| 0x0044 | AP2_CABINET_MAKE_READY | - |  | [S] |
-| 0x0046 | AP2_CABINET_ONLINE | - | **DESTRUCTIVE** (force cabinet online) | [S] |
-| 0x0047 | AP2_CABINET_OFFLINE | - | **DESTRUCTIVE** (force cabinet offline) | [S] |
-| 0x0050 | AP2_DISK_LOG | 142 |  | [W] |
-| 0x0051 | AP2_DISK_ADD | - |  | [S] |
-| 0x0058 | AP2_REPORT_PRINTER_LOG | - |  | [S] |
-| 0x0059 | AP2_REPORT_PRINTER_ADD | - |  | [S] |
-| 0x0100 | AP2_DUMMY_CMD / AP2_REV_STRING | 9 |  | [W] |
-| 0x0108 | AP2_CABINET_BOOT_MONITOR | - | **DESTRUCTIVE** (reboot to boot monitor) | [S] |
-| 0x010A | AP2_CABINET_COLDSTART | 1 | **DESTRUCTIVE** (panel cold start (reboot)) | [W] |
-| 0x010B | AP2_CABINET_WARMSTART | - | **DESTRUCTIVE** (panel warm start (reboot)) | [S] |
-| 0x010C | AP2_CABINET_DISPLAY | 250 |  | [W] |
-| 0x010D | AP2_SERVICES_RENDERED | - |  | [S] |
-| 0x010E | AP2_SERVICES_RENDERED_CHANGED | - |  | [S] |
-| 0x0120 | AP2_CABINET_SET_MMI1_BAUDRATE | - |  | [S] |
-| 0x0121 | AP2_CABINET_SET_MMI2_BAUDRATE | - |  | [S] |
-| 0x0123 | AP2_CABINET_SET_FLN1_BAUDRATE | - |  | [S] |
-| 0x0124 | AP2_CABINET_SET_FLN2_BAUDRATE | - |  | [S] |
-| 0x0125 | AP2_CABINET_SET_FLN3_BAUDRATE | - |  | [S] |
-| 0x0126 | AP2_CABINET_SET_BLN_BAUDRATE | - |  | [S] |
-| 0x0127 | AP2_CABINET_SET_PBUS_STATE | - |  | [S] |
-| 0x0128 | AP2_CABINET_SET_BLN_ADDRESS | - |  | [S] |
-| 0x0129 | AP2_CABINET_SET_MODEM_STATE | - |  | [S] |
-| 0x012A | AP2_CABINET_COLDSTART_DISPLAY | - |  | [S] |
-| 0x012B | AP2_CABINET_COLDSTART_CLEAR_HISTORY | - |  | [S] |
-| 0x012F | AP2_CABINET_MEMORY_MODIFY | - | **DESTRUCTIVE** (modify panel memory) | [S] |
-| 0x0130 | AP2_CABINET_MEMORY_DISPLAY | - |  | [S] |
-| 0x0131 | AP2_CABINET_MEMORY_AVAILABLE | - |  | [S] |
-| 0x400E | AP2_REPORT_DESC_ADD | - |  | [S] |
-| 0x4011 | AP2_REPORT_DESC_UPLOAD | 24 |  | [W] |
+| 0x003E | AP2_CABINET_TIMEOUT_NORMAL | - || [F] |
+| 0x003F | AP2_CABINET_TIMEOUT_EXTENDED | - || [F] |
+| 0x0041 | AP2_CABINET_ADD | - |**DESTRUCTIVE** (add cabinet to node table)| [S] |
+| 0x0042 | AP2_CABINET_REMOVE | - |**DESTRUCTIVE** (remove cabinet from node table)| [F] |
+| 0x0044 | AP2_CABINET_MAKE_READY | - || [F] |
+| 0x0046 | AP2_CABINET_ONLINE | - |**DESTRUCTIVE** (force cabinet online)| [F] |
+| 0x0047 | AP2_CABINET_OFFLINE | - |**DESTRUCTIVE** (force cabinet offline)| [F] |
+| 0x0050 | AP2_DISK_LOG | 140 || [W] |
+| 0x0051 | AP2_DISK_ADD | - || [S] |
+| 0x0058 | AP2_REPORT_PRINTER_LOG | - || [F] |
+| 0x0059 | AP2_REPORT_PRINTER_ADD | - || [S] |
+| 0x0100 | AP2_DUMMY_CMD / AP2_REV_STRING | 9 || [W] |
+| 0x0108 | AP2_CABINET_BOOT_MONITOR | - |**DESTRUCTIVE** (reboot to boot monitor)| [S] |
+| 0x010A | AP2_CABINET_COLDSTART | 1 |**DESTRUCTIVE** (panel cold start (reboot))| [W] |
+| 0x010B | AP2_CABINET_WARMSTART | - |**DESTRUCTIVE** (panel warm start (reboot))| [S] |
+| 0x010C | AP2_CABINET_DISPLAY | 163 || [W] |
+| 0x010D | AP2_SERVICES_RENDERED | - || [S] |
+| 0x010E | AP2_SERVICES_RENDERED_CHANGED | - || [S] |
+| 0x0120 | AP2_CABINET_SET_MMI1_BAUDRATE | - || [F] |
+| 0x0121 | AP2_CABINET_SET_MMI2_BAUDRATE | - || [F] |
+| 0x0123 | AP2_CABINET_SET_FLN1_BAUDRATE | - || [F] |
+| 0x0124 | AP2_CABINET_SET_FLN2_BAUDRATE | - || [F] |
+| 0x0125 | AP2_CABINET_SET_FLN3_BAUDRATE | - || [F] |
+| 0x0126 | AP2_CABINET_SET_BLN_BAUDRATE | - || [F] |
+| 0x0127 | AP2_CABINET_SET_PBUS_STATE | - || [F] |
+| 0x0128 | AP2_CABINET_SET_BLN_ADDRESS | - || [F] |
+| 0x0129 | AP2_CABINET_SET_MODEM_STATE | - || [F] |
+| 0x012A | AP2_CABINET_COLDSTART_DISPLAY | - || [F] |
+| 0x012B | AP2_CABINET_COLDSTART_CLEAR_HISTORY | - || [S] |
+| 0x012F | AP2_CABINET_MEMORY_MODIFY | - |**DESTRUCTIVE** (modify panel memory)| [S] |
+| 0x0130 | AP2_CABINET_MEMORY_DISPLAY | - || [F] |
+| 0x0131 | AP2_CABINET_MEMORY_AVAILABLE | - || [F] |
+| 0x400E | AP2_REPORT_DESC_ADD | - || [S] |
+| 0x4011 | AP2_REPORT_DESC_UPLOAD | 6 || [W] |
 
 #### Family: BLN/DIAG
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x005B | AP2_BLN_DIAGNOSTICS_DISPLAY | - |  | [S] |
-| 0x005C | AP2_RESET_BLN_DIAGNOSTIC_COUNTERS | - |  | [S] |
+| 0x005B | AP2_BLN_DIAGNOSTICS_DISPLAY | - || [F] |
+| 0x005C | AP2_RESET_BLN_DIAGNOSTIC_COUNTERS | - || [F] |
 
 #### Family: LICENSE
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x010F | AP2_LICENSE_MANAGER_DISPLAY | - |  | [S] |
-| 0x0110 | AP2_LICENSE_MANAGER_ADD | - |  | [S] |
-| 0x0111 | AP2_LICENSE_MANAGER_DELETE | - | **DESTRUCTIVE** (delete license) | [S] |
-| 0x0112 | AP2_LICENSE_MANAGER_DELETE_ALL | - | **DESTRUCTIVE** (delete all licenses) | [S] |
-| 0x0113 | AP2_LICENSE_MANAGER_DBCHANGE | - |  | [S] |
-| 0x0114 | AP2_LICENSE_MANAGER_DISPLAY_LICENSE | - |  | [S] |
-| 0x0116 | AP2_LICENSE_MANAGER_MESSAGE_SEND | - |  | [S] |
+| 0x010F | AP2_LICENSE_MANAGER_DISPLAY | - || [S] |
+| 0x0110 | AP2_LICENSE_MANAGER_ADD | - || [S] |
+| 0x0111 | AP2_LICENSE_MANAGER_DELETE | - |**DESTRUCTIVE** (delete license)| [S] |
+| 0x0112 | AP2_LICENSE_MANAGER_DELETE_ALL | - |**DESTRUCTIVE** (delete all licenses)| [S] |
+| 0x0113 | AP2_LICENSE_MANAGER_DBCHANGE | - || [S] |
+| 0x0114 | AP2_LICENSE_MANAGER_DISPLAY_LICENSE | - || [S] |
+| 0x0116 | AP2_LICENSE_MANAGER_MESSAGE_SEND | - || [S] |
 
 #### Family: ROUTING
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0136 | AP2_P2_ROUTE | - |  | [S] |
-| 0x030E | AP2_ROUTE_OBJECT | - |  | [S] |
-| 0x0310 | AP2_PB_POLL | - |  | [S] |
+| 0x0136 | AP2_P2_ROUTE | - || [S] |
+| 0x030E | AP2_ROUTE_OBJECT | - || [S] |
+| 0x0310 | AP2_PB_POLL | - || [S] |
 
 #### Family: PBUS
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0140 | AP2_PBUS_MODULE_DISPLAY | - |  | [S] |
-| 0x0142 | AP2_PBUS_DIAGS_RESET | - |  | [S] |
-| 0x0143 | AP2_PBUS_LINETEST | - |  | [S] |
+| 0x0140 | AP2_PBUS_MODULE_DISPLAY | - || [F] |
+| 0x0142 | AP2_PBUS_DIAGS_RESET | - || [S] |
+| 0x0143 | AP2_PBUS_LINETEST | - || [S] |
 
 #### Family: POINT
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0200 | AP2_POINT_ADD | 6 |  | [W] |
-| 0x0201 | AP2_POINT_ADD_LDO | - |  | [S] |
-| 0x0202 | AP2_POINT_ADD_LDI | - |  | [S] |
-| 0x0203 | AP2_POINT_ADD_LAO | 4 |  | [W] |
-| 0x0204 | AP2_POINT_ADD_LAI | 12 |  | [W] |
-| 0x0205 | AP2_POINT_ADD_L2SL | - |  | [S] |
-| 0x0206 | AP2_POINT_ADD_L2SP | - |  | [S] |
-| 0x0207 | AP2_POINT_ADD_LFSSL | - |  | [S] |
-| 0x0208 | AP2_POINT_ADD_LFSSP | - |  | [S] |
-| 0x0209 | AP2_POINT_ADD_LOOAL | - |  | [S] |
-| 0x020A | AP2_POINT_ADD_LOOAP | - |  | [S] |
-| 0x020B | AP2_POINT_ADD_LPACI | - |  | [S] |
-| 0x020C | AP2_POINT_ADD_LDAO | - |  | [S] |
-| 0x020D | AP2_POINT_ADD_LFMSSL | - |  | [S] |
-| 0x020E | AP2_POINT_ADD_LFMSSP | - |  | [S] |
-| 0x020F | AP2_POINT_ADD_LENUM | - |  | [S] |
-| 0x0220 | AP2_POINT_LOG_VALUE | 8011 |  | [W] |
-| 0x0221 | AP2_POINT_LOG_ALARM | - |  | [S] |
-| 0x0222 | AP2_POINT_LOG_CTRL_STAT | - |  | [S] |
-| 0x0223 | AP2_POINT_LOG_FAILED | - |  | [S] |
-| 0x0224 | AP2_POINT_LOG_TOTAL | - |  | [S] |
-| 0x0225 | AP2_POINT_LOG_PRIORITY | - |  | [S] |
-| 0x0226 | AP2_POINT_LOG_DISABLED | - |  | [S] |
-| 0x0227 | AP2_POINT_LOG_TYPE | - |  | [S] |
-| 0x0228 | AP2_POINT_LOG_TROUBLE | - |  | [S] |
-| 0x0229 | AP2_POINT_LOG_ANY | - |  | [S] |
-| 0x022A | AP2_POINT_LOG_ODSB | - |  | [S] |
-| 0x022B | AP2_POINT_LOG_PDSB | - |  | [S] |
-| 0x022C | AP2_POINT_LOG_ALARM_CMD | - |  | [S] |
-| 0x0240 | AP2_POINT_CMD_VALUE | 32044 | **DESTRUCTIVE** (point command (write value)) | [W] |
-| 0x0241 | AP2_POINT_CMD_PRIORITY | 101 | **DESTRUCTIVE** (point command (write priority)) | [W] |
-| 0x0242 | AP2_POINT_CMD_ENABLE | - |  | [S] |
-| 0x0243 | AP2_POINT_CMD_DISABLE | - |  | [S] |
-| 0x0244 | AP2_POINT_CMD_ALARM | 29 |  | [W] |
-| 0x0245 | AP2_POINT_CMD_NORMAL | 7 |  | [W] |
-| 0x0246 | AP2_POINT_CMD_ALARM_ENABLE | 3 |  | [W] |
-| 0x0247 | AP2_POINT_CMD_ALARM_DISABLE | 5 |  | [W] |
-| 0x0248 | AP2_POINT_CMD_INIT_LPACI | - |  | [S] |
-| 0x0249 | AP2_POINT_CMD_LOWLIMIT | - |  | [S] |
-| 0x024A | AP2_POINT_CMD_HIGHLIMIT | - |  | [S] |
-| 0x024B | AP2_POINT_CMD_TOTALIZER | - |  | [S] |
-| 0x024C | AP2_POINT_CMD_INTO_TROUBLE | - |  | [S] |
-| 0x024D | AP2_POINT_CMD_OUTOF_TROUBLE | - |  | [S] |
-| 0x024E | AP2_POINT_CMD_RELEASE | - |  | [S] |
-| 0x0260 | AP2_POINT_MODIFY | 4 |  | [W] |
-| 0x0261 | AP2_POINT_LOOK | - |  | [S] |
-| 0x0262 | AP2_POINT_DEFINITION_DISPLAY | - |  | [S] |
-| 0x0263 | AP2_POINT_REMOVE | 10 |  | [W] |
-| 0x0264 | AP2_POINT_DEFINITION_BYADDR_DISPLAY | - |  | [S] |
-| 0x0265 | AP2_POINT_QUERY_NAME | - |  | [S] |
-| 0x02E0 | AP2_POINT_TOTAL_ENABLE | - |  | [S] |
-| 0x02E1 | AP2_POINT_TOTAL_DISABLE | - |  | [S] |
-| 0x02E2 | AP2_POINT_TOTAL_DISPLAY | - |  | [S] |
-| 0x0300 | AP2_POINT_SET_PREFIX | - |  | [S] |
-| 0x0309 | AP2_POINT_SAVE | - |  | [S] |
+| 0x0200 | AP2_POINT_ADD | - || [S] |
+| 0x0201 | AP2_POINT_ADD_LDO | - || [S] |
+| 0x0202 | AP2_POINT_ADD_LDI | - || [S] |
+| 0x0203 | AP2_POINT_ADD_LAO | 2 || [W] |
+| 0x0204 | AP2_POINT_ADD_LAI | 4 || [W] |
+| 0x0205 | AP2_POINT_ADD_L2SL | - || [S] |
+| 0x0206 | AP2_POINT_ADD_L2SP | - || [S] |
+| 0x0207 | AP2_POINT_ADD_LFSSL | - || [S] |
+| 0x0208 | AP2_POINT_ADD_LFSSP | - || [S] |
+| 0x0209 | AP2_POINT_ADD_LOOAL | - || [S] |
+| 0x020A | AP2_POINT_ADD_LOOAP | - || [S] |
+| 0x020B | AP2_POINT_ADD_LPACI | - || [S] |
+| 0x020C | AP2_POINT_ADD_LDAO | - || [S] |
+| 0x020D | AP2_POINT_ADD_LFMSSL | - || [S] |
+| 0x020E | AP2_POINT_ADD_LFMSSP | - || [S] |
+| 0x020F | AP2_POINT_ADD_LENUM | - || [S] |
+| 0x0220 | AP2_POINT_LOG_VALUE | 4331 || [W] |
+| 0x0221 | AP2_POINT_LOG_ALARM | - || [F] |
+| 0x0222 | AP2_POINT_LOG_CTRL_STAT | - || [F] |
+| 0x0223 | AP2_POINT_LOG_FAILED | - || [F] |
+| 0x0224 | AP2_POINT_LOG_TOTAL | - || [S] |
+| 0x0225 | AP2_POINT_LOG_PRIORITY | - || [F] |
+| 0x0226 | AP2_POINT_LOG_DISABLED | - || [F] |
+| 0x0227 | AP2_POINT_LOG_TYPE | - || [F] |
+| 0x0228 | AP2_POINT_LOG_TROUBLE | - || [F] |
+| 0x0229 | AP2_POINT_LOG_ANY | - || [F] |
+| 0x022A | AP2_POINT_LOG_ODSB | - || [S] |
+| 0x022B | AP2_POINT_LOG_PDSB | - || [S] |
+| 0x022C | AP2_POINT_LOG_ALARM_CMD | - || [S] |
+| 0x0240 | AP2_POINT_CMD_VALUE | 11385 |**DESTRUCTIVE** (point command (write value))| [W] |
+| 0x0241 | AP2_POINT_CMD_PRIORITY | 31 |**DESTRUCTIVE** (point command (write priority))| [W] |
+| 0x0242 | AP2_POINT_CMD_ENABLE | - || [F] |
+| 0x0243 | AP2_POINT_CMD_DISABLE | - || [F] |
+| 0x0244 | AP2_POINT_CMD_ALARM | 2 || [W] |
+| 0x0245 | AP2_POINT_CMD_NORMAL | 2 || [W] |
+| 0x0246 | AP2_POINT_CMD_ALARM_ENABLE | - || [F] |
+| 0x0247 | AP2_POINT_CMD_ALARM_DISABLE | - || [F] |
+| 0x0248 | AP2_POINT_CMD_INIT_LPACI | - || [F] |
+| 0x0249 | AP2_POINT_CMD_LOWLIMIT | - || [F] |
+| 0x024A | AP2_POINT_CMD_HIGHLIMIT | - || [F] |
+| 0x024B | AP2_POINT_CMD_TOTALIZER | - || [F] |
+| 0x024C | AP2_POINT_CMD_INTO_TROUBLE | - || [F] |
+| 0x024D | AP2_POINT_CMD_OUTOF_TROUBLE | - || [F] |
+| 0x024E | AP2_POINT_CMD_RELEASE | - || [S] |
+| 0x0260 | AP2_POINT_MODIFY | 2 || [W] |
+| 0x0261 | AP2_POINT_LOOK | - || [S] |
+| 0x0262 | AP2_POINT_DEFINITION_DISPLAY | - || [S] |
+| 0x0263 | AP2_POINT_REMOVE | 4 || [W] |
+| 0x0264 | AP2_POINT_DEFINITION_BYADDR_DISPLAY | - || [F] |
+| 0x0265 | AP2_POINT_QUERY_NAME | - || [S] |
+| 0x02E0 | AP2_POINT_TOTAL_ENABLE | - || [F] |
+| 0x02E1 | AP2_POINT_TOTAL_DISABLE | - || [F] |
+| 0x02E2 | AP2_POINT_TOTAL_DISPLAY | - || [F] |
+| 0x0300 | AP2_POINT_SET_PREFIX | - || [S] |
+| 0x0309 | AP2_POINT_SAVE | - || [S] |
 
 #### Family: COV
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0271 | AP2_COV_ENABLE | 9695 |  | [W] |
-| 0x0272 | AP2_COV_DELETE_STUB | 259 |  | [W] |
-| 0x0273 | AP2_COV_DISABLE | 7408 |  | [W] |
-| 0x0274 | AP2_COV_ANNUNCIATE | 121446 |  | [W] |
-| 0x0275 | AP2_XREF_COV_DISPLAY | - |  | [S] |
+| 0x0271 | AP2_COV_ENABLE | 5219 || [W] |
+| 0x0272 | AP2_COV_DELETE_STUB | 46 || [W] |
+| 0x0273 | AP2_COV_DISABLE | 3696 || [W] |
+| 0x0274 | AP2_COV_ANNUNCIATE | 48393 || [W] |
+| 0x0275 | AP2_XREF_COV_DISPLAY | - || [F] |
 
 #### Family: MONITOR
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0280 | AP2_MONITOR_ADD_NAME | - |  | [S] |
-| 0x0281 | AP2_MONITOR_REMOVE_NAME | - |  | [S] |
-| 0x0282 | AP2_MONITOR_START | - |  | [S] |
+| 0x0280 | AP2_MONITOR_ADD_NAME | - || [S] |
+| 0x0281 | AP2_MONITOR_REMOVE_NAME | - || [S] |
+| 0x0282 | AP2_MONITOR_START | - || [S] |
 
 #### Family: TREND
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0290 | AP2_TREND_SETUP_ADD | - |  | [S] |
-| 0x0291 | AP2_TREND_SETUP_DELETE | 16 |  | [W] |
-| 0x0292 | AP2_TREND_ENABLE | - |  | [S] |
-| 0x0293 | AP2_TREND_DISABLE | - |  | [S] |
-| 0x0294 | AP2_TREND_SETUP_LOG | 69 |  | [W] |
-| 0x0295 | AP2_TREND_DATA_DISPLAY | 297 |  | [W] |
-| 0x0296 | AP2_TREND_DEFINITION_DISPLAY | - |  | [S] |
-| 0x0297 | AP2_TREND_MULTIPOINT_DISPLAY | - |  | [S] |
-| 0x0298 | AP2_TREND_SETUP_MODIFY | - |  | [S] |
-| 0x0299 | AP2_TREND_MODIFY | - |  | [S] |
-| 0x029A | AP2_TREND_SETUP_COPY | - |  | [S] |
-| 0x029B | AP2_TREND_COPY | - |  | [S] |
-| 0x029C | AP2_TREND_LOOK | - |  | [S] |
-| 0x029D | AP2_TREND_QUERY_SINGLE_NAME | - |  | [S] |
-| 0x029E | AP2_TREND_QUERY_NAMES | - |  | [S] |
-| 0x029F | AP2_TREND_QUERY_TRENDS | - |  | [S] |
-| 0x02A0 | AP2_TREND_ARC_SETUP | - |  | [S] |
-| 0x02A1 | AP2_TREND_ARC_DATA_UPLOAD | - |  | [S] |
-| 0x02A2 | AP2_TREND_ARC_UPLOAD_ME | - |  | [S] |
-| 0x02A5 | AP2_TREND_EVENT_SETUP_ADD | - |  | [S] |
-| 0x02A6 | AP2_TREND_EVENT_MODIFY | - |  | [S] |
-| 0x02A7 | AP2_TREND_EVENT_COPY | - |  | [S] |
-| 0x02A8 | AP2_TREND_EVENT_ARC_SETUP | 10 |  | [W] |
-| 0x02A9 | AP2_TREND_EVENT_ARC_ENABLE | - |  | [S] |
+| 0x0290 | AP2_TREND_SETUP_ADD | - || [S] |
+| 0x0291 | AP2_TREND_SETUP_DELETE | 4 || [W] |
+| 0x0292 | AP2_TREND_ENABLE | - || [S] |
+| 0x0293 | AP2_TREND_DISABLE | - || [S] |
+| 0x0294 | AP2_TREND_SETUP_LOG | 9 || [W] |
+| 0x0295 | AP2_TREND_DATA_DISPLAY | 29 || [W] |
+| 0x0296 | AP2_TREND_DEFINITION_DISPLAY | - || [S] |
+| 0x0297 | AP2_TREND_MULTIPOINT_DISPLAY | - || [S] |
+| 0x0298 | AP2_TREND_SETUP_MODIFY | - || [S] |
+| 0x0299 | AP2_TREND_MODIFY | - || [S] |
+| 0x029A | AP2_TREND_SETUP_COPY | - || [S] |
+| 0x029B | AP2_TREND_COPY | - || [S] |
+| 0x029C | AP2_TREND_LOOK | - || [S] |
+| 0x029D | AP2_TREND_QUERY_SINGLE_NAME | - || [S] |
+| 0x029E | AP2_TREND_QUERY_NAMES | - || [S] |
+| 0x029F | AP2_TREND_QUERY_TRENDS | - || [S] |
+| 0x02A0 | AP2_TREND_ARC_SETUP | - || [S] |
+| 0x02A1 | AP2_TREND_ARC_DATA_UPLOAD | - || [S] |
+| 0x02A2 | AP2_TREND_ARC_UPLOAD_ME | - || [S] |
+| 0x02A5 | AP2_TREND_EVENT_SETUP_ADD | - || [S] |
+| 0x02A6 | AP2_TREND_EVENT_MODIFY | - || [S] |
+| 0x02A7 | AP2_TREND_EVENT_COPY | - || [S] |
+| 0x02A8 | AP2_TREND_EVENT_ARC_SETUP | 4 || [W] |
+| 0x02A9 | AP2_TREND_EVENT_ARC_ENABLE | - || [S] |
 
 #### Family: TOD/TIME
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0301 | AP2_TIME_DISPLAY / AP2_TIME_SOFTWARE | - |  | [S] |
-| 0x0302 | AP2_TIME_DISPLAY_CLOCK / AP2_TIME_SET | 2 |  | [W] |
-| 0x4500 | AP2_TOD_POINT_ADD | 10 |  | [W] |
-| 0x4501 | AP2_TOD_POINT_REMOVE | - |  | [S] |
-| 0x4502 | AP2_TOD_POINT_ENABLE | - |  | [S] |
-| 0x4503 | AP2_TOD_POINT_DISABLE | - |  | [S] |
-| 0x4504 | AP2_TOD_CMD_ADD | - |  | [S] |
-| 0x4505 | AP2_TOD_CMD_REMOVE | - |  | [S] |
-| 0x4506 | AP2_TOD_CMD_DISABLE | - |  | [S] |
-| 0x450E | AP2_TOD_POINT_DISPLAY | - |  | [S] |
-| 0x450F | AP2_TOD_CMD_DISPLAY | - |  | [S] |
+| 0x0301 | AP2_TIME_DISPLAY / AP2_TIME_SOFTWARE | - || [S] |
+| 0x0302 | AP2_TIME_DISPLAY_CLOCK / AP2_TIME_SET | - || [F] |
+| 0x4500 | AP2_TOD_POINT_ADD | 5 || [W] |
+| 0x4501 | AP2_TOD_POINT_REMOVE | - || [S] |
+| 0x4502 | AP2_TOD_POINT_ENABLE | - || [S] |
+| 0x4503 | AP2_TOD_POINT_DISABLE | - || [S] |
+| 0x4504 | AP2_TOD_CMD_ADD | - || [S] |
+| 0x4505 | AP2_TOD_CMD_REMOVE | - || [S] |
+| 0x4506 | AP2_TOD_CMD_DISABLE | - || [S] |
+| 0x450E | AP2_TOD_POINT_DISPLAY | - || [S] |
+| 0x450F | AP2_TOD_CMD_DISPLAY | - || [S] |
 
 #### Family: MISC
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0303 | AP2_MESSAGE_SEND / AP2_MESSAGE | - |  | [S] |
-| 0x0306 | AP2_QUICK_KEYS | - |  | [S] |
-| 0x030C | AP2_TOGGLE_DEVELOPMENT | - |  | [S] |
-| 0x0311 | AP2_PRINT_ERROR | - |  | [S] |
+| 0x0303 | AP2_MESSAGE_SEND / AP2_MESSAGE | - || [F] |
+| 0x0306 | AP2_QUICK_KEYS | - || [S] |
+| 0x030C | AP2_TOGGLE_DEVELOPMENT | - || [S] |
+| 0x0311 | AP2_PRINT_ERROR | - || [S] |
 
 #### Family: SESSION
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0304 | AP2_LOGON_CEC | - |  | [S] |
-| 0x0305 | AP2_LOGOFF_CEC | - |  | [S] |
+| 0x0304 | AP2_LOGON_CEC | - || [S] |
+| 0x0305 | AP2_LOGOFF_CEC | - || [S] |
 
 #### Family: DATABASE
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0307 | AP2_LOAD_DATABASE | - |  | [S] |
-| 0x0308 | AP2_SAVE_DATABASE | - |  | [S] |
-| 0x030B | AP2_TAPE_TRAILER | - |  | [S] |
+| 0x0307 | AP2_LOAD_DATABASE | - || [S] |
+| 0x0308 | AP2_SAVE_DATABASE | - || [S] |
+| 0x030B | AP2_TAPE_TRAILER | - || [S] |
 
 #### Family: PPCL
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x030A | AP2_PPCL_SAVE | - |  | [S] |
-| 0x4100 | AP2_PPCL_ADD_LINE | 8 |  | [W] |
-| 0x4101 | AP2_PPCL_EDIT_LINE | - |  | [S] |
-| 0x4103 | AP2_PPCL_REMOVE_LINES | 4 |  | [W] |
-| 0x4104 | AP2_PPCL_ENABLE_LINES | 8 |  | [W] |
-| 0x4105 | AP2_PPCL_DISABLE_LINES | 2 |  | [W] |
-| 0x4106 | AP2_PPCL_CLEAR_TRACE | 5 |  | [W] |
-| 0x4107 | AP2_PPCL_PROGRAM_LOG | 8 |  | [W] |
-| 0x4108 | AP2_PPCL_SEARCH_NAME_TYPE | - |  | [S] |
-| 0x4109 | AP2_PPCL_QUERY_PROGRAM | - |  | [S] |
-| 0x410A | AP2_PPCL_PROGRAM_DISPLAY | - |  | [S] |
-| 0x410B | AP2_PPCL_MODIFY_LINE | - |  | [S] |
-| 0x410C | AP2_PPCL_COPY_LINE | - |  | [S] |
-| 0x410D | AP2_PPCL_SETUP_MODIFY_LINE | - |  | [S] |
-| 0x410E | AP2_PPCL_LOOK_LINES | - |  | [S] |
-| 0x410F | AP2_PPCL_PDL_RESET | - |  | [S] |
-| 0x4110 | AP2_PPCL_PDL_INIT | - |  | [S] |
-| 0x4111 | AP2_PPCL_PDL_DISPLAY | - |  | [S] |
-| 0x412A | AP2_PPCL_PROGRAM_DISPLAY_UNRESOLVED | - |  | [S] |
-| 0x4134 | AP2_PROGRAM_ADD | - |  | [S] |
-| 0x4135 | AP2_PROGRAM_REMOVE | - |  | [S] |
-| 0x4137 | AP2_PROGRAM_LOG | - |  | [S] |
-| 0x4138 | AP2_PROGRAM_MODIFY | - |  | [S] |
+| 0x030A | AP2_PPCL_SAVE | - || [S] |
+| 0x4100 | AP2_PPCL_ADD_LINE | 1 || [W] |
+| 0x4101 | AP2_PPCL_EDIT_LINE | - || [S] |
+| 0x4103 | AP2_PPCL_REMOVE_LINES | 1 || [W] |
+| 0x4104 | AP2_PPCL_ENABLE_LINES | 1 || [W] |
+| 0x4105 | AP2_PPCL_DISABLE_LINES | - || [F] |
+| 0x4106 | AP2_PPCL_CLEAR_TRACE | 1 || [W] |
+| 0x4107 | AP2_PPCL_PROGRAM_LOG | - || [F] |
+| 0x4108 | AP2_PPCL_SEARCH_NAME_TYPE | - || [F] |
+| 0x4109 | AP2_PPCL_QUERY_PROGRAM | - || [F] |
+| 0x410A | AP2_PPCL_PROGRAM_DISPLAY | - || [S] |
+| 0x410B | AP2_PPCL_MODIFY_LINE | - || [S] |
+| 0x410C | AP2_PPCL_COPY_LINE | - || [S] |
+| 0x410D | AP2_PPCL_SETUP_MODIFY_LINE | - || [S] |
+| 0x410E | AP2_PPCL_LOOK_LINES | - || [F] |
+| 0x410F | AP2_PPCL_PDL_RESET | - || [F] |
+| 0x4110 | AP2_PPCL_PDL_INIT | - || [F] |
+| 0x4111 | AP2_PPCL_PDL_DISPLAY | - || [F] |
+| 0x412A | AP2_PPCL_PROGRAM_DISPLAY_UNRESOLVED | - || [F] |
+| 0x4134 | AP2_PROGRAM_ADD | - || [S] |
+| 0x4135 | AP2_PROGRAM_REMOVE | - || [S] |
+| 0x4137 | AP2_PROGRAM_LOG | - || [S] |
+| 0x4138 | AP2_PROGRAM_MODIFY | - || [S] |
 
 #### Family: COLBAS
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x030D | AP2_COLBAS_TEST | - |  | [S] |
-| 0x4A00 | AP2_COLBAS_IMMEDIATE | - |  | [S] |
-| 0x4A01 | AP2_COLBAS_CONNECT | - |  | [S] |
-| 0x4A02 | AP2_COLBAS_DISCONNECT | - |  | [S] |
-| 0x4A03 | AP2_COLBAS_WRITE | - | **DESTRUCTIVE** (COLBAS write) | [S] |
-| 0x4A04 | AP2_COLBAS_ABORT | - | **DESTRUCTIVE** (COLBAS abort) | [S] |
-| 0x4A05 | AP2_COLBAS_UPLOAD_BEGIN | - |  | [S] |
-| 0x4A06 | AP2_COLBAS_UPLOAD_CONTINUE | - |  | [S] |
+| 0x030D | AP2_COLBAS_TEST | - || [S] |
+| 0x4A00 | AP2_COLBAS_IMMEDIATE | - || [S] |
+| 0x4A01 | AP2_COLBAS_CONNECT | - || [S] |
+| 0x4A02 | AP2_COLBAS_DISCONNECT | - || [S] |
+| 0x4A03 | AP2_COLBAS_WRITE | - |**DESTRUCTIVE** (COLBAS write)| [S] |
+| 0x4A04 | AP2_COLBAS_ABORT | - |**DESTRUCTIVE** (COLBAS abort)| [S] |
+| 0x4A05 | AP2_COLBAS_UPLOAD_BEGIN | - || [S] |
+| 0x4A06 | AP2_COLBAS_UPLOAD_CONTINUE | - || [S] |
 
 #### Family: P1/FLN
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x030F | AP2_P1_POLL | - |  | [S] |
-| 0x0313 | AP2_P1_ROUTE | - |  | [S] |
-| 0x0314 | AP2_P1_LINETEST | - |  | [S] |
-| 0x0317 | AP2_P1_RESET_COUNTERS | - |  | [S] |
-| 0x4230 | AP2_FLN_SCAN_ENABLE | - |  | [S] |
-| 0x4231 | AP2_FLN_SCAN_DISABLE | - |  | [S] |
-| 0x4232 | AP2_P1_DIAGNOSTICS_LOG | - |  | [S] |
+| 0x030F | AP2_P1_POLL | - || [S] |
+| 0x0313 | AP2_P1_ROUTE | - || [F] |
+| 0x0314 | AP2_P1_LINETEST | - || [F] |
+| 0x0317 | AP2_P1_RESET_COUNTERS | - || [F] |
+| 0x4230 | AP2_FLN_SCAN_ENABLE | - || [S] |
+| 0x4231 | AP2_FLN_SCAN_DISABLE | - || [S] |
+| 0x4232 | AP2_P1_DIAGNOSTICS_LOG | - || [F] |
 
 #### Family: ENVELOPE
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0316 | AP2_OPEN_ENVELOPE | - |  | [S] |
-| 0x031B | AP2_ENVELOPE_OPEN_DEST | - |  | [S] |
-| 0x031C | AP2_ENVELOPE_CLOSE_DEST | - |  | [S] |
-| 0x031D | AP2_ENVELOPE_OPEN_TEXT | - |  | [S] |
-| 0x031E | AP2_ENVELOPE_CLOSE_TEXT | - |  | [S] |
-| 0x031F | AP2_ENVELOPE_OPEN_USERS | - |  | [S] |
-| 0x0320 | AP2_ENVELOPE_CLOSE_USERS | - |  | [S] |
+| 0x0316 | AP2_OPEN_ENVELOPE | - || [S] |
+| 0x031B | AP2_ENVELOPE_OPEN_DEST | - || [S] |
+| 0x031C | AP2_ENVELOPE_CLOSE_DEST | - || [S] |
+| 0x031D | AP2_ENVELOPE_OPEN_TEXT | - || [S] |
+| 0x031E | AP2_ENVELOPE_CLOSE_TEXT | - || [S] |
+| 0x031F | AP2_ENVELOPE_OPEN_USERS | - || [S] |
+| 0x0320 | AP2_ENVELOPE_CLOSE_USERS | - || [S] |
 
 #### Family: LOGGER
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0325 | AP2_SETUP_LOGGER | - |  | [S] |
-| 0x0327 | AP2_SETUP_BUFFERALARM | - |  | [S] |
+| 0x0325 | AP2_SETUP_LOGGER | - || [S] |
+| 0x0327 | AP2_SETUP_BUFFERALARM | - || [S] |
 
 #### Family: USER/ACCESS
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0330 | AP2_USER_ACCT_LOG | - |  | [S] |
-| 0x0331 | AP2_USER_ACCT_DISPLAY | - |  | [S] |
-| 0x0332 | AP2_USER_ACCT_ADD | - |  | [S] |
-| 0x0333 | AP2_USER_ACCT_MODIFY | - |  | [S] |
-| 0x0334 | AP2_USER_ACCT_COPY | - |  | [S] |
-| 0x0335 | AP2_USER_ACCT_DELETE | - |  | [S] |
-| 0x0336 | AP2_USER_ACCT_LOOK | - |  | [S] |
-| 0x0337 | AP2_USER_ACCT_DB_GET | - |  | [S] |
-| 0x0338 | AP2_USER_ACCT_DB_REPLACE | - |  | [S] |
-| 0x0350 | AP2_ACCESS_GROUPS_LOG | - |  | [S] |
-| 0x0353 | AP2_ACCESS_GROUPS_MODIFY | - |  | [S] |
-| 0x0357 | AP2_ACCESS_GROUPS_DB_GET | - |  | [S] |
-| 0x0358 | AP2_ACCESS_GROUPS_DB_REPLACE | - |  | [S] |
+| 0x0330 | AP2_USER_ACCT_LOG | - || [S] |
+| 0x0331 | AP2_USER_ACCT_DISPLAY | - || [S] |
+| 0x0332 | AP2_USER_ACCT_ADD | - || [S] |
+| 0x0333 | AP2_USER_ACCT_MODIFY | - || [S] |
+| 0x0334 | AP2_USER_ACCT_COPY | - || [S] |
+| 0x0335 | AP2_USER_ACCT_DELETE | - || [S] |
+| 0x0336 | AP2_USER_ACCT_LOOK | - || [S] |
+| 0x0337 | AP2_USER_ACCT_DB_GET | - || [S] |
+| 0x0338 | AP2_USER_ACCT_DB_REPLACE | - || [S] |
+| 0x0350 | AP2_ACCESS_GROUPS_LOG | - || [S] |
+| 0x0353 | AP2_ACCESS_GROUPS_MODIFY | - || [S] |
+| 0x0357 | AP2_ACCESS_GROUPS_DB_GET | - || [S] |
+| 0x0358 | AP2_ACCESS_GROUPS_DB_REPLACE | - || [S] |
 
 #### Family: EMS
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0360 | AP2_EMS_DIAL_ENABLE | - |  | [S] |
-| 0x0361 | AP2_EMS_DIAL_DISABLE | - |  | [S] |
-| 0x0362 | AP2_EMS_DB_REPLACE | - |  | [S] |
-| 0x0363 | AP2_EMS_DB_GET | - |  | [S] |
-| 0x0364 | AP2_EMS_DB_DISPLAY | - |  | [S] |
-| 0x0365 | AP2_EMS_ENTRY_REPLACE | - |  | [S] |
-| 0x0366 | AP2_EMS_DB_GET_DIALFLAGS | - |  | [S] |
-| 0x0367 | AP2_EMS_DB_GET_DESTINATIONS | - |  | [S] |
-| 0x0368 | AP2_EMS_PRINT | 3 |  | [W] |
+| 0x0360 | AP2_EMS_DIAL_ENABLE | - || [F] |
+| 0x0361 | AP2_EMS_DIAL_DISABLE | - || [F] |
+| 0x0362 | AP2_EMS_DB_REPLACE | - || [S] |
+| 0x0363 | AP2_EMS_DB_GET | - || [S] |
+| 0x0364 | AP2_EMS_DB_DISPLAY | - || [S] |
+| 0x0365 | AP2_EMS_ENTRY_REPLACE | - || [F] |
+| 0x0366 | AP2_EMS_DB_GET_DIALFLAGS | - || [F] |
+| 0x0367 | AP2_EMS_DB_GET_DESTINATIONS | - || [S] |
+| 0x0368 | AP2_EMS_PRINT | 3 || [W] |
 
 #### Family: ENUM
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0401 | AP2_ENUM_TYPE_ADD | - |  | [S] |
-| 0x0402 | AP2_ENUM_TYPE_DELETE | - |  | [S] |
-| 0x0403 | AP2_ENUM_TYPE_DB_DELETE | - |  | [S] |
-| 0x0404 | AP2_ENUM_TYPE_DISPLAY | - |  | [S] |
-| 0x0405 | AP2_ENUM_TYPE_LOOK | - |  | [S] |
-| 0x0406 | AP2_ENUM_TYPE_LOG | - |  | [S] |
-| 0x0407 | AP2_ENUM_ELEMENT_ADD | - |  | [S] |
-| 0x0408 | AP2_ENUM_ELEMENT_DELETE | - |  | [S] |
-| 0x0409 | AP2_ENUM_ELEMENT_MODIFY | - |  | [S] |
-| 0x040A | AP2_ENUM_TYPE_DB_GET | 30 |  | [W] |
-| 0x040B | AP2_ENUM_TYPE_DB_REPLACE | - |  | [S] |
-| 0x040E | AP2_ENUM_TYPE_REPLACE | - |  | [S] |
+| 0x0401 | AP2_ENUM_TYPE_ADD | - || [S] |
+| 0x0402 | AP2_ENUM_TYPE_DELETE | - || [S] |
+| 0x0403 | AP2_ENUM_TYPE_DB_DELETE | - || [S] |
+| 0x0404 | AP2_ENUM_TYPE_DISPLAY | - || [S] |
+| 0x0405 | AP2_ENUM_TYPE_LOOK | - || [S] |
+| 0x0406 | AP2_ENUM_TYPE_LOG | - || [S] |
+| 0x0407 | AP2_ENUM_ELEMENT_ADD | - || [S] |
+| 0x0408 | AP2_ENUM_ELEMENT_DELETE | - || [S] |
+| 0x0409 | AP2_ENUM_ELEMENT_MODIFY | - || [S] |
+| 0x040A | AP2_ENUM_TYPE_DB_GET | 2 || [W] |
+| 0x040B | AP2_ENUM_TYPE_DB_REPLACE | - || [S] |
+| 0x040E | AP2_ENUM_TYPE_REPLACE | - || [S] |
 
 #### Family: ALARM
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0500 | AP2_ALARM_SETUP | - |  | [S] |
-| 0x0501 | AP2_ALARM_REMOVE | - |  | [S] |
-| 0x0502 | AP2_ALARM_POINT_QUERY_LIST_EALARMABLE | - |  | [S] |
-| 0x0503 | AP2_ALARM_POINT_QUERY_REC_EALARMABLE | - |  | [S] |
-| 0x0504 | AP2_ALARM_POINT_SETUP_QUERY_LIST | - |  | [S] |
-| 0x0505 | AP2_ALARM_POINT_SETUP_QUERY_RECORD | - |  | [S] |
-| 0x0506 | AP2_ALARM_SETUP_COPY | - |  | [S] |
-| 0x0507 | AP2_ALARM_SETUP_MODIFY | - |  | [S] |
-| 0x0508 | AP2_ALARM_PRINT | 75 |  | [W] |
-| 0x0509 | AP2_ALARM_ACK | 11 |  | [W] |
-| 0x050A | AP2_ALARM_ACK_PENDING_QUERY_LIST | - |  | [S] |
-| 0x050B | AP2_ALARM_SETUP_DISPLAY_BY_MODE | - |  | [S] |
-| 0x050C | AP2_ALARM_SETUP_DISPLAY_BY_CATEGORY | - |  | [S] |
-| 0x050D | AP2_ALARM_SETUP_DISPLAY | - |  | [S] |
-| 0x0520 | AP2_ALARM_MODE_ADD | 1 |  | [W] |
-| 0x0521 | AP2_ALARM_MODE_COPY | - |  | [S] |
-| 0x0522 | AP2_ALARM_MODE_LISTBY_SETPOINT_NAME | - |  | [S] |
-| 0x0523 | AP2_ALARM_MODE_LISTBY_PRIORITY | - |  | [S] |
-| 0x0524 | AP2_ALARM_MODE_LISTBY_SETPOINT_VALUE | - |  | [S] |
-| 0x0525 | AP2_ALARM_MODE_DEFINITION_DISPLAY | - |  | [S] |
-| 0x0526 | AP2_ALARM_MODE_LOOK | - |  | [S] |
-| 0x0528 | AP2_ALARM_MODE_MODIFY | - |  | [S] |
-| 0x0529 | AP2_ALARM_MODE_QUERY_RECORD | - |  | [S] |
-| 0x052B | AP2_ALARM_MODE_DELETE | - |  | [S] |
-| 0x052C | AP2_ALARM_MODE_LISTBY_CATEGORY | - |  | [S] |
-| 0x052D | AP2_ALARM_MODE_LISTBY_MESSAGE | - |  | [S] |
-| 0x0530 | AP2_ALARM_MODE_QUERY_LIST | - |  | [S] |
-| 0x0540 | AP2_CATEGORY_ADD | 1 |  | [W] |
-| 0x0541 | AP2_CATEGORY_REMOVE | 14 |  | [W] |
-| 0x0542 | AP2_CATEGORY_DESCRIPTOR | 1 |  | [W] |
-| 0x0543 | AP2_CATEGORY_ENABLE_DIAL | 1 |  | [W] |
-| 0x0544 | AP2_CATEGORY_ENABLE_PRINT | 1 |  | [W] |
-| 0x0545 | AP2_CATEGORY_DIAL_DISABLE | 1 |  | [W] |
-| 0x0546 | AP2_CATEGORY_PRINT_DISABLE | 1 |  | [W] |
-| 0x0547 | AP2_CATEGORY_DB_GET | 1 |  | [W] |
-| 0x0548 | AP2_CATEGORY_LOG | 1 |  | [W] |
-| 0x0549 | AP2_CATEGORY_NODES_APPEND | 10 |  | [W] |
-| 0x054A | AP2_CATEGORY_NODES_REMOVE | 1 |  | [W] |
-| 0x054B | AP2_CATEGORY_QUERY_LIST | 1 |  | [W] |
-| 0x054C | AP2_CATEGORY_DEFAULT_DB_GET | 1 |  | [W] |
-| 0x054D | AP2_CATEGORY_REPLACE | 1 |  | [W] |
-| 0x0560 | AP2_ALARM_MESSAGE_LOOK | 1 |  | [W] |
-| 0x0561 | AP2_ALARM_MESSAGE_ENABLE | 1 |  | [W] |
-| 0x0562 | AP2_ALARM_MESSAGE_DISABLE | 1 |  | [W] |
-| 0x0563 | AP2_ALARM_MESSAGE_DELETE | 1 |  | [W] |
-| 0x0564 | AP2_ALARM_MESSAGE_COPY | 1 |  | [W] |
-| 0x0565 | AP2_ALARM_MESSAGE_ADD | 1 |  | [W] |
-| 0x0566 | AP2_ALARM_MESSAGE_QUERY_RECORD | 1 |  | [W] |
-| 0x0567 | AP2_ALARM_MESSAGE_LOG | 1 |  | [W] |
-| 0x0568 | AP2_ALARM_MESSAGE_QUERY_LIST | 1 |  | [W] |
-| 0x056A | AP2_ALARM_MESSAGE_MODIFY | - |  | [S] |
+| 0x0500 | AP2_ALARM_SETUP | - || [S] |
+| 0x0501 | AP2_ALARM_REMOVE | - || [F] |
+| 0x0502 | AP2_ALARM_POINT_QUERY_LIST_EALARMABLE | - || [S] |
+| 0x0503 | AP2_ALARM_POINT_QUERY_REC_EALARMABLE | - || [S] |
+| 0x0504 | AP2_ALARM_POINT_SETUP_QUERY_LIST | - || [S] |
+| 0x0505 | AP2_ALARM_POINT_SETUP_QUERY_RECORD | - || [S] |
+| 0x0506 | AP2_ALARM_SETUP_COPY | - || [S] |
+| 0x0507 | AP2_ALARM_SETUP_MODIFY | - || [S] |
+| 0x0508 | AP2_ALARM_PRINT | 55 || [W] |
+| 0x0509 | AP2_ALARM_ACK | 5 || [W] |
+| 0x050A | AP2_ALARM_ACK_PENDING_QUERY_LIST | - || [S] |
+| 0x050B | AP2_ALARM_SETUP_DISPLAY_BY_MODE | - || [S] |
+| 0x050C | AP2_ALARM_SETUP_DISPLAY_BY_CATEGORY | - || [S] |
+| 0x050D | AP2_ALARM_SETUP_DISPLAY | - || [F] |
+| 0x0520 | AP2_ALARM_MODE_ADD | 1 || [W] |
+| 0x0521 | AP2_ALARM_MODE_COPY | - || [S] |
+| 0x0522 | AP2_ALARM_MODE_LISTBY_SETPOINT_NAME | - || [S] |
+| 0x0523 | AP2_ALARM_MODE_LISTBY_PRIORITY | - || [S] |
+| 0x0524 | AP2_ALARM_MODE_LISTBY_SETPOINT_VALUE | - || [S] |
+| 0x0525 | AP2_ALARM_MODE_DEFINITION_DISPLAY | - || [S] |
+| 0x0526 | AP2_ALARM_MODE_LOOK | - || [F] |
+| 0x0528 | AP2_ALARM_MODE_MODIFY | - || [S] |
+| 0x0529 | AP2_ALARM_MODE_QUERY_RECORD | - || [S] |
+| 0x052B | AP2_ALARM_MODE_DELETE | - || [F] |
+| 0x052C | AP2_ALARM_MODE_LISTBY_CATEGORY | - || [S] |
+| 0x052D | AP2_ALARM_MODE_LISTBY_MESSAGE | - || [S] |
+| 0x0530 | AP2_ALARM_MODE_QUERY_LIST | - || [S] |
+| 0x0540 | AP2_CATEGORY_ADD | 1 || [W] |
+| 0x0541 | AP2_CATEGORY_REMOVE | 14 || [W] |
+| 0x0542 | AP2_CATEGORY_DESCRIPTOR | 1 || [W] |
+| 0x0543 | AP2_CATEGORY_ENABLE_DIAL | 1 || [W] |
+| 0x0544 | AP2_CATEGORY_ENABLE_PRINT | 1 || [W] |
+| 0x0545 | AP2_CATEGORY_DIAL_DISABLE | 1 || [W] |
+| 0x0546 | AP2_CATEGORY_PRINT_DISABLE | 1 || [W] |
+| 0x0547 | AP2_CATEGORY_DB_GET | 1 || [W] |
+| 0x0548 | AP2_CATEGORY_LOG | 1 || [W] |
+| 0x0549 | AP2_CATEGORY_NODES_APPEND | 10 || [W] |
+| 0x054A | AP2_CATEGORY_NODES_REMOVE | 1 || [W] |
+| 0x054B | AP2_CATEGORY_QUERY_LIST | 1 || [W] |
+| 0x054C | AP2_CATEGORY_DEFAULT_DB_GET | 1 || [W] |
+| 0x054D | AP2_CATEGORY_REPLACE | 1 || [W] |
+| 0x0560 | AP2_ALARM_MESSAGE_LOOK | 1 || [W] |
+| 0x0561 | AP2_ALARM_MESSAGE_ENABLE | 1 || [W] |
+| 0x0562 | AP2_ALARM_MESSAGE_DISABLE | 1 || [W] |
+| 0x0563 | AP2_ALARM_MESSAGE_DELETE | 1 || [W] |
+| 0x0564 | AP2_ALARM_MESSAGE_COPY | 1 || [W] |
+| 0x0565 | AP2_ALARM_MESSAGE_ADD | 1 || [W] |
+| 0x0566 | AP2_ALARM_MESSAGE_QUERY_RECORD | 1 || [W] |
+| 0x0567 | AP2_ALARM_MESSAGE_LOG | 1 || [W] |
+| 0x0568 | AP2_ALARM_MESSAGE_QUERY_LIST | 1 || [W] |
+| 0x056A | AP2_ALARM_MESSAGE_MODIFY | - || [S] |
 
 #### Family: CAL/DST
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0600 | AP2_CAL_DATE_ADD | - |  | [S] |
-| 0x0601 | AP2_CAL_DATE_RESET | - |  | [S] |
-| 0x0602 | AP2_CAL_DB_ADD | - |  | [S] |
-| 0x0603 | AP2_CAL_DB_RESET | - |  | [S] |
-| 0x0604 | AP2_CAL_DB_DISPLAY | - |  | [S] |
-| 0x0605 | AP2_CAL_DB_GET_HOL_SPEC | - |  | [S] |
-| 0x0606 | AP2_CAL_DB_GET_OTHER | 45 |  | [W] |
-| 0x0610 | AP2_DST_YEAR_ADD | - |  | [S] |
-| 0x0611 | AP2_DST_YEAR_DELETE | - |  | [S] |
-| 0x0612 | AP2_DST_DB_ADD | - |  | [S] |
-| 0x0613 | AP2_DST_DB_DELETE | - |  | [S] |
-| 0x0614 | AP2_DST_DB_DISPLAY | - |  | [S] |
-| 0x0615 | AP2_DST_DB_GET | - |  | [S] |
+| 0x0600 | AP2_CAL_DATE_ADD | - || [F] |
+| 0x0601 | AP2_CAL_DATE_RESET | - || [F] |
+| 0x0602 | AP2_CAL_DB_ADD | - || [S] |
+| 0x0603 | AP2_CAL_DB_RESET | - || [F] |
+| 0x0604 | AP2_CAL_DB_DISPLAY | - || [S] |
+| 0x0605 | AP2_CAL_DB_GET_HOL_SPEC | - || [F] |
+| 0x0606 | AP2_CAL_DB_GET_OTHER | 27 || [W] |
+| 0x0610 | AP2_DST_YEAR_ADD | - || [F] |
+| 0x0611 | AP2_DST_YEAR_DELETE | - || [F] |
+| 0x0612 | AP2_DST_DB_ADD | - || [S] |
+| 0x0613 | AP2_DST_DB_DELETE | - || [F] |
+| 0x0614 | AP2_DST_DB_DISPLAY | - || [S] |
+| 0x0615 | AP2_DST_DB_GET | - || [F] |
 
 #### Family: LANGUAGE
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0900 | AP2_LANGUAGE_GET_STRING | - |  | [S] |
-| 0x0901 | AP2_LANGUAGE_GET_PROMPT | - |  | [S] |
-| 0x0902 | AP2_LANGUAGE_REPORT_DATA | - |  | [S] |
+| 0x0900 | AP2_LANGUAGE_GET_STRING | - || [S] |
+| 0x0901 | AP2_LANGUAGE_GET_PROMPT | - || [S] |
+| 0x0902 | AP2_LANGUAGE_REPORT_DATA | - || [S] |
 
 #### Family: UPL
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0950 | AP2_DOWNLOAD_ME | - |  | [S] |
-| 0x0961 | AP2_UPL_DEL_POINT | 50 |  | [W] |
-| 0x0962 | AP2_UPL_DEL_ALARM_SETUP | - |  | [S] |
-| 0x0963 | AP2_UPL_DEL_ALARM_MODE | - |  | [S] |
-| 0x0964 | AP2_UPL_DEL_TREND | 30 |  | [W] |
-| 0x0965 | AP2_UPL_DEL_PPCL | 20 |  | [W] |
-| 0x0966 | AP2_UPL_DEL_TEC | 20 |  | [W] |
-| 0x0967 | AP2_UPL_DEL_EQS_ZONE | 6 |  | [W] |
-| 0x0968 | AP2_UPL_DEL_EQS_CMD_TABLE | - |  | [S] |
-| 0x0969 | AP2_UPL_DEL_EQS_MODE_SCHED | 38 |  | [W] |
-| 0x096A | AP2_UPL_DEL_LOOP | - |  | [S] |
-| 0x096B | AP2_UPL_DEL_ALARM_MESSAGE | - |  | [S] |
-| 0x0971 | AP2_UPL_ADDED_POINT | 84 |  | [W] |
-| 0x0972 | AP2_UPL_ADDED_ALARM_SETUP | - |  | [S] |
-| 0x0973 | AP2_UPL_ADDED_ALARM_MODE | - |  | [S] |
-| 0x0974 | AP2_UPL_ADDED_TREND | 46 |  | [W] |
-| 0x0975 | AP2_UPL_ADDED_PPCL | 28 |  | [W] |
-| 0x0976 | AP2_UPL_ADDED_TEC | 54 |  | [W] |
-| 0x0977 | AP2_UPL_ADDED_EQS_ZONE | 10 |  | [W] |
-| 0x0978 | AP2_UPL_ADDED_EQS_CMD_TABLE | - |  | [S] |
-| 0x0979 | AP2_UPL_ADDED_EQS_MODE_SCHED | 32 |  | [W] |
-| 0x097A | AP2_UPL_ADDED_LOOP | - |  | [S] |
-| 0x097B | AP2_UPL_ADDED_ALARM_MESSAGE | - |  | [S] |
-| 0x097C | AP2_UPL_ADDED_SSTO_GENERAL | 8 |  | [W] |
-| 0x097D | AP2_UPL_ADDED_SSTO_START | 8 |  | [W] |
-| 0x097E | AP2_UPL_ADDED_SSTO_STOP | 8 |  | [W] |
-| 0x097F | AP2_UPL_ADDED_SSTO_NIGHT | 8 |  | [W] |
-| 0x0981 | AP2_UPL_ALL_POINT | 16183 |  | [W] |
-| 0x0982 | AP2_UPL_ALL_ALARM_SETUP | 65 |  | [W] |
-| 0x0983 | AP2_UPL_ALL_ALARM_MODE | 61 |  | [W] |
-| 0x0984 | AP2_UPL_ALL_TREND | 487 |  | [W] |
-| 0x0985 | AP2_UPL_ALL_PPCL | 3661 |  | [W] |
-| 0x0986 | AP2_UPL_ALL_TEC | 1498 |  | [W] |
-| 0x0987 | AP2_UPL_ALL_EQS_ZONE | 127 |  | [W] |
-| 0x0988 | AP2_UPL_ALL_EQS_CMD_TABLE | 630 |  | [W] |
-| 0x0989 | AP2_UPL_ALL_EQS_MODE_SCHED | 145 |  | [W] |
-| 0x098B | AP2_UPL_ALL_ALARM_MESSAGE | 24 |  | [W] |
-| 0x098C | AP2_UPL_ALL_SSTO_GENERAL | 94 |  | [W] |
-| 0x098D | AP2_UPL_ALL_SSTO_START | 94 |  | [W] |
-| 0x098E | AP2_UPL_ALL_SSTO_STOP | 94 |  | [W] |
-| 0x098F | AP2_UPL_ALL_SSTO_NIGHT | 94 |  | [W] |
-| 0x099D | AP2_UPL_DEL_PORT | - |  | [S] |
-| 0x099E | AP2_UPL_ADDED_PORT | - |  | [S] |
-| 0x099F | AP2_UPL_ALL_PORT | 144 |  | [W] |
-| 0x09A1 | AP2_UPL_DEL_PARTNER | - |  | [S] |
-| 0x09A2 | AP2_UPL_ADDED_PARTNER | - |  | [S] |
-| 0x09A3 | AP2_UPL_ALL_PARTNER | 24 |  | [W] |
-| 0x09A5 | AP2_UPL_DEL_EQS_OVERRIDE | - |  | [S] |
-| 0x09A6 | AP2_UPL_ADDED_EQS_OVERRIDE | - |  | [S] |
-| 0x09A7 | AP2_UPL_ALL_EQS_OVERRIDE | 24 |  | [W] |
-| 0x09A9 | AP2_UPL_DEL_UC | - |  | [S] |
-| 0x09AA | AP2_UPL_ADDED_UC | - |  | [S] |
-| 0x09AB | AP2_UPL_ALL_UC | 24 |  | [W] |
-| 0x09B1 | AP2_UPL_DEL_TOD_POINT | - |  | [S] |
-| 0x09B2 | AP2_UPL_ADDED_TOD_POINT | - |  | [S] |
-| 0x09B3 | AP2_UPL_ALL_TOD_POINT | - |  | [S] |
-| 0x09B5 | AP2_UPL_DEL_TOD_CMD | - |  | [S] |
-| 0x09B6 | AP2_UPL_ADDED_TOD_CMD | - |  | [S] |
-| 0x09B7 | AP2_UPL_ALL_TOD_CMD | - |  | [S] |
-| 0x09B9 | AP2_UPL_DEL_LON | - |  | [S] |
-| 0x09BA | AP2_UPL_ADDED_LON | - |  | [S] |
-| 0x09BB | AP2_UPL_ALL_LON | 24 |  | [W] |
-| 0x09BD | AP2_UPLD_COMND_REPORT | - |  | [S] |
-| 0x09BF | AP2_UPLD_MISCDATA_REPORT | - |  | [S] |
-| 0x09C1 | AP2_UPL_DEL_MSTP_DEVICE | - |  | [S] |
-| 0x09C2 | AP2_UPL_ADDED_MSTP_DEVICE | - |  | [S] |
-| 0x09C3 | AP2_UPL_ALL_MSTP_DEVICE | 2 |  | [W] |
-| 0x4131 | AP2_UPL_DEL_PROGRAM | - |  | [S] |
-| 0x4132 | AP2_UPL_ADDED_PROGRAM | - |  | [S] |
-| 0x4133 | AP2_UPL_ALL_PROGRAM | 24 |  | [W] |
+| 0x0950 | AP2_DOWNLOAD_ME | - || [S] |
+| 0x0961 | AP2_UPL_DEL_POINT | 15 || [W] |
+| 0x0962 | AP2_UPL_DEL_ALARM_SETUP | - || [F] |
+| 0x0963 | AP2_UPL_DEL_ALARM_MODE | - || [F] |
+| 0x0964 | AP2_UPL_DEL_TREND | 4 || [W] |
+| 0x0965 | AP2_UPL_DEL_PPCL | 4 || [W] |
+| 0x0966 | AP2_UPL_DEL_TEC | 2 || [W] |
+| 0x0967 | AP2_UPL_DEL_EQS_ZONE | - || [S] |
+| 0x0968 | AP2_UPL_DEL_EQS_CMD_TABLE | - || [S] |
+| 0x0969 | AP2_UPL_DEL_EQS_MODE_SCHED | 6 || [W] |
+| 0x096A | AP2_UPL_DEL_LOOP | - || [S] |
+| 0x096B | AP2_UPL_DEL_ALARM_MESSAGE | - || [F] |
+| 0x0971 | AP2_UPL_ADDED_POINT | 18 || [W] |
+| 0x0972 | AP2_UPL_ADDED_ALARM_SETUP | - || [F] |
+| 0x0973 | AP2_UPL_ADDED_ALARM_MODE | - || [F] |
+| 0x0974 | AP2_UPL_ADDED_TREND | 5 || [W] |
+| 0x0975 | AP2_UPL_ADDED_PPCL | 5 || [W] |
+| 0x0976 | AP2_UPL_ADDED_TEC | 4 || [W] |
+| 0x0977 | AP2_UPL_ADDED_EQS_ZONE | - || [S] |
+| 0x0978 | AP2_UPL_ADDED_EQS_CMD_TABLE | - || [S] |
+| 0x0979 | AP2_UPL_ADDED_EQS_MODE_SCHED | 6 || [W] |
+| 0x097A | AP2_UPL_ADDED_LOOP | - || [S] |
+| 0x097B | AP2_UPL_ADDED_ALARM_MESSAGE | - || [F] |
+| 0x097C | AP2_UPL_ADDED_SSTO_GENERAL | - || [S] |
+| 0x097D | AP2_UPL_ADDED_SSTO_START | - || [S] |
+| 0x097E | AP2_UPL_ADDED_SSTO_STOP | - || [S] |
+| 0x097F | AP2_UPL_ADDED_SSTO_NIGHT | - || [S] |
+| 0x0981 | AP2_UPL_ALL_POINT | 6503 || [W] |
+| 0x0982 | AP2_UPL_ALL_ALARM_SETUP | 14 || [W] |
+| 0x0983 | AP2_UPL_ALL_ALARM_MODE | 14 || [W] |
+| 0x0984 | AP2_UPL_ALL_TREND | 179 || [W] |
+| 0x0985 | AP2_UPL_ALL_PPCL | 2511 || [W] |
+| 0x0986 | AP2_UPL_ALL_TEC | 541 || [W] |
+| 0x0987 | AP2_UPL_ALL_EQS_ZONE | 16 || [W] |
+| 0x0988 | AP2_UPL_ALL_EQS_CMD_TABLE | 120 || [W] |
+| 0x0989 | AP2_UPL_ALL_EQS_MODE_SCHED | 36 || [W] |
+| 0x098B | AP2_UPL_ALL_ALARM_MESSAGE | 6 || [W] |
+| 0x098C | AP2_UPL_ALL_SSTO_GENERAL | 16 || [W] |
+| 0x098D | AP2_UPL_ALL_SSTO_START | 16 || [W] |
+| 0x098E | AP2_UPL_ALL_SSTO_STOP | 16 || [W] |
+| 0x098F | AP2_UPL_ALL_SSTO_NIGHT | 16 || [W] |
+| 0x099D | AP2_UPL_DEL_PORT | - || [F] |
+| 0x099E | AP2_UPL_ADDED_PORT | - || [F] |
+| 0x099F | AP2_UPL_ALL_PORT | 36 || [W] |
+| 0x09A1 | AP2_UPL_DEL_PARTNER | - || [F] |
+| 0x09A2 | AP2_UPL_ADDED_PARTNER | - || [F] |
+| 0x09A3 | AP2_UPL_ALL_PARTNER | 6 || [W] |
+| 0x09A5 | AP2_UPL_DEL_EQS_OVERRIDE | - || [S] |
+| 0x09A6 | AP2_UPL_ADDED_EQS_OVERRIDE | - || [S] |
+| 0x09A7 | AP2_UPL_ALL_EQS_OVERRIDE | 6 || [W] |
+| 0x09A9 | AP2_UPL_DEL_UC | - || [F] |
+| 0x09AA | AP2_UPL_ADDED_UC | - || [F] |
+| 0x09AB | AP2_UPL_ALL_UC | 6 || [W] |
+| 0x09B1 | AP2_UPL_DEL_TOD_POINT | - || [S] |
+| 0x09B2 | AP2_UPL_ADDED_TOD_POINT | - || [S] |
+| 0x09B3 | AP2_UPL_ALL_TOD_POINT | - || [S] |
+| 0x09B5 | AP2_UPL_DEL_TOD_CMD | - || [S] |
+| 0x09B6 | AP2_UPL_ADDED_TOD_CMD | - || [S] |
+| 0x09B7 | AP2_UPL_ALL_TOD_CMD | - || [S] |
+| 0x09B9 | AP2_UPL_DEL_LON | - || [S] |
+| 0x09BA | AP2_UPL_ADDED_LON | - || [S] |
+| 0x09BB | AP2_UPL_ALL_LON | 6 || [W] |
+| 0x09BD | AP2_UPLD_COMND_REPORT | - || [S] |
+| 0x09BF | AP2_UPLD_MISCDATA_REPORT | - || [S] |
+| 0x09C1 | AP2_UPL_DEL_MSTP_DEVICE | - || [S] |
+| 0x09C2 | AP2_UPL_ADDED_MSTP_DEVICE | - || [S] |
+| 0x09C3 | AP2_UPL_ALL_MSTP_DEVICE | 1 || [W] |
+| 0x4131 | AP2_UPL_DEL_PROGRAM | - || [S] |
+| 0x4132 | AP2_UPL_ADDED_PROGRAM | - || [S] |
+| 0x4133 | AP2_UPL_ALL_PROGRAM | 6 || [W] |
 
 #### Family: DBCHANGE
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0951 | AP2_DBCHANGE_POINT | 30 |  | [W] |
-| 0x0952 | AP2_DBCHANGE_ALARM_SETUP | - |  | [S] |
-| 0x0953 | AP2_DBCHANGE_ALARM_MODE | - |  | [S] |
-| 0x0954 | AP2_DBCHANGE_TREND | 16 |  | [W] |
-| 0x0955 | AP2_DBCHANGE_PPCL | 16 |  | [W] |
-| 0x0956 | AP2_DBCHANGE_CONTROLLER | 13 |  | [W] |
-| 0x0957 | AP2_DBCHANGE_EQS_ZONE | 4 |  | [W] |
-| 0x0958 | AP2_DBCHANGE_EQS_CMD_TABLE | - |  | [S] |
-| 0x0959 | AP2_DBCHANGE_EQS_MODE_SCHED | 20 |  | [W] |
-| 0x095A | AP2_DBCHANGE_LOOP | - |  | [S] |
-| 0x095B | AP2_DBCHANGE_ALARM_MESSAGE | - |  | [S] |
-| 0x095C | AP2_DBCHANGE_SSTO_GENERAL | 4 |  | [W] |
-| 0x095D | AP2_DBCHANGE_SSTO_START | 4 |  | [W] |
-| 0x095E | AP2_DBCHANGE_SSTO_STOP | 4 |  | [W] |
-| 0x095F | AP2_DBCHANGE_SSTO_NIGHT | 4 |  | [W] |
-| 0x099C | AP2_DBCHANGE_PORT | - |  | [S] |
-| 0x09A0 | AP2_DBCHANGE_PARTNER | - |  | [S] |
-| 0x09A4 | AP2_DBCHANGE_EQS_OVERRIDE | - |  | [S] |
-| 0x09A8 | AP2_DBCHANGE_UC | - |  | [S] |
-| 0x09B0 | AP2_DBCHANGE_TOD_POINT | - |  | [S] |
-| 0x09B4 | AP2_DBCHANGE_TOD_CMD | - |  | [S] |
-| 0x09B8 | AP2_DBCHANGE_LON | - |  | [S] |
-| 0x09BC | AP2_DBCHANGE_COMMAND_REPORT | - |  | [S] |
-| 0x09BE | AP2_DBCHANGE_MISCDATA_REPORT | - |  | [S] |
-| 0x09C0 | AP2_DBCHANGE_MSTP_DEVICE | - |  | [S] |
-| 0x4130 | AP2_DBCHANGE_PROGRAM | - |  | [S] |
-| 0x5356 | AP2_DBCHANGE_HOA_MAP | - |  | [S] |
+| 0x0951 | AP2_DBCHANGE_POINT | 11 || [W] |
+| 0x0952 | AP2_DBCHANGE_ALARM_SETUP | - || [S] |
+| 0x0953 | AP2_DBCHANGE_ALARM_MODE | - || [S] |
+| 0x0954 | AP2_DBCHANGE_TREND | 2 || [W] |
+| 0x0955 | AP2_DBCHANGE_PPCL | 3 || [W] |
+| 0x0956 | AP2_DBCHANGE_CONTROLLER | 2 || [W] |
+| 0x0957 | AP2_DBCHANGE_EQS_ZONE | - || [S] |
+| 0x0958 | AP2_DBCHANGE_EQS_CMD_TABLE | - || [S] |
+| 0x0959 | AP2_DBCHANGE_EQS_MODE_SCHED | 4 || [W] |
+| 0x095A | AP2_DBCHANGE_LOOP | - || [S] |
+| 0x095B | AP2_DBCHANGE_ALARM_MESSAGE | - || [S] |
+| 0x095C | AP2_DBCHANGE_SSTO_GENERAL | - || [S] |
+| 0x095D | AP2_DBCHANGE_SSTO_START | - || [S] |
+| 0x095E | AP2_DBCHANGE_SSTO_STOP | - || [S] |
+| 0x095F | AP2_DBCHANGE_SSTO_NIGHT | - || [S] |
+| 0x099C | AP2_DBCHANGE_PORT | - || [S] |
+| 0x09A0 | AP2_DBCHANGE_PARTNER | - || [S] |
+| 0x09A4 | AP2_DBCHANGE_EQS_OVERRIDE | - || [S] |
+| 0x09A8 | AP2_DBCHANGE_UC | - || [S] |
+| 0x09B0 | AP2_DBCHANGE_TOD_POINT | - || [S] |
+| 0x09B4 | AP2_DBCHANGE_TOD_CMD | - || [S] |
+| 0x09B8 | AP2_DBCHANGE_LON | - || [S] |
+| 0x09BC | AP2_DBCHANGE_COMMAND_REPORT | - || [S] |
+| 0x09BE | AP2_DBCHANGE_MISCDATA_REPORT | - || [S] |
+| 0x09C0 | AP2_DBCHANGE_MSTP_DEVICE | - || [S] |
+| 0x4130 | AP2_DBCHANGE_PROGRAM | - || [S] |
+| 0x5356 | AP2_DBCHANGE_HOA_MAP | - || [S] |
 
 #### Family: RACS
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x2824 | AP2_RACS_SYSTEM_DISPLAY | - |  | [S] |
-| 0x3800 | AP2_RACS_PARTNER_ADD | - |  | [S] |
-| 0x3801 | AP2_RACS_PARTNER_COPY | - |  | [S] |
-| 0x3802 | AP2_RACS_PARTNER_DELETE | - |  | [S] |
-| 0x3803 | AP2_RACS_PARTNER_DISABLE | - |  | [S] |
-| 0x3804 | AP2_RACS_PARTNER_DISPLAY | - |  | [S] |
-| 0x3805 | AP2_RACS_PARTNER_ENABLE | - |  | [S] |
-| 0x3806 | AP2_RACS_PARTNER_LOG | - |  | [S] |
-| 0x3807 | AP2_RACS_PARTNER_LOOK | - |  | [S] |
-| 0x3808 | AP2_RACS_PARTNER_MODIFY | - |  | [S] |
-| 0x3809 | AP2_RACS_PARTNER_STATLOG | - |  | [S] |
-| 0x380A | AP2_RACS_PARTNER_STATLOG_RESET | - |  | [S] |
-| 0x3810 | AP2_RACS_PORT_ADD | - |  | [S] |
-| 0x3811 | AP2_RACS_PORT_COPY | - |  | [S] |
-| 0x3812 | AP2_RACS_PORT_DELETE | - |  | [S] |
-| 0x3813 | AP2_RACS_PORT_DISABLE | - |  | [S] |
-| 0x3814 | AP2_RACS_PORT_DISPLAY | - |  | [S] |
-| 0x3815 | AP2_RACS_PORT_ENABLE | - |  | [S] |
-| 0x3816 | AP2_RACS_PORT_LOG | - |  | [S] |
-| 0x3817 | AP2_RACS_PORT_LOOK | - |  | [S] |
-| 0x3818 | AP2_RACS_PORT_MODIFY | - |  | [S] |
-| 0x3819 | AP2_RACS_PORT_STATLOG | - |  | [S] |
-| 0x381A | AP2_RACS_PORT_STATLOG_RESET | - |  | [S] |
-| 0x3820 | AP2_RACS_SYSTEM_ADD | - |  | [S] |
-| 0x3821 | AP2_RACS_SYSTEM_COPY | - |  | [S] |
-| 0x3822 | AP2_RACS_SYSTEM_DELETE | - |  | [S] |
-| 0x3823 | AP2_RACS_SYSTEM_DISABLE | - |  | [S] |
-| 0x3825 | AP2_RACS_SYSTEM_ENABLE | - |  | [S] |
-| 0x3826 | AP2_RACS_SYSTEM_LOG | - |  | [S] |
-| 0x3827 | AP2_RACS_SYSTEM_LOOK | - |  | [S] |
-| 0x3828 | AP2_RACS_SYSTEM_MODIFY | - |  | [S] |
-| 0x3829 | AP2_RACS_SYSTEM_STATLOG | - |  | [S] |
-| 0x382A | AP2_RACS_SYSTEM_STATLOG_RESET | - |  | [S] |
+| 0x2824 | AP2_RACS_SYSTEM_DISPLAY | - || [S] |
+| 0x3800 | AP2_RACS_PARTNER_ADD | - || [S] |
+| 0x3801 | AP2_RACS_PARTNER_COPY | - || [S] |
+| 0x3802 | AP2_RACS_PARTNER_DELETE | - || [S] |
+| 0x3803 | AP2_RACS_PARTNER_DISABLE | - || [S] |
+| 0x3804 | AP2_RACS_PARTNER_DISPLAY | - || [S] |
+| 0x3805 | AP2_RACS_PARTNER_ENABLE | - || [S] |
+| 0x3806 | AP2_RACS_PARTNER_LOG | - || [S] |
+| 0x3807 | AP2_RACS_PARTNER_LOOK | - || [S] |
+| 0x3808 | AP2_RACS_PARTNER_MODIFY | - || [S] |
+| 0x3809 | AP2_RACS_PARTNER_STATLOG | - || [S] |
+| 0x380A | AP2_RACS_PARTNER_STATLOG_RESET | - || [S] |
+| 0x3810 | AP2_RACS_PORT_ADD | - || [S] |
+| 0x3811 | AP2_RACS_PORT_COPY | - || [S] |
+| 0x3812 | AP2_RACS_PORT_DELETE | - || [S] |
+| 0x3813 | AP2_RACS_PORT_DISABLE | - || [S] |
+| 0x3814 | AP2_RACS_PORT_DISPLAY | - || [S] |
+| 0x3815 | AP2_RACS_PORT_ENABLE | - || [S] |
+| 0x3816 | AP2_RACS_PORT_LOG | - || [S] |
+| 0x3817 | AP2_RACS_PORT_LOOK | - || [S] |
+| 0x3818 | AP2_RACS_PORT_MODIFY | - || [S] |
+| 0x3819 | AP2_RACS_PORT_STATLOG | - || [S] |
+| 0x381A | AP2_RACS_PORT_STATLOG_RESET | - || [S] |
+| 0x3820 | AP2_RACS_SYSTEM_ADD | - || [S] |
+| 0x3821 | AP2_RACS_SYSTEM_COPY | - || [S] |
+| 0x3822 | AP2_RACS_SYSTEM_DELETE | - || [S] |
+| 0x3823 | AP2_RACS_SYSTEM_DISABLE | - || [S] |
+| 0x3825 | AP2_RACS_SYSTEM_ENABLE | - || [S] |
+| 0x3826 | AP2_RACS_SYSTEM_LOG | - || [S] |
+| 0x3827 | AP2_RACS_SYSTEM_LOOK | - || [S] |
+| 0x3828 | AP2_RACS_SYSTEM_MODIFY | - || [S] |
+| 0x3829 | AP2_RACS_SYSTEM_STATLOG | - || [S] |
+| 0x382A | AP2_RACS_SYSTEM_STATLOG_RESET | - || [S] |
 
 #### Family: TEAM
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x4000 | AP2_TEAM_LOG / AP2_APPLICATION_LOG | - |  | [S] |
-| 0x4001 | AP2_TEAM_DESC_ADD / AP2_APPLICATION_DISPLAY | - |  | [S] |
-| 0x4002 | AP2_MEMBER_DESC_ADD_ANALOG | - |  | [S] |
-| 0x4003 | AP2_MEMBER_DESC_ADD_DIGITAL | - |  | [S] |
-| 0x4004 | AP2_MEMBER_DESC_ADD_ENUM | - |  | [S] |
-| 0x4005 | AP2_MEMBER_DESC_ADD_LPACI | - |  | [S] |
-| 0x4006 | AP2_MEMBER_DESC_ADD_L2SL | - |  | [S] |
-| 0x400B | AP2_TEAM_MEMBER_LOG | - |  | [S] |
-| 0x400C | AP2_TEAM_REPORT_LOG | - |  | [S] |
-| 0x400D | AP2_TEAM_REPORT_LIST | - |  | [S] |
-| 0x400F | AP2_TEAM_DESC_UPLOAD | 48 |  | [W] |
-| 0x4010 | AP2_MEMBER_DESC_UPLOAD | 24 |  | [W] |
-| 0x4015 | AP2_TEAM_DESC_DB_CHANGE | - |  | [S] |
-| 0x4016 | AP2_TEAM_MEMBER_DB_CHANGE | - |  | [S] |
-| 0x4017 | AP2_TEAM_DESC_UPLOAD_ADDED | - |  | [S] |
-| 0x4018 | AP2_TEAM_MEMBER_UPLOAD_ADDED | - |  | [S] |
+| 0x4000 | AP2_TEAM_LOG / AP2_APPLICATION_LOG | - || [S] |
+| 0x4001 | AP2_TEAM_DESC_ADD / AP2_APPLICATION_DISPLAY | - || [S] |
+| 0x4002 | AP2_MEMBER_DESC_ADD_ANALOG | - || [S] |
+| 0x4003 | AP2_MEMBER_DESC_ADD_DIGITAL | - || [S] |
+| 0x4004 | AP2_MEMBER_DESC_ADD_ENUM | - || [S] |
+| 0x4005 | AP2_MEMBER_DESC_ADD_LPACI | - || [S] |
+| 0x4006 | AP2_MEMBER_DESC_ADD_L2SL | - || [S] |
+| 0x400B | AP2_TEAM_MEMBER_LOG | - || [S] |
+| 0x400C | AP2_TEAM_REPORT_LOG | - || [S] |
+| 0x400D | AP2_TEAM_REPORT_LIST | - || [S] |
+| 0x400F | AP2_TEAM_DESC_UPLOAD | 12 || [W] |
+| 0x4010 | AP2_MEMBER_DESC_UPLOAD | 6 || [W] |
+| 0x4015 | AP2_TEAM_DESC_DB_CHANGE | - || [S] |
+| 0x4016 | AP2_TEAM_MEMBER_DB_CHANGE | - || [S] |
+| 0x4017 | AP2_TEAM_DESC_UPLOAD_ADDED | - || [S] |
+| 0x4018 | AP2_TEAM_MEMBER_UPLOAD_ADDED | - || [S] |
 
 #### Family: TEC
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x4200 | AP2_CONTROLLER_LOG / AP2_TEC_LOG | 366 |  | [W] |
-| 0x4201 | AP2_TEC_ADD | - |  | [S] |
-| 0x4202 | AP2_TEC_COPY | - |  | [S] |
-| 0x4203 | AP2_TEC_MODIFY / AP2_CONTROLLER_MODIFY | - |  | [S] |
-| 0x4204 | AP2_CONTROLLER_REMOVE / AP2_TEC_REMOVE | - |  | [S] |
-| 0x4205 | AP2_TEC_LOOK / AP2_CONTROLLER_LOOK | - |  | [S] |
-| 0x4206 | AP2_TEC_QUERY_RECORD / AP2_CONTROLLER_QUERY | - |  | [S] |
-| 0x4207 | AP2_TEC_QUERY_LIST | - |  | [S] |
-| 0x4208 | AP2_TEC_DEFINITION | - |  | [S] |
-| 0x4210 | AP2_TEC_MEMBER_LOG | - |  | [S] |
-| 0x4211 | AP2_TEC_REPORT_LOG | - |  | [S] |
-| 0x4212 | AP2_TEC_REPORT_QUERY_LIST | - |  | [S] |
-| 0x4220 | AP2_TEC_LOCAL_INIT_VALUE_LOG | 1 |  | [W] |
-| 0x4221 | AP2_TEC_REMOTE_INIT_VALUE_LOG | 1776 |  | [W] |
-| 0x4222 | AP2_TEC_SET_INIT_VALUE | 74 |  | [W] |
-| 0x4223 | AP2_TEC_RESTORE_INIT_VALUE | - |  | [S] |
-| 0x4224 | AP2_TEC_INITIALIZE | 3 |  | [W] |
-| 0x4225 | AP2_TEC_UPDATE_LOCAL_INIT_VALUES | 6 |  | [W] |
+| 0x4200 | AP2_CONTROLLER_LOG / AP2_TEC_LOG | 76 || [W] |
+| 0x4201 | AP2_TEC_ADD | - || [S] |
+| 0x4202 | AP2_TEC_COPY | - || [S] |
+| 0x4203 | AP2_TEC_MODIFY / AP2_CONTROLLER_MODIFY | - || [S] |
+| 0x4204 | AP2_CONTROLLER_REMOVE / AP2_TEC_REMOVE | - || [F] |
+| 0x4205 | AP2_TEC_LOOK / AP2_CONTROLLER_LOOK | - || [S] |
+| 0x4206 | AP2_TEC_QUERY_RECORD / AP2_CONTROLLER_QUERY | - || [S] |
+| 0x4207 | AP2_TEC_QUERY_LIST | - || [S] |
+| 0x4208 | AP2_TEC_DEFINITION | - || [S] |
+| 0x4210 | AP2_TEC_MEMBER_LOG | - || [F] |
+| 0x4211 | AP2_TEC_REPORT_LOG | - || [F] |
+| 0x4212 | AP2_TEC_REPORT_QUERY_LIST | - || [S] |
+| 0x4220 | AP2_TEC_LOCAL_INIT_VALUE_LOG | 1 || [W] |
+| 0x4221 | AP2_TEC_REMOTE_INIT_VALUE_LOG | 381 || [W] |
+| 0x4222 | AP2_TEC_SET_INIT_VALUE | 29 || [W] |
+| 0x4223 | AP2_TEC_RESTORE_INIT_VALUE | - || [F] |
+| 0x4224 | AP2_TEC_INITIALIZE | 2 || [W] |
+| 0x4225 | AP2_TEC_UPDATE_LOCAL_INIT_VALUES | 4 || [W] |
 
 #### Family: UC
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x4241 | AP2_UC_ADD | - |  | [S] |
-| 0x4244 | AP2_UC_REMOVE | - |  | [S] |
-| 0x4245 | AP2_UC_LOOK | - |  | [S] |
-| 0x4249 | AP2_UC_MEMBER_LOG | - |  | [S] |
+| 0x4241 | AP2_UC_ADD | - || [S] |
+| 0x4244 | AP2_UC_REMOVE | - || [S] |
+| 0x4245 | AP2_UC_LOOK | - || [S] |
+| 0x4249 | AP2_UC_MEMBER_LOG | - || [S] |
 
 #### Family: LON
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x4300 | AP2_LON_LOG | - |  | [S] |
-| 0x4301 | AP2_LON_ADD | - |  | [S] |
-| 0x4303 | AP2_LON_MODIFY | - |  | [S] |
-| 0x4304 | AP2_LON_REMOVE | - |  | [S] |
-| 0x4310 | AP2_LON_MEMBER_LOG | - |  | [S] |
-| 0x4311 | AP2_LON_REPORT_LOG | - |  | [S] |
-| 0x4320 | AP2_LON_LOCAL_INIT_VALUE_LOG | - |  | [S] |
-| 0x4321 | AP2_LON_REMOTE_INIT_VALUE_LOG | - |  | [S] |
-| 0x4322 | AP2_LON_SET_INIT_VALUE | - |  | [S] |
-| 0x4323 | AP2_LON_RESTORE_INIT_VALUE | - |  | [S] |
-| 0x4324 | AP2_LON_INITIALIZE | - |  | [S] |
-| 0x4325 | AP2_LON_UPDATE_LOCAL_INIT_VALUES | - |  | [S] |
-| 0x4332 | AP2_LON_DIAGNOSTICS_LOG | - |  | [S] |
-| 0x4401 | AP2_LON_SEND_SERVICE_PIN | - |  | [S] |
-| 0x4402 | AP2_LON_GET_DOMAIN | - |  | [S] |
-| 0x4403 | AP2_LON_SET_DOMAIN | - |  | [S] |
-| 0x4404 | AP2_LON_REQUEST_WINK | - |  | [S] |
-| 0x440B | AP2_LON_STATUS_CLEAR | - |  | [S] |
-| 0x4450 | AP2_LON_PKCMSAGTSRVDBEXPORT | - |  | [S] |
-| 0x4451 | AP2_LON_PKCMSAGTSRVDBIMPORT | - |  | [S] |
-| 0x4452 | AP2_LON_PEAK_DB_CLEAR | - |  | [S] |
+| 0x4300 | AP2_LON_LOG | - || [S] |
+| 0x4301 | AP2_LON_ADD | - || [S] |
+| 0x4303 | AP2_LON_MODIFY | - || [S] |
+| 0x4304 | AP2_LON_REMOVE | - || [S] |
+| 0x4310 | AP2_LON_MEMBER_LOG | - || [S] |
+| 0x4311 | AP2_LON_REPORT_LOG | - || [S] |
+| 0x4320 | AP2_LON_LOCAL_INIT_VALUE_LOG | - || [S] |
+| 0x4321 | AP2_LON_REMOTE_INIT_VALUE_LOG | - || [S] |
+| 0x4322 | AP2_LON_SET_INIT_VALUE | - || [S] |
+| 0x4323 | AP2_LON_RESTORE_INIT_VALUE | - || [S] |
+| 0x4324 | AP2_LON_INITIALIZE | - || [S] |
+| 0x4325 | AP2_LON_UPDATE_LOCAL_INIT_VALUES | - || [S] |
+| 0x4332 | AP2_LON_DIAGNOSTICS_LOG | - || [S] |
+| 0x4401 | AP2_LON_SEND_SERVICE_PIN | - || [S] |
+| 0x4402 | AP2_LON_GET_DOMAIN | - || [S] |
+| 0x4403 | AP2_LON_SET_DOMAIN | - || [S] |
+| 0x4404 | AP2_LON_REQUEST_WINK | - || [S] |
+| 0x440B | AP2_LON_STATUS_CLEAR | - || [S] |
+| 0x4450 | AP2_LON_PKCMSAGTSRVDBEXPORT | - || [S] |
+| 0x4451 | AP2_LON_PKCMSAGTSRVDBIMPORT | - || [S] |
+| 0x4452 | AP2_LON_PEAK_DB_CLEAR | - || [S] |
 
 #### Family: EBLN
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x461F | AP2_EBLN_FP_NAMES_DISPLAY | - |  | [S] |
-| 0x4620 | AP2_EBLN_FP_NAME_SET | - | **DESTRUCTIVE** (rename field panel) | [S] |
-| 0x4621 | AP2_EBLN_FP_IP_CONFIGURE | - | **DESTRUCTIVE** (reconfigure panel IP) | [S] |
-| 0x4622 | AP2_EBLN_FP_TCP_PORTS_CONFIGURE | - |  | [S] |
-| 0x4628 | AP2_EBLN_TRUNK_SETTINGS_REPLACE | - |  | [S] |
-| 0x4629 | AP2_EBLN_TRUNK_SETTINGS_DISPLAY | - |  | [S] |
-| 0x462A | AP2_EBLN_FP_SITE_NAME_SET | - | **DESTRUCTIVE** (set site name) | [S] |
-| 0x462B | AP2_EBLN_FP_BLN_NAME_SET | - | **DESTRUCTIVE** (set BLN name) | [S] |
-| 0x462C | AP2_EBLN_FP_MULTICAST_CONFIGURE | - | **DESTRUCTIVE** (reconfigure multicast) | [S] |
-| 0x462D | AP2_EBLN_HOSTTABLE_ENTRY_ADD | - | **DESTRUCTIVE** (add host-table entry) | [S] |
-| 0x462E | AP2_EBLN_HOSTTABLE_ENTRY_REMOVE | - | **DESTRUCTIVE** (remove host-table entry) | [S] |
-| 0x462F | AP2_EBLN_HOSTTABLE_DISPLAY | - |  | [S] |
-| 0x4633 | AP2_EBLN_REPL_NOTIFY | 23 |  | [W] |
-| 0x4634 | AP2_EBLN_REPL_PULL | 3938 |  | [W] |
-| 0x4635 | AP2_EBLN_REPL_PULL_MORE | 130 |  | [W] |
-| 0x4636 | AP2_EBLN_REPL_CHANGES | 179 | corpus-wide count; a single passive capture alone holds 170 requests + 170 replies — see §5.3 | [W] |
-| 0x4637 | AP2_EBLN_POINT_LOCATION_GET | - |  | [S] |
-| 0x4638 | AP2_EBLN_MAC_ADDRESS_SET | - | **DESTRUCTIVE** (set MAC address) | [S] |
-| 0x4639 | AP2_EBLN_MII_CONFIGURE | - |  | [S] |
-| 0x463A | AP2_EBLN_MII_DISPLAY | - |  | [S] |
-| 0x463B | AP2_EBLN_IP_DISPLAY | - |  | [S] |
-| 0x463C | AP2_EBLN_PORTS_DISPLAY | - |  | [S] |
-| 0x463D | AP2_EBLN_MULTICAST_DISPLAY | - |  | [S] |
-| 0x463E | AP2_EBLN_MAC_ADDRESS_DISPLAY | - |  | [S] |
-| 0x4640 | AP2_EBLN_PING | 51155 |  | [W] |
-| 0x4644 | AP2_EBLN_TELNET_ENABLE | 1 | **DESTRUCTIVE** (enable telnet) | [W] |
-| 0x4645 | AP2_EBLN_TELNET_DISABLE | - | **DESTRUCTIVE** (disable telnet) | [S] |
-| 0x464C | AP2_EBLN_REPL_DIAG_NODELIST | 1 |  | [W] |
+| 0x461F | AP2_EBLN_FP_NAMES_DISPLAY | - || [S] |
+| 0x4620 | AP2_EBLN_FP_NAME_SET | - |**DESTRUCTIVE** (rename field panel)| [S] |
+| 0x4621 | AP2_EBLN_FP_IP_CONFIGURE | - |**DESTRUCTIVE** (reconfigure panel IP)| [S] |
+| 0x4622 | AP2_EBLN_FP_TCP_PORTS_CONFIGURE | - || [S] |
+| 0x4628 | AP2_EBLN_TRUNK_SETTINGS_REPLACE | - || [S] |
+| 0x4629 | AP2_EBLN_TRUNK_SETTINGS_DISPLAY | - || [S] |
+| 0x462A | AP2_EBLN_FP_SITE_NAME_SET | - |**DESTRUCTIVE** (set site name)| [S] |
+| 0x462B | AP2_EBLN_FP_BLN_NAME_SET | - |**DESTRUCTIVE** (set BLN name)| [S] |
+| 0x462C | AP2_EBLN_FP_MULTICAST_CONFIGURE | - |**DESTRUCTIVE** (reconfigure multicast)| [S] |
+| 0x462D | AP2_EBLN_HOSTTABLE_ENTRY_ADD | - |**DESTRUCTIVE** (add host-table entry)| [S] |
+| 0x462E | AP2_EBLN_HOSTTABLE_ENTRY_REMOVE | - |**DESTRUCTIVE** (remove host-table entry)| [S] |
+| 0x462F | AP2_EBLN_HOSTTABLE_DISPLAY | - || [S] |
+| 0x4633 | AP2_EBLN_REPL_NOTIFY | 23 || [W] |
+| 0x4634 | AP2_EBLN_REPL_PULL | 1267 || [W] |
+| 0x4635 | AP2_EBLN_REPL_PULL_MORE | 130 || [W] |
+| 0x4636 | AP2_EBLN_REPL_CHANGES | 171 |corpus-wide count; a single passive capture alone holds 170 requests + 170 replies — see §5.3| [W] |
+| 0x4637 | AP2_EBLN_POINT_LOCATION_GET | - || [S] |
+| 0x4638 | AP2_EBLN_MAC_ADDRESS_SET | - |**DESTRUCTIVE** (set MAC address)| [S] |
+| 0x4639 | AP2_EBLN_MII_CONFIGURE | - || [S] |
+| 0x463A | AP2_EBLN_MII_DISPLAY | - || [S] |
+| 0x463B | AP2_EBLN_IP_DISPLAY | - || [S] |
+| 0x463C | AP2_EBLN_PORTS_DISPLAY | - || [S] |
+| 0x463D | AP2_EBLN_MULTICAST_DISPLAY | - || [S] |
+| 0x463E | AP2_EBLN_MAC_ADDRESS_DISPLAY | - || [S] |
+| 0x4640 | AP2_EBLN_PING | 18796 || [W] |
+| 0x4644 | AP2_EBLN_TELNET_ENABLE | 1 |**DESTRUCTIVE** (enable telnet)| [W] |
+| 0x4645 | AP2_EBLN_TELNET_DISABLE | - |**DESTRUCTIVE** (disable telnet)| [S] |
+| 0x464C | AP2_EBLN_REPL_DIAG_NODELIST | 1 || [W] |
 
 #### Family: WEB
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x465D | AP2_WEBSERVER_GET_STATE | - |  | [S] |
-| 0x700C | AP2_WS_APOGEEEDIT_GET_STATE | - |  | [S] |
+| 0x465D | AP2_WEBSERVER_GET_STATE | - || [S] |
+| 0x700C | AP2_WS_APOGEEEDIT_GET_STATE | - || [S] |
 
 #### Family: BACNET
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x4821 | AP2_BAC_DBCHANGE_BBMD | - |  | [S] |
-| 0x4822 | AP2_BAC_UPL_DEL_BBMD | - |  | [S] |
-| 0x4823 | AP2_BAC_UPL_ADDED_BBMD | - |  | [S] |
-| 0x4824 | AP2_BAC_UPL_ALL_BBMD | - |  | [S] |
-| 0x4825 | AP2_BAC_BBMD_ADD | - |  | [S] |
-| 0x4826 | AP2_BAC_BBMD_REMOVE | - |  | [S] |
-| 0x4827 | AP2_BAC_BBMD_DISPLAY | - |  | [S] |
-| 0x4828 | AP2_BAC_BBMD_REMOVE_ALL | - |  | [S] |
-| 0x4829 | AP2_BAC_OBJECT_ID_LOG | - |  | [S] |
-| 0x482A | AP2_BAC_APPLICATION_PRIORITY_REPLACE | - |  | [S] |
-| 0x482B | AP2_BAC_APPLICATION_PRIORITY_REMOVE | - |  | [S] |
-| 0x482C | AP2_BAC_APPLICATION_PRIORITY_DISPLAY | - |  | [S] |
-| 0x482E | AP2_BAC_DEVICE_NAME_REPLACE | - |  | [S] |
-| 0x482F | AP2_BAC_DEVICE_NAME_REMOVE | - |  | [S] |
-| 0x4830 | AP2_BAC_DBCHANGE_COVTAB | - |  | [S] |
-| 0x4831 | AP2_BAC_UPL_DEL_COVTAB | - |  | [S] |
-| 0x4832 | AP2_BAC_UPL_ADDED_COVTAB | - |  | [S] |
-| 0x4833 | AP2_BAC_UPL_ALL_COVTAB | - |  | [S] |
-| 0x4834 | AP2_BAC_COVTAB_ADD | - |  | [S] |
-| 0x4835 | AP2_BAC_COVTAB_REMOVE | - |  | [S] |
-| 0x4837 | AP2_BAC_COVTAB_REMOVE_ALL | - |  | [S] |
-| 0x4838 | AP2_BAC_TREND_LOG_ADD | - |  | [S] |
-| 0x4839 | AP2_BAC_TREND_LOG_DELETE | - |  | [S] |
-| 0x483A | AP2_BAC_TREND_LOG_MODIFY | - |  | [S] |
-| 0x4842 | AP2_BAC_TREND_LOG_LOG | - |  | [S] |
-| 0x4843 | AP2_BAC_TREND_DBCHANGE | - |  | [S] |
-| 0x4844 | AP2_BAC_TREND_UPL_DELETED | - |  | [S] |
-| 0x4845 | AP2_BAC_TREND_UPL_ADDED | - |  | [S] |
-| 0x4846 | AP2_BAC_TREND_UPL_ALL | - |  | [S] |
-| 0x4877 | AP2_BAC_DBCHANGE | - |  | [S] |
-| 0x4878 | AP2_BAC_UPLOAD_ADDED | - |  | [S] |
-| 0x4879 | AP2_BAC_UPLOAD_DELETED | - |  | [S] |
-| 0x4960 | AP2_BACNET_SET_MSTP | - |  | [S] |
-| 0x4961 | AP2_BACNET_SET_FLN_TYPE | - |  | [S] |
-| 0x4963 | AP2_BNMSTP_ADD | - |  | [S] |
-| 0x4965 | AP2_BNMSTP_MODIFY | - |  | [S] |
-| 0x4966 | AP2_BNMSTP_REMOVE | - |  | [S] |
-| 0x4967 | AP2_BNMSTP_LOOK | - |  | [S] |
-| 0x496B | AP2_BNMSTP_MEMBER_LOG | - |  | [S] |
-| 0x496E | AP2_BNMSTP_LOCAL_INIT_VALUE_LOG | - |  | [S] |
-| 0x4970 | AP2_BNMSTP_SET_INIT_VALUE | - |  | [S] |
-| 0x4971 | AP2_BNMSTP_RESTORE_INIT_VALUE | - |  | [S] |
-| 0x4972 | AP2_BNMSTP_INITIALIZE | - |  | [S] |
-| 0x4973 | AP2_BNMSTP_UPDATE_LOCAL_INIT_VALUES | - |  | [S] |
-| 0x4B01 | AP2_BNEEO_ADD | - |  | [S] |
-| 0x4B02 | AP2_BNEEO_REMOVE | - |  | [S] |
-| 0x4B03 | AP2_BNEEO_LOOK | - |  | [S] |
+| 0x4821 | AP2_BAC_DBCHANGE_BBMD | - || [S] |
+| 0x4822 | AP2_BAC_UPL_DEL_BBMD | - || [S] |
+| 0x4823 | AP2_BAC_UPL_ADDED_BBMD | - || [S] |
+| 0x4824 | AP2_BAC_UPL_ALL_BBMD | - || [S] |
+| 0x4825 | AP2_BAC_BBMD_ADD | - || [S] |
+| 0x4826 | AP2_BAC_BBMD_REMOVE | - || [S] |
+| 0x4827 | AP2_BAC_BBMD_DISPLAY | - || [S] |
+| 0x4828 | AP2_BAC_BBMD_REMOVE_ALL | - || [S] |
+| 0x4829 | AP2_BAC_OBJECT_ID_LOG | - || [S] |
+| 0x482A | AP2_BAC_APPLICATION_PRIORITY_REPLACE | - || [S] |
+| 0x482B | AP2_BAC_APPLICATION_PRIORITY_REMOVE | - || [S] |
+| 0x482C | AP2_BAC_APPLICATION_PRIORITY_DISPLAY | - || [S] |
+| 0x482E | AP2_BAC_DEVICE_NAME_REPLACE | - || [S] |
+| 0x482F | AP2_BAC_DEVICE_NAME_REMOVE | - || [S] |
+| 0x4830 | AP2_BAC_DBCHANGE_COVTAB | - || [S] |
+| 0x4831 | AP2_BAC_UPL_DEL_COVTAB | - || [S] |
+| 0x4832 | AP2_BAC_UPL_ADDED_COVTAB | - || [S] |
+| 0x4833 | AP2_BAC_UPL_ALL_COVTAB | - || [S] |
+| 0x4834 | AP2_BAC_COVTAB_ADD | - || [S] |
+| 0x4835 | AP2_BAC_COVTAB_REMOVE | - || [S] |
+| 0x4837 | AP2_BAC_COVTAB_REMOVE_ALL | - || [S] |
+| 0x4838 | AP2_BAC_TREND_LOG_ADD | - || [S] |
+| 0x4839 | AP2_BAC_TREND_LOG_DELETE | - || [S] |
+| 0x483A | AP2_BAC_TREND_LOG_MODIFY | - || [S] |
+| 0x4842 | AP2_BAC_TREND_LOG_LOG | - || [S] |
+| 0x4843 | AP2_BAC_TREND_DBCHANGE | - || [S] |
+| 0x4844 | AP2_BAC_TREND_UPL_DELETED | - || [S] |
+| 0x4845 | AP2_BAC_TREND_UPL_ADDED | - || [S] |
+| 0x4846 | AP2_BAC_TREND_UPL_ALL | - || [S] |
+| 0x4877 | AP2_BAC_DBCHANGE | - || [S] |
+| 0x4878 | AP2_BAC_UPLOAD_ADDED | - || [S] |
+| 0x4879 | AP2_BAC_UPLOAD_DELETED | - || [S] |
+| 0x4960 | AP2_BACNET_SET_MSTP | - || [S] |
+| 0x4961 | AP2_BACNET_SET_FLN_TYPE | - || [S] |
+| 0x4963 | AP2_BNMSTP_ADD | - || [S] |
+| 0x4965 | AP2_BNMSTP_MODIFY | - || [S] |
+| 0x4966 | AP2_BNMSTP_REMOVE | - || [S] |
+| 0x4967 | AP2_BNMSTP_LOOK | - || [S] |
+| 0x496B | AP2_BNMSTP_MEMBER_LOG | - || [S] |
+| 0x496E | AP2_BNMSTP_LOCAL_INIT_VALUE_LOG | - || [S] |
+| 0x4970 | AP2_BNMSTP_SET_INIT_VALUE | - || [S] |
+| 0x4971 | AP2_BNMSTP_RESTORE_INIT_VALUE | - || [S] |
+| 0x4972 | AP2_BNMSTP_INITIALIZE | - || [S] |
+| 0x4973 | AP2_BNMSTP_UPDATE_LOCAL_INIT_VALUES | - || [S] |
+| 0x4B01 | AP2_BNEEO_ADD | - || [S] |
+| 0x4B02 | AP2_BNEEO_REMOVE | - || [S] |
+| 0x4B03 | AP2_BNEEO_LOOK | - || [S] |
 
 #### Family: EQS
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x5000 | AP2_EQS_ZONE_ADD | 4 |  | [W] |
-| 0x5001 | AP2_EQS_ZONE_REMOVE | 4 |  | [W] |
-| 0x5002 | AP2_EQS_ZONE_MODIFY | - |  | [S] |
-| 0x5003 | AP2_EQS_ZONE_LOOK | 84 |  | [W] |
-| 0x5004 | AP2_EQS_ZONE_ENABLE | - |  | [S] |
-| 0x5005 | AP2_EQS_ZONE_DISABLE | - |  | [S] |
-| 0x5018 | AP2_EQS_CMD_TABLE_ENTRY_ADD | - |  | [S] |
-| 0x5019 | AP2_EQS_CMD_TABLE_ENTRY_MODIFY | - |  | [S] |
-| 0x501A | AP2_EQS_CMD_TABLE_ENTRY_REMOVE | - |  | [S] |
-| 0x501B | AP2_EQS_CMD_TABLE_ENTRY_LOOK | - |  | [S] |
-| 0x5020 | AP2_EQS_MODE_ENTRY_ADD | 12 |  | [W] |
-| 0x5021 | AP2_EQS_MODE_ENTRY_MODIFY | - |  | [S] |
-| 0x5022 | AP2_EQS_MODE_ENTRY_REMOVE | 10 |  | [W] |
-| 0x5023 | AP2_EQS_MODE_ENTRY_LOOK | - |  | [S] |
-| 0x5024 | AP2_EQS_MODE_ENTRY_ENABLE | - |  | [S] |
-| 0x5025 | AP2_EQS_MODE_ENTRY_DISABLE | - |  | [S] |
-| 0x5028 | AP2_EQS_OVERRIDE_ADD | - |  | [S] |
-| 0x5029 | AP2_EQS_OVERRIDE_MODIFY | - |  | [S] |
-| 0x502A | AP2_EQS_OVERRIDE_REMOVE | - |  | [S] |
-| 0x502B | AP2_EQS_OVERRIDE_LOOK | - |  | [S] |
-| 0x5035 | AP2_EQS_DISPLAY_ZONE | - |  | [S] |
-| 0x5036 | AP2_EQS_DISPLAY_MODE_ENTRY | - |  | [S] |
-| 0x5037 | AP2_EQS_DISPLAY_CMD_TABLE | - |  | [S] |
-| 0x5038 | AP2_EQS_ZONE_LOG | 30 |  | [W] |
-| 0x5039 | AP2_EQS_DISPLAY_OVERRIDES | - |  | [S] |
-| 0x503A | AP2_EQS_SSTO_SETUP_GENERAL | 2 |  | [W] |
-| 0x503B | AP2_EQS_SSTO_SETUP_START | 2 |  | [W] |
-| 0x503C | AP2_EQS_SSTO_SETUP_STOP | 2 |  | [W] |
-| 0x503D | AP2_EQS_SSTO_SETUP_NIGHT | 2 |  | [W] |
-| 0x503E | AP2_EQS_SSTO_LOOK_GENERAL | - |  | [S] |
-| 0x503F | AP2_EQS_SSTO_LOOK_START | - |  | [S] |
-| 0x5040 | AP2_EQS_SSTO_LOOK_STOP | - |  | [S] |
-| 0x5041 | AP2_EQS_SSTO_LOOK_NIGHT | - |  | [S] |
-| 0x5042 | AP2_EQS_SSTO_RESET | - |  | [S] |
-| 0x5043 | AP2_EQS_SSTO_ENABLE | - |  | [S] |
-| 0x5044 | AP2_EQS_SSTO_DISABLE | - |  | [S] |
-| 0x5050 | AP2_EQS_SSTO_DISPLAY_GENERAL | - |  | [S] |
-| 0x5051 | AP2_EQS_SSTO_DISPLAY_START | - |  | [S] |
-| 0x5052 | AP2_EQS_SSTO_DISPLAY_STOP | - |  | [S] |
-| 0x5053 | AP2_EQS_SSTO_DISPLAY_NIGHT | - |  | [S] |
-| 0x5054 | AP2_EQS_MEMBER_LOG | - |  | [S] |
+| 0x5000 | AP2_EQS_ZONE_ADD | - || [S] |
+| 0x5001 | AP2_EQS_ZONE_REMOVE | - || [S] |
+| 0x5002 | AP2_EQS_ZONE_MODIFY | - || [S] |
+| 0x5003 | AP2_EQS_ZONE_LOOK | 27 || [W] |
+| 0x5004 | AP2_EQS_ZONE_ENABLE | - || [S] |
+| 0x5005 | AP2_EQS_ZONE_DISABLE | - || [S] |
+| 0x5018 | AP2_EQS_CMD_TABLE_ENTRY_ADD | - || [S] |
+| 0x5019 | AP2_EQS_CMD_TABLE_ENTRY_MODIFY | - || [S] |
+| 0x501A | AP2_EQS_CMD_TABLE_ENTRY_REMOVE | - || [S] |
+| 0x501B | AP2_EQS_CMD_TABLE_ENTRY_LOOK | - || [S] |
+| 0x5020 | AP2_EQS_MODE_ENTRY_ADD | 2 || [W] |
+| 0x5021 | AP2_EQS_MODE_ENTRY_MODIFY | - || [S] |
+| 0x5022 | AP2_EQS_MODE_ENTRY_REMOVE | 2 || [W] |
+| 0x5023 | AP2_EQS_MODE_ENTRY_LOOK | - || [S] |
+| 0x5024 | AP2_EQS_MODE_ENTRY_ENABLE | - || [S] |
+| 0x5025 | AP2_EQS_MODE_ENTRY_DISABLE | - || [S] |
+| 0x5028 | AP2_EQS_OVERRIDE_ADD | - || [S] |
+| 0x5029 | AP2_EQS_OVERRIDE_MODIFY | - || [S] |
+| 0x502A | AP2_EQS_OVERRIDE_REMOVE | - || [S] |
+| 0x502B | AP2_EQS_OVERRIDE_LOOK | - || [S] |
+| 0x5035 | AP2_EQS_DISPLAY_ZONE | - || [S] |
+| 0x5036 | AP2_EQS_DISPLAY_MODE_ENTRY | - || [S] |
+| 0x5037 | AP2_EQS_DISPLAY_CMD_TABLE | - || [S] |
+| 0x5038 | AP2_EQS_ZONE_LOG | 3 || [W] |
+| 0x5039 | AP2_EQS_DISPLAY_OVERRIDES | - || [S] |
+| 0x503A | AP2_EQS_SSTO_SETUP_GENERAL | - || [S] |
+| 0x503B | AP2_EQS_SSTO_SETUP_START | - || [S] |
+| 0x503C | AP2_EQS_SSTO_SETUP_STOP | - || [S] |
+| 0x503D | AP2_EQS_SSTO_SETUP_NIGHT | - || [S] |
+| 0x503E | AP2_EQS_SSTO_LOOK_GENERAL | - || [S] |
+| 0x503F | AP2_EQS_SSTO_LOOK_START | - || [S] |
+| 0x5040 | AP2_EQS_SSTO_LOOK_STOP | - || [S] |
+| 0x5041 | AP2_EQS_SSTO_LOOK_NIGHT | - || [S] |
+| 0x5042 | AP2_EQS_SSTO_RESET | - || [S] |
+| 0x5043 | AP2_EQS_SSTO_ENABLE | - || [S] |
+| 0x5044 | AP2_EQS_SSTO_DISABLE | - || [S] |
+| 0x5050 | AP2_EQS_SSTO_DISPLAY_GENERAL | - || [S] |
+| 0x5051 | AP2_EQS_SSTO_DISPLAY_START | - || [S] |
+| 0x5052 | AP2_EQS_SSTO_DISPLAY_STOP | - || [S] |
+| 0x5053 | AP2_EQS_SSTO_DISPLAY_NIGHT | - || [S] |
+| 0x5054 | AP2_EQS_MEMBER_LOG | - || [S] |
 
 #### Family: IO
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x5300 | AP2_GLOBAL_IO_MODULE_DISPLAY | - |  | [S] |
-| 0x5303 | AP2_GLOBAL_IO_MODULE_DISPLAY_MEC_EXPBUS | - |  | [S] |
-| 0x5305 | AP2_LOCAL_IO_MODULE_DISPLAY | - |  | [S] |
+| 0x5300 | AP2_GLOBAL_IO_MODULE_DISPLAY | - || [S] |
+| 0x5303 | AP2_GLOBAL_IO_MODULE_DISPLAY_MEC_EXPBUS | - || [S] |
+| 0x5305 | AP2_LOCAL_IO_MODULE_DISPLAY | - || [S] |
 
 #### Family: FLASH
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x5330 | AP2_BACKUP_FLASH_DBASE | - | flash-database read/export (non-destructive) | [S] |
-| 0x5331 | AP2_RESTORE_FLASH_DBASE | - | **DESTRUCTIVE** (restore flash database (overwrite)) | [S] |
-| 0x5332 | AP2_CLEAR_FLASH_DBASE | - | **DESTRUCTIVE** (clear flash database (erase)) | [S] |
+| 0x5330 | AP2_BACKUP_FLASH_DBASE | - |flash-database read/export (non-destructive)| [S] |
+| 0x5331 | AP2_RESTORE_FLASH_DBASE | - |**DESTRUCTIVE** (restore flash database (overwrite))| [S] |
+| 0x5332 | AP2_CLEAR_FLASH_DBASE | - |**DESTRUCTIVE** (clear flash database (erase))| [S] |
 
 #### Family: HOA
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x5351 | AP2_HOA_MAP_MODIFY | - |  | [S] |
-| 0x5354 | AP2_HOA_MAP_LOOK | 31 |  | [W] |
-| 0x5355 | AP2_HOA_MAP_ADD | - |  | [S] |
+| 0x5351 | AP2_HOA_MAP_MODIFY | - || [S] |
+| 0x5354 | AP2_HOA_MAP_LOOK | 13 || [W] |
+| 0x5355 | AP2_HOA_MAP_ADD | - || [S] |
 
-<!-- END GENERATED CATALOG -->
+
+
+#### Family: EBLN (panel-side, outside the supervisor enum)
+
+| 0xHEX | Name | Observed (count) | Notes | Tag |
+|---|---|---|---|---|
+| 0x4623 | AP2_EBLN_FP_DISPLAY | - |  | [S] |
+| 0x4624 | AP2_EBLN_STORAGE_NODES_REPLACE | - |  | [S] |
+| 0x4625 | AP2_EBLN_STORAGE_NODES_DISPLAY | - |  | [S] |
+| 0x4626 | AP2_EBLN_REPORT_PRINTER_REPLACE | - |  | [S] |
+| 0x4627 | AP2_EBLN_REPORT_PRINTER_DISPLAY | - |  | [S] |
+| 0x4630 | AP2_EBLN_NODE_ADD | - |  | [S] |
+| 0x4631 | AP2_EBLN_NODE_REMOVE | - |  | [S] |
+| 0x4632 | AP2_EBLN_NODE_LIST_DISPLAY | - |  | [S] |<!-- END GENERATED CATALOG -->
 
 ### 9.6 The session/keepalive opcode 0x4640 (EBLN_PING)
 
@@ -3431,7 +3451,7 @@ The corpus distribution grounds the catalog in observed behavior:
 
 ### 10.1 Encoding convention
 
-The bytes after the opcode are the operation's **ASDU** (Application Service Data Unit; the service model is ISO/OSI-style Request → Indication on the receiver, Response → Confirm back). The complete set of bodies is defined as **1,144 distinct ordered-field ASDU structures** in the protocol's type system (spanning the request and response forms — on the order of 614 `*_Request` and 638 `*_Response` named forms, which share common sub-types, so the named forms outnumber the distinct structures) — each an ordered list of typed fields. This section documents the encoding rules, then the ~30 most important structures in field tables; the full set is enumerable from the structure library, so any opcode in §9 has a known body shape even where not detailed here. [S]
+The bytes after the opcode are the operation's **ASDU** (Application Service Data Unit; the service model is ISO/OSI-style Request → Indication on the receiver, Response → Confirm back). The complete set of bodies is defined as **1,144 distinct ordered-field ASDU structures** in the protocol's type system — **536 `*_Request` forms, 357 `*_Response` forms, and 251 shared component types** (`Alarm_level`, `Point_base`, `Name_search` and the like) that the request and response forms build on — each an ordered list of typed fields. Fewer responses than requests is not an extraction gap: a large minority of operations are fire-and-forget and answer with status only (see the command shapes in §9). This section documents the encoding rules, then the ~30 most important structures in field tables; the full set is enumerable from the structure library, so any opcode in §9 has a known body shape even where not detailed here. [S]
 
 Field types in the structure tables map to wire encodings as follows. These are the [S] definitional types; the [W] encodings (TLV framing, f32, scope tag) are established from captures (cross-reference §8 of the framing sections):
 
@@ -3679,7 +3699,7 @@ On the wire the value block sits inside the `All_points` alternative: an f32 BE 
 
 The COV-enable response returns the point's `All_points` value block (same shape as the read response). On the wire the enable/disable pair is also distinguishable by a 2-byte trailer (`00 FF` enable vs `00 00` disable). [W]
 
-**`AP2_COV_ANNUNCIATE` request (0x0274)** — the panel-originated COV report (highest-volume opcode, 121,446 frames; pushed on `direction == 0x00`, acknowledged with a 0-byte success). [S][W]
+**`AP2_COV_ANNUNCIATE` request (0x0274)** — the panel-originated COV report (highest-volume opcode, 48,393 request frames under the §9.5 criteria; pushed on `direction == 0x00`, acknowledged with a 0-byte success). [S][W]
 
 | # | Field | Type | Meaning |
 |---|---|---|---|
@@ -4392,6 +4412,11 @@ An analog or pulse point carries a **high limit** and a **low limit** in enginee
 
 Alarm transitions follow the standard three-transition model — **to-off-normal**, **to-fault**, **to-normal** (the `BAC_Transitions` set: `to_offnormal`, `to_fault`, `to_normal`) — and a point may be configured to **annunciate** on each transition independently ("Annunciate to Normal / Off-Normal / Fault Transitions"). [S/D] A `level_delay` and a `mode_delay` (both u16, in the alarm-setup record) debounce the assertion so a brief excursion does not generate an alarm. [S]
 
+An **enhanced** definition as it actually arrives on the wire — mode point,
+units, set point, and the level table with each level's offset, priority,
+category and message number — is decoded in §10.8 (`AP2_UPL_ALL_ALARM_MODE`
+response). [W]
+
 ### 13.4 Alarm destinations and routing
 
 An alarm-setup record (`AP2_Alarm_Setup_Request` / `_Modify` / `_Copy`) configures, per alarm point and per alarm mode: `mode_name` + `mode_suffix`, `normal_acks` (require ack on return-to-normal), `alarmcnt2` (second alarm count), `level_delay`, `mode_delay`, `differential` (f32 hysteresis), and **four destination category bytes** `category0 … category3`. [S] These four categories are the alarm's routing destinations; a system **default destination (000)** receives alarms not otherwise routed, so the effective routing is up to four configured destinations plus the default. [D] A destination is a category container that nodes append themselves to (`AP2_Category_Nodes_Append` / `_Remove`), so an alarm routed to a category reaches every node currently in that category. [S]
@@ -4772,7 +4797,7 @@ The supervisor↔panel TOD-define path (`AP2_UC_Define_TOD_Request`, `AP2_UC_Def
 
 ### 15.3 EQS — equipment scheduling
 
-EQS schedules a **zone** (a group of points) into occupancy **modes**, each mode driving a **command table** of point setpoints, with optional **start-stop time optimization (SSTO)** to pre-start equipment so the zone reaches setpoint by the occupied time. [D]
+EQS schedules a **zone** (a group of points) into occupancy **modes**, each mode driving a **command table** of point setpoints, with optional **start-stop time optimization (SSTO)** to pre-start equipment so the zone reaches setpoint by the occupied time. [D] All three record types are decoded from captured responses in §10.8 — the zone, the per-mode command table, and the mode schedule with its effective dates and start time — and they compose with the alarm model of §13: the schedule drives a mode point, and the mode point selects which alarm levels are in force. [W]
 
 **EQS opcode families:**
 
