@@ -118,8 +118,6 @@
 local p2data = {}
 p2data.opcodes = {
   [48] = {tag="F", note="panel firmware 30/42 images + supervisor stack"},
-  [49] = {tag="F", note="panel firmware 30/42 images + supervisor stack"},
-  [51] = {tag="F", note="panel firmware 30/42 images + supervisor stack"},
   [52] = {tag="F", note="panel firmware 30/42 images + supervisor stack"},
   [62] = {tag="F", note="panel firmware 30/42 images + supervisor stack"},
   [63] = {tag="F", note="panel firmware 30/42 images + supervisor stack"},

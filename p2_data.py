@@ -10,8 +10,6 @@ stack function-code enumeration.
 
 OPCODES = {
     0x0030: ('F', 'panel firmware 30/42 images + supervisor stack'),
-    0x0031: ('F', 'panel firmware 30/42 images + supervisor stack'),
-    0x0033: ('F', 'panel firmware 30/42 images + supervisor stack'),
     0x0034: ('F', 'panel firmware 30/42 images + supervisor stack'),
     0x003e: ('F', 'panel firmware 30/42 images + supervisor stack'),
     0x003f: ('F', 'panel firmware 30/42 images + supervisor stack'),
