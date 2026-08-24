@@ -2315,6 +2315,12 @@ a response carries no opcode — gives **83,876 pairs, 72 opcodes, 1 real hit
 against 315 control**. The real mapping scored worse than its own control.
 Whatever the panel writes the number into, **it is not a P2 frame**. [W]
 
+*Coverage, since a negative is only as good as its denominator.* The corpus holds
+726 capture files, 233 distinct by content, of which **85 carry P2 and hold
+206,050 trusted frames between them** — and all 85 were in scope, 100% of frames.
+Both ports are represented: 126,832 frames on 5033 and 79,229 on 5034, so the
+result is not an artifact of testing only the supervisor-facing channel. [W]
+
 **It is a two-stage internal operation number.** The default table maps an
 opcode to a *group*; where the group needs finer resolution, that group has its
 own table mapping the same opcodes to an *ordinal*. The group id and the second
