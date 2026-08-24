@@ -436,6 +436,10 @@ A node has two parallel identities depending on the BLN medium.
 
 - **Ethernet pingable DNS node name.** On an EBLN a node is identified by a **DNS-resolvable node name of ≤ 30 characters** (see §3.4.2). The Ethernet node is reached by resolving its name to an IP and connecting on TCP/5033; the numeric drop survives as a conceptual coordinate (and in the database tuple) but is not the wire address. [D][W]
 
+- **`<host>|<port>` — the identity form for an IP participant that is not a physical panel.** Node-table dumps contain entries carrying a pipe, such as the supervisor's `SUP|5034` alongside its bare `SUP` (§5.3). §2.1.1 establishes from the wire that this suffix is part of the identity string rather than a live port indicator; the naming rule behind it is documented too. It is a defined identifier form: **the machine's host name, a literal `|`, and a TCP port number**. It exists because more than one P2 endpoint can live on one host, and the host name alone would not distinguish them; the port disambiguates. Virtual panels are named this way as a rule and, unlike a physical panel, take **no site or system name component** in the identifier at all. A parser must therefore treat a node name as an opaque string that may legally contain `|`, and must not assume one endpoint per host. [D][W]
+
+  A deployment constraint follows, and it is worth recording because it is otherwise inexplicable: **two P2 endpoints on the same host may not be given port numbers differing by exactly 100.** If one uses 5407, then 5307 and 5507 are both unavailable to the others. A ±100 exclusion is the signature of an endpoint quietly occupying a *second* port at a fixed offset of 100 from its configured one, so that two endpoints spaced 100 apart would collide on it. What that second port carries is **[OPEN]**; the exclusion rule itself is documented. Note this does **not** explain the `5033`/`5034` pair seen in captures — those differ by 1, and §2.1.1 covers them separately. [D][I]
+
 A practical consequence for an implementer: the same logical panel can be referenced as a serial drop integer (in legacy databases and in `NODEnn` liveness points) and as a DNS node name (on the Ethernet wire). They denote the same node. [I]
 
 #### 3.3.2 Node name length: ≤ 30 wire, ≤ 15 where RAD-50 packed
@@ -604,13 +608,16 @@ The architectural maxima below are deployment limits, not wire-protocol constant
 |---|---|---|---|
 | BLNs per supervisor | 64 | one supervisor manages up to 64 BLNs | [D] |
 | Panels per BLN | ~99 RS-485 panels + the supervisor | per BLN (the 0–99 drop range, §3.4.4) | [D] |
+| Panels per **Ethernet** BLN | 100 | per logical EBLN — a separate limit, see the note below | [D] |
 | FLN trunks per panel | up to 3 (4 on NCRS) | per panel | [D] |
 | Devices per FLN trunk | 32 (drop 0–31) | per FLN trunk | [D] |
-| Panels per workstation | ~1000 | total across all managed BLNs | [D] |
+| Panels per workstation | 1000 | total Ethernet field panels across all managed BLNs | [D] |
 | Ethernet connections per workstation | 64 | concurrent EBLN connections | [D] |
 | Remote auto-dial BLNs | 300 | dial-up reachable BLNs | [D] |
 | Cross-BLN COV-share | ~300 points | total points shareable across BLN boundaries (§3.5) | [D] |
 | Concurrent peer sessions per panel | small, firmware-dependent | per panel TCP/5033 listener | [D][I] |
+
+**The two per-BLN limits have different origins, and the difference matters.** On an RS-485 BLN the ~99 ceiling is an *addressing* artifact: it is the 0–99 drop range and nothing more. An Ethernet BLN does not use drop numbers at all — its members are identified by DNS-resolvable names (§3.4.2) — and yet it is still capped, at 100 panels per logical BLN. A limit that survives the removal of the addressing scheme that supposedly caused it is not an addressing limit. It is a **node-table capacity**, which is the right way for an implementer to think about it when sizing the replicated table of §5.3. [D][I]
 
 These figures derive from vendor topology documentation; treat them as the *documented* ceiling, not a guarantee that a given firmware enforces each one identically. Where a finding or operation depends on a limit (e.g. the cross-BLN COV cap), the dependency is called out at the relevant section. [D][I]
 ## 4. Physical & Datalink Layer
@@ -840,7 +847,7 @@ The replication exchange is a small family of AP2 function codes. In the current
 
 > Note on naming: an earlier behavioral label for `0x4634` was "PushRoutingTable" (from its observed effect of conveying the node/routing roster). The function-code enumeration names it `AP2_EBLN_REPL_PULL` [S]; the roster-bearing behavior is consistent (a pull of replicated routing/membership data). This reference uses the enum name; the behavioral description (roster transfer) is unchanged.
 
-**`EBLN_REPL_PULL` (`0x4634`) body — the replicated node table as a versioned digest.** The body is the full node-name table carried as a *version-vector digest*, wire-confirmed [W]: an **8-byte header** (`00 00 00 00`, then a 2-byte table-level version, then a 2-byte entry count) followed by one entry per node, each a `TLV(01 00 <len> <node-name>)` immediately followed by a **`u32` per-node version**. A `$paneldefault` entry leads, then every BLN node and the supervisor (the supervisor participates as ordinary node entries — e.g. both its `SUP` and `SUP|5034` identities appear).
+**`EBLN_REPL_PULL` (`0x4634`) body — the replicated node table as a versioned digest.** The body is the full node-name table carried as a *version-vector digest*, wire-confirmed [W]: an **8-byte header** (`00 00 00 00`, then a 2-byte table-level version, then a 2-byte entry count) followed by one entry per node, each a `TLV(01 00 <len> <node-name>)` immediately followed by a **`u32` per-node version**. A `$paneldefault` entry leads, then every BLN node and the supervisor (the supervisor participates as ordinary node entries — e.g. both its `SUP` and `SUP|5034` identities appear; the pipe form is the defined `<host>|<port>` identifier described in §3.3.1, not an artifact).
 
 ```
 offset 0:  00 00 00 00  <u16 table-version>  <u16 entry-count>     -- 8-byte header
