@@ -2221,23 +2221,59 @@ captures. Neither answers the question an implementer actually has, which is
 whether a controller will do anything with a given function code.
 
 There is a third source, and it sits on the other end of the wire. Controller
-firmware images carry a **dispatch table pairing a one-byte handler id with a
-16-bit function code**, laid out as 4-byte records:
+firmware images carry **tables pairing a 16-bit function code with a 16-bit
+id**, laid out as 4-byte records:
 
 ```
-  00 c1 02 20     handler 0xc1  <-  0x0220
-  00 c1 02 29     handler 0xc1  <-  0x0229
-  00 a1 02 73     handler 0xa1  <-  0x0273
-  00 b4 05 47     handler 0xb4  <-  0x0547
+  00 c1 02 20     id 0x00c1  <-  opcode 0x0220
+  00 c1 02 29     id 0x00c1  <-  opcode 0x0229
+  00 a1 02 73     id 0x00a1  <-  opcode 0x0273
+  00 b4 05 47     id 0x00b4  <-  opcode 0x0547
 ```
 
 The same table is present in images built for **two different instruction sets**
 — 68000-family and PowerPC — at the same size and with the same contents. That
 is what identifies it as protocol data rather than compiled code. [F]
 
+**What the id is for.** An earlier reading of this section called these dispatch
+tables. Disassembly shows otherwise, and the difference matters. The lookup
+result is not a jump target: it is handed to a two-byte write against a
+serialisation buffer object — one carrying a base pointer, a write cursor, a
+capacity and an overflow flag — which memcpys it and advances the cursor. **The
+id is emitted into an outgoing message.** A miss yields `-1`, which is a
+sentinel a translator writes, not an index a dispatcher could use.
+
+So the panel keeps, per peer class, a mapping from the AP2 function code to
+some other numbering that it emits on that peer's behalf. That is the same
+CPI/AP2 two-level relationship as §9.1.1, observed from the panel end rather
+than the supervisor end. What the emitted id *means* is **[OPEN]**. [F]
+
+**There is more than one table, and a class code selects between them.** The
+firmware stores each table's length in a 16-bit word immediately after it, so
+the layout is exact rather than inferred — in one image, ten tables laid end to
+end, each stored count matching its span:
+
+| Selector | Records | | Selector | Records |
+|---|---:|---|---|---:|
+| `0xAC` | 12 | | `0xE0` | 4 |
+| `0xCF` | 6 | | `0xB4` | 3 |
+| *default* | **317** | | `0xB6` | 11 |
+| `0xB2` | 9 | | `0xA6` | 6 |
+| `0xB8` | 3 | | (unlabelled) | 142 |
+
+The selector comes from a method on the peer object, and the default table is
+used when no class-specific one matches. An implementer should read this as
+evidence that **the panel's view of the function-code space is peer-dependent**,
+not uniform. [F]
+
+Presence in these tables says the panel firmware *knows* the function code and
+carries a translation for it. It does not by itself prove the panel implements
+the operation — for that, §9.5's rule still holds: classify by what the panel
+did when asked.
+
 Across 42 images spanning firmware revisions 1.3 to 2.6 and the MEC, MBC, FLN,
 SV5, PPC, LON and MECF product lines, **164 function codes appear both in a
-panel's dispatch table (in at least 28 of the 42 images) and in the supervisor
+panel's opcode tables (in at least 28 of the 42 images) and in the supervisor
 enumeration**. For sets of that size drawn from a 16-bit space, chance overlap
 would be about 2.5. Those 164 are the subset of the catalog that is confirmed
 implemented at both ends. [F][S]
@@ -2252,7 +2288,7 @@ appear in the firmware tables alone, and those are candidates, not findings.
 #### The supervisor vocabulary has real gaps, and the firmware shows them
 
 Seven function codes observed on the wire are missing from the supervisor
-enumeration. **Six of the seven are in the panel dispatch tables:**
+enumeration. **Six of the seven are in the panel opcode tables:**
 
 | Code | In panel firmware |
 |---|---|

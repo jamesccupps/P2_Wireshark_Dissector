@@ -4,7 +4,7 @@ Tables compiled in so the scanner is self-contained and portable,
 the same way the TEC point library is embedded.
 
 Provenance tags: W wire, G replication grain, X panel export,
-F panel firmware dispatch table corroborated by the supervisor
+F panel firmware opcode table corroborated by the supervisor
 stack function-code enumeration.
 """
 
