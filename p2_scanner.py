@@ -378,12 +378,17 @@ def load_config(filepath: str) -> bool:
 # These tables (COMMON_POINTS / HEATING_POINTS / REHEAT_POINTS / HW_VALVE_POINTS
 # / FAN_POINTS / SUPPLY_TEMP_POINT) are the **legacy fallback** point catalog,
 # used by `get_point_table` ONLY when the full catalog cannot be loaded at all.
-# In practice that never happens: the complete 1024-application catalog is
-# EMBEDDED IN THIS FILE as a gzip+base64 blob (`_TECPOINTS_GZ_B64`, ~386 KB
-# encoded, ~8.7 MB expanded) and is the last entry in the loader's search
+# In practice that never happens: the complete 1070-application catalog is
+# EMBEDDED IN THIS FILE as a gzip+base64 blob (`_TECPOINTS_GZ_B64`, ~362 KB
+# encoded, ~5.7 MB expanded) and is the last entry in the loader's search
 # order, so a bare copy of p2_scanner.py with no data files beside it still
 # resolves every application. That is deliberate: one file, nothing to install,
 # nothing to forget to copy. An external tecpoints.json still overrides it.
+#
+# 46 of those 1070 applications carry names only -- point number and point
+# name, no data type -- and are marked `"src": "catalog-merge"` per entry so
+# a consumer can tell a name-only slot from a fully typed one. Regenerate the
+# blob with working/sweep/gen_tecpoints.py; never hand-edit it.
 #
 # Kept on disk for:
 #   - resilience when running an out-of-tree script without the data package
