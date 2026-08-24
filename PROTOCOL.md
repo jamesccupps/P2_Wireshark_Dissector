@@ -48,6 +48,7 @@
   - [6.5 Sequence number and request/response pairing](#65-sequence-number-and-requestresponse-pairing)
   - [6.6 Legacy and modern dialect differences](#66-legacy-and-modern-dialect-differences)
   - [6.7 Segmentation](#67-segmentation)
+  - [6.8 The byte-oriented P2 encoding (non-TCP links)](#68-the-byte-oriented-p2-encoding-non-tcp-links)
 - [7. Service Model & Message Types](#7-service-model--message-types)
   - [7.1 The ASDU service model](#71-the-asdu-service-model)
   - [7.2 Success vs error responses](#72-success-vs-error-responses)
@@ -706,7 +707,7 @@ A panel may alternatively host a BACnet MS/TP field bus in place of P1 (`Fln_typ
 
 ### 4.5 Open items — serial and field-bus framing
 
-> **[OPEN] Serial-BLN P2 link framing bytes.** Only the line parameters (8/N/1, baud tiers, trunk numbering) are established for the dedicated serial BLN. The byte-level link framing that carries a P2 logical frame over RS-485 (start/sync delimiting, address byte, CRC/checksum, the medium's segmentation) is **not** observed in the present evidence and is not specified here. An AEM Channel-1 capture (TCP/3001) would expose these bytes, since the AEM tunnels the serial stream verbatim.
+> **[OPEN, PARTLY ANSWERED] Serial-BLN P2 link framing bytes.** Only the line parameters (8/N/1, baud tiers, trunk numbering) were established for the dedicated serial BLN. **The message layer above the framing is now recovered from controller firmware — see §6.8** — giving the address byte and its position, a compact operation encoding, a 253-byte cap, and the forwarding rule for a message addressed elsewhere. What is still unobserved is the **link** layer beneath it: start/sync delimiting, CRC/checksum, and the medium's segmentation, all of which a lower layer has already stripped before the code in §6.8 sees the message. An AEM Channel-1 capture (TCP/3001) would expose those bytes, since the AEM tunnels the serial stream verbatim.
 
 > **[OPEN] FLN/P1 frame bytes.** The P1 fieldbus discovery transaction (P1WhoAreYou), addressing (drop + application number), physical layer (RS-485 2-wire), and baud are documented, but the P1 frame byte layout itself is unobserved. The on-wire P1 frame structure, the WhoAreYou request/response bytes, and the per-poll cadence/retry behavior require a P1-bus capture or a route-through capture from the BLN. **The route-through opcode is now named: `0x0313 AP2_P1_ROUTE`, with `0x0314` alongside it** (§9.1.1). Fifteen distinct field-device operations tunnel through `0x0313`, so a capture containing it carries P1 payloads inside a P2 frame — which is the cheapest route to these bytes, and needs no access to the RS-485 segment itself. Neither opcode occurs in any capture in the present corpus.
 
@@ -1538,6 +1539,64 @@ reassembly) that rides over the BACnet IPC connection. TSML is a different stack
 for the P2 wire. [S]
 
 ---
+
+### 6.8 The byte-oriented P2 encoding (non-TCP links)
+
+Everything in §6 so far describes P2 as it rides TCP. A controller also speaks P2
+over a byte-oriented link, and it is **not the same encoding** — same protocol,
+same operations, a far more compact frame. This is recovered from controller
+firmware, not from a capture: the corpus is entirely TCP/5033. [F]
+
+```
+  offset  size  field
+  ------  ----  ---------------------------------------------------------
+     0     1    node address  -- checked against the receiver's own id
+     1     1    [OPEN]
+     2     1    [OPEN]
+     3     1    group         -- selects a translation table (§9.4.1)
+     4     2    ordinal (u16) -- the operation within that group
+     6   ...    arguments
+
+  total <= 253 bytes; payload after the 4-byte header <= 249 (0xF9),
+  enforced -- an over-length route is rejected with error 2.
+```
+
+Two things identify this as P2 rather than P1 or an internal bus. First, the
+receiver's rule for a message whose address byte is **not** its own id: it does
+not interpret the message, it wraps the raw four header bytes and the payload
+verbatim and raises it as operation **`0x0136`**, whose name in the function-code
+enumeration is **`AP2_P2_ROUTE`**. Second, the encode path is byte-for-byte
+symmetric — given `0x0136` it restores the same four header bytes and payload and
+puts them back on the link. A multi-drop link forwarding P2 between nodes. [F][S]
+
+The operation is encoded as `(group, ordinal)` rather than as the 16-bit AP2
+function code, and §9.4.1 gives the tables that translate between the two, in
+both directions. The ordinal's width is fixed by the firmware's 2-byte read
+primitive and independently by group `0xE0`, whose ordinals run 256–259 and could
+not fit in a byte.
+
+Set against the TCP framing of §6.1 — `u32 total_len | u32 msg_type | u32 seq |
+u8 dir | four NUL-terminated slots | u16 opcode` — the difference is stark: one
+address byte where TCP carries four variable-length name slots, and a
+group+ordinal pair where TCP carries the function code. **An implementer should
+not assume one P2 parser handles both.**
+
+**Which serial link is [OPEN].** Two carry P2 outside the TCP framing — the
+dedicated RS-485 BLN and the dial-up path. A one-byte node address with
+multi-drop forwarding fits the RS-485 BLN, but nothing observed excludes the
+modem path, and both may use this same encoding.
+
+**And the framing beneath it is [OPEN].** The firmware receives the four header
+bytes already parsed into fields, so start/sync delimiting and any CRC are
+stripped by a lower layer this code does not contain.
+
+> **A note on the ~256-byte figure.** §6.7 records, correctly, that the ~256-byte
+> number in vendor connection-test material is a *ping* size and not a maximum
+> P2 data-packet cap — TCP frames run to ≈1,587 bytes. That stands. But a
+> **253-byte cap, enforced in code**, now exists on this link, and the proximity
+> is suggestive: the vendor figure may describe this encoding's frame limit
+> rather than anything about TCP. Offered as a plausible origin, not a
+> demonstrated one. [I]
 
 ## 7. Service Model & Message Types
 
