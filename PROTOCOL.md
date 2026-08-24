@@ -72,6 +72,8 @@
 - [10. Message Body Structures](#10-message-body-structures)
   - [10.1 Encoding convention](#101-encoding-convention)
   - [10.2 Shared sub-types](#102-shared-sub-types)
+  - [10.2.1 Two body idioms not covered above](#1021-two-body-idioms-not-covered-above)
+  - [10.2.2 0x099F UPL_ALL_PORT — reading a panel's communication ports](#1022-0x099f-upl_all_port--reading-a-panels-communication-ports)
   - [10.3 Read / command / COV core](#103-read--command--cov-core)
   - [10.4 The point model (Point_base)](#104-the-point-model-point_base)
   - [10.5 CABINET_DISPLAY — firmware / identity block (0x010C)](#105-cabinet_display--firmware--identity-block-0x010c)
@@ -3398,6 +3400,29 @@ These sub-types appear inside many request/response bodies and are defined once 
 | 5 | last_name | TEXT_ | resume key |
 | 6 | last_suffix | TEXT_ | resume key |
 
+**Wire-confirmed, including the paging.** This sub-type was defined here from the
+type system. Parsing every request body in the corpus against it (after the
+scope preamble where one is present) gives **10,743 bodies that are *exactly* a
+`Name_search`** — the struct consumes the whole body, nothing left over — and
+**480 more where it fits as a prefix** with operation-specific fields following.
+The wire layout is `u16 name_space | TLV name_pattern | TLV suffix_pattern |
+u16 last_name_space | TLV last_name | TLV last_suffix`, with the TLV of §8. [W]
+
+Twenty opcodes are covered. Exactly a `Name_search`: `0x0981 UPL_ALL_POINT`,
+`0x0220 POINT_LOG_VALUE`, `0x0984 UPL_ALL_TREND`, `0x0971`, `0x0961`, `0x0982`,
+`0x0294`, `0x0974`, `0x0263`, `0x0244`. As a prefix: `0x0240 POINT_CMD_VALUE`,
+`0x0241`, `0x4222`, `0x0295`, `0x0983`, `0x02A8`, `0x0291`, `0x0964`, and
+`0x0220`/`0x0294` again — **the same opcode takes both forms**, so a parser must
+key on body length, not assume one shape per opcode. [W]
+
+**The resume keys resume.** "Resume key for paged search" was an interpretation
+of the field names. Across consecutive calls on the same connection, the next
+request's `last_name` appears in the previous reply **6,957 times with zero
+exceptions**. A caller opens a walk with `*` patterns and empty resume keys; each
+reply supplies the keys for the next call; the walk ends when the panel answers
+`0x0003 not_found`. That is the enumeration idiom for the whole `UPL_ALL_*`
+family, and it is now observed rather than inferred. [W]
+
 **`Name_response`** — how a returned object names itself. [S]
 
 | # | Field | Type | Meaning |
@@ -3420,6 +3445,69 @@ These sub-types appear inside many request/response bodies and are defined once 
 **`Point_value`** — the typed value carried in commands and trend samples; its concrete encoding is the per-type block selected by point type (analog = `FLOAT_` BE; digital/enum = small integer state). [S]
 
 **`Cov_mask`** (enum) — the COV condition bitmask: `data=0, failure=1, alarm=2, service=3, priority=4, TCU=5, temp_all=6, proof_on=7`. Selects which change classes a subscription annunciates. [S]
+
+#### 10.2.1 Two body idioms not covered above
+
+Both were found by decoding operations the catalog listed but never described,
+and both change how a parser must be written. [W]
+
+**A `;key=value;` text sub-encoding inside a TLV.** Some records carry
+configuration as ASCII key/value pairs inside an ordinary TLV — semicolon
+separated, terminated by a full stop — rather than as typed fields:
+
+```
+;bd=9600;pa=1;mk=0.
+;mid=<node-name>;ety=110;pdl=24.
+```
+
+A decoder that treats every TLV as an opaque string will not be wrong, but it
+will miss structure that is there to be read.
+
+**A type-tagged optional value.** A single tag byte selects whether a value
+follows and how wide it is:
+
+```
+02 42 70 00 00     tag 0x02 -> a big-endian f32 follows (here 60.0)
+00                 tag 0x00 -> no value
+```
+
+Two otherwise identical requests therefore differ in total length by four bytes.
+**Any field after such a tag is at a variable offset**, so a fixed-offset reader
+of the remainder is wrong whenever the value is absent. Observed in
+`0x0291 TREND_SETUP_DELETE` and `0x02A8 TREND_EVENT_ARC_SETUP`, which share one
+request grammar.
+
+#### 10.2.2 `0x099F UPL_ALL_PORT` — reading a panel's communication ports
+
+A three-byte request returns the panel's entire port inventory, one record per
+call. It is the clearest example of the get-first/get-next walk in the protocol.
+
+```
+request:  00 04 <index>        0xFF = first; thereafter the index last returned
+                               past the end -> dir=0x05, 0x0003 not_found
+```
+
+The reply is a TLV sequence: the node's own name, two single-`.` TLVs, then two
+TLVs in the `;key=value;` form of §10.2.1, then a human-readable description.
+A complete walk of one panel:
+
+| `pa` | Description | `bd` |
+|---:|---|---|
+| 0 | USB Modem port | 9600 |
+| 1 | HMI port | 9600 (115200 on one panel) |
+| 2 | Telnet port | 9600 |
+| 3 | USB Tool port | 9600 |
+| 4 | USB Printer port | 9600 |
+
+`pa` tracks the walk index across all five records, so it is the **port
+address** — not, as the abbreviation invites, parity. `bd` is the line rate and
+`mk` a mask; the second pair carries the node's own id plus two values constant
+across every record and every panel observed.
+
+This is the cheapest way to learn what links a panel actually has, and it is
+directly relevant to §6.8: these panels carry a modem port, an HMI port and a
+tool port, all serial, all enumerable over the network with their line
+parameters. [W]
 
 ### 10.3 Read / command / COV core
 
