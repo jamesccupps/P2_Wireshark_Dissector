@@ -2279,10 +2279,48 @@ the specific and destructive (`SET_NODE_STATE`, `CABINET_ADD`/`REMOVE`,
 `CABINET_COLDSTART`, `CABINET_MEMORY_MODIFY`, the point limit and totaliser
 commands). [F]
 
-Note that `0x0129` and `0x0127` each appear **twice** with consecutive ordinals —
-one wire opcode, two sub-operations. The lookup is a linear scan returning the
-first match, so the opcode alone cannot select the second; what does is
-**[OPEN]**.
+**The translation runs both ways, and the duplicates are a parameter.** A second
+function decodes: it reads a group byte, reads a 16-bit ordinal, and scans the
+same table the other way — matching the ordinal and returning the opcode. Which
+means the ordinal is genuinely deserialised from a link, even though §9.4.1's
+wire tests rule out that link being P2.
+
+The decode path also explains the duplicates. `0x0129 SET_MODEM_STATE` occupies
+ordinals 8 and 9, `0x0127 SET_PBUS_STATE` occupies 10 and 11, and decoding
+ordinal 8 or 10 — the first of each pair — sets a flag byte on the constructed
+operation that decoding 9 or 11 leaves clear. **The duplicate ordinal carries the
+on/off argument**, rather than the body carrying it. The encoder's first-match
+scan always produces the flag-set form; the second form exists for the decoder.
+So a group's ordinals are dense and small because they enumerate *operation
+variants*, not opcodes. [F]
+
+**Add and copy share an ordinal.** Only two groups reuse an ordinal across
+different opcodes, and the pattern is the same each time — `ALARM_MODE_ADD` with
+`ALARM_MODE_COPY`, `ALARM_SETUP` with `ALARM_SETUP_COPY`, `ALARM_MESSAGE_ADD`
+with `ALARM_MESSAGE_COPY`. The encoding cannot tell an add from its copy variant,
+which is consistent with copy being "add, with a source" and distinguished by the
+body — the same conclusion this section reaches from the other direction. [F]
+
+#### A panel-only opcode band: `0x1002`–`0x1005`
+
+One group pairs four otherwise-unknown opcodes with named alarm operations at
+identical ordinals:
+
+| Ordinal | Named | Unnamed |
+|---|---|---|
+| 1 | `0x0520 ALARM_MODE_ADD` / `0x0521 ALARM_MODE_COPY` | `0x1004` |
+| 2 | `0x052B ALARM_MODE_DELETE` | `0x1005` |
+| 7 | `0x0500 ALARM_SETUP` / `0x0506 ALARM_SETUP_COPY` | `0x1002` |
+| 8 | `0x0501 ALARM_REMOVE` | `0x1003` |
+
+These four appear **nowhere else** — not in the supervisor function-code
+enumeration, not in any capture, and the whole `0x10xx` band is empty in both of
+those sources. They are known only from controller firmware, which places them
+as a parallel numbering of the alarm setup/remove and alarm-mode add/delete
+operations. Stated at the confidence the evidence supports: **grouped with**, not
+**identical to** — a shared ordinal shows the decoder treats them as the same
+variant, which is weaker than shared semantics. A tool should not emit them:
+nothing has been observed accepting one. [F]
 
 **Why this matters to an implementer, given it is never transmitted.** §9.1.1
 records the supervisor carrying a second 16-bit selector per operation that
