@@ -2170,19 +2170,22 @@ free.
 #### Which operands live traffic actually uses
 
 Knowing the enumeration exists is half of it; the other half is which values a
-working supervisor sends. Across the corpus **21% of all request frames carry an
-opcode-encoded operand**, and the distribution is lopsided: [W]
+working supervisor sends. Counting **only frames a supervisor originated** —
+research tooling generates enumerations at a rate no supervisor does, and
+including it would skew exactly this measurement — **18.6% of supervisor request
+frames carry an opcode-encoded operand** (18,520 of 99,752), and the
+distribution is lopsided: [W]
 
 | Operand | Frames | Reading |
 |---|---:|---|
-| upload phase = **all** | 5,534 | bulk re-read of a whole object class |
-| upload phase = added | 56 | the live-change tail |
-| upload phase = deleted | 38 | the live-change tail |
-| COV state = enable | 3,291 | subscriptions being created |
-| COV state = disable | 2,914 | and torn down, in near-equal number |
-| point log filter = **value** | 3,095 | the only filter of the thirteen ever seen |
-| point command state = alarm / normal | 2 / 2 | barely exercised |
+| upload phase = **all** | 5,796 | bulk re-read of a whole object class |
+| COV state = enable | 4,614 | subscriptions being created |
+| point log filter = **value** | 4,331 | the only filter of the thirteen ever seen |
+| COV state = disable | 3,697 | subscriptions torn down |
+| upload phase = added | 38 | the live-change tail |
+| upload phase = deleted | 31 | the live-change tail |
 | category node list action = append / remove | 10 / 1 | |
+| point command state = alarm | 2 | barely exercised |
 
 Three things an implementer can take from this. Uploads in practice are
 **whole-class re-reads**, not incremental sync — the added/deleted phases exist
