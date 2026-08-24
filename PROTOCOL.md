@@ -303,7 +303,7 @@ A node's source-identity string — carried in the source-node routing slot and 
 
 P2 has **no multicast presence or discovery beacon that a client can listen for to find nodes.** [W][D] There is no periodic UDP multicast that a node emits to announce itself for discovery. A multicast group exists in the protocol, but only as an **optional, default-disabled peer failure-detection (liveness) feature**: when an operator explicitly enables it, panels join a configured Ethernet-BLN availability multicast group (the vendor-documented default group is `234.5.6.7`, UDP port `8`, up to four group/port pairs per panel) solely to detect peer *failure* — not to advertise presence for discovery. [D] It is off by default and must not be relied upon for node discovery; an implementation MUST NOT implement a "beacon listener" as a discovery mechanism, because there is no P2 discovery beacon to receive. Node discovery is performed by connecting to known addresses on TCP/5033 and exchanging frames, and on mixed sites by the BACnet-side and Ethernet-BLN discovery exchanges of §10. [I]
 
-> **Correction of a common misattribution.** Traffic to the multicast group `233.89.188.1` (UDP/10001), sometimes mistaken for an "APOGEE multicast beacon," is **not** Siemens-sourced. On at least one analyzed network it originates entirely from a Ubiquiti/UniFi gateway (gateway source IP and OUI, 4-byte payload, ~10.5 s cadence); Siemens devices on the same segment emit only BACnet/IP and ARP, never to that group or port. The `233.89.188.1` "beacon" does not exist as a P2 feature. Do not implement or rely on it. [W]
+> **Correction of a common misattribution.** Traffic to the multicast group `233.89.188.1` (UDP/10001), sometimes mistaken for an "APOGEE multicast beacon," is **not** Siemens-sourced. It is the **Ubiquiti device-discovery protocol**, and the captures identify it positively rather than merely excluding Siemens: the source is the gateway (`x.x.x.1`), the payload is the constant four bytes `01 00 00 00`, and each datagram is dual-emitted to `233.89.188.1:10001` *and* the directed broadcast `255.255.255.255:10001`. `233.89.188.1:10001` is Ubiquiti's discovery group and port. Siemens devices on the same segment emit only BACnet/IP and ARP, never to that group or port. The `233.89.188.1` "beacon" does not exist as a P2 feature. Do not implement or rely on it. [W]
 
 #### 2.1.7 Surrounding network services
 
@@ -1285,7 +1285,7 @@ Exactly three values are defined. [W]
 |---|---|---|---|
 | `0x00` | request / unsolicited push | a 2-byte opcode followed by the request body | [W] |
 | `0x01` | success response | a result body (may be empty); **no opcode** | [W] |
-| `0x05` | error response | exactly 2 bytes — a u16 BE error code (§7.2); **no opcode** | [W] |
+| `0x05` | error response | exactly 2 bytes — a u16 BE error code (§7.2); **no opcode**. Validated across the corpus: all **4,083** error responses have a 2-byte body, with no exceptions. | [W] |
 
 Observed corpus distribution: `0x00` ≈ 262,142; `0x01` ≈ 261,466; `0x05` ≈ 7,103. [W]
 
@@ -1650,6 +1650,28 @@ opcode (§6.4).
   *Worked error example.* A `TREND_DATA_DISPLAY` (`0x0295`) request naming a point that has no trend
   log returns `dir == 0x05` with the 2-byte tail `0x0003` ("not found", §7.2.2) — the same
   not-found code returned for any named object that does not exist. [W]
+
+  *The whole error vocabulary the corpus exercises.* Pairing all **4,083** error responses back to
+  their request by sequence gives seven codes and no unknowns — every one is already named in the
+  error table of §7.2.2, which is the first time that table has been checked against traffic rather
+  than against the type system: [W]
+
+  | Code | Name | Count | Chiefly answering |
+  |---|---|---:|---|
+  | `0x0003` | `not_found` | 3,996 | `0x0220`, `0x0271`, `0x0273`, `0x0986` |
+  | `0x00AC` | `not_supported` | 49 | `0x400F`, `0x4133`, `0x4010`, `0x4011` |
+  | `0x0E15` | `physical_point_not_commandable` | 28 | `0x0240` |
+  | `0x0002` | `object_unknown` | 4 | `0x0244`, `0x0564`, `0x0565` |
+  | `0x0E12` | `invalid_point_number` | 3 | `0x4225`, `0x4224` |
+  | `0x0E11` | `already_exists` | 2 | `0x0204` |
+  | `0x0009` | `already_exists_v2` | 1 | `0x0540` |
+
+  98% of all errors are `not_found`. Three operations in the corpus **never** succeed —
+  `0x0272 COV_DELETE_STUB` (0 ok / 46 err), `0x400F TEAM_DESC_UPLOAD` (0/12) and
+  `0x5354 HOA_MAP_LOOK` (0/6) — and `0x0220 POINT_LOG_VALUE` fails more often than it succeeds
+  (1,910 ok / 2,415 err), which reflects how a supervisor walks point space rather than anything
+  about the opcode. An implementer sizing retry logic should not read a high error rate on
+  `0x0220` as a fault. [W]
 
 **Reliability and acknowledgment.** P2 runs over TCP and relies on TCP for in-order delivery and
 retransmission; there is **no application-layer retransmit** and **no separate app-layer ACK frame**.
