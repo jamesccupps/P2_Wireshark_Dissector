@@ -74,6 +74,7 @@
   - [10.2 Shared sub-types](#102-shared-sub-types)
   - [10.2.1 Two body idioms not covered above](#1021-two-body-idioms-not-covered-above)
   - [10.2.2 0x099F UPL_ALL_PORT — reading a panel's communication ports](#1022-0x099f-upl_all_port--reading-a-panels-communication-ports)
+  - [10.2.3 Range-and-resume: how every enumeration is paged](#1023-range-and-resume-how-every-enumeration-is-paged)
   - [10.3 Read / command / COV core](#103-read--command--cov-core)
   - [10.4 The point model (Point_base)](#104-the-point-model-point_base)
   - [10.5 CABINET_DISPLAY — firmware / identity block (0x010C)](#105-cabinet_display--firmware--identity-block-0x010c)
@@ -3551,12 +3552,19 @@ request grammar.
 #### 10.2.2 `0x099F UPL_ALL_PORT` — reading a panel's communication ports
 
 A three-byte request returns the panel's entire port inventory, one record per
-call. It is the clearest example of the get-first/get-next walk in the protocol.
+call. It is the clearest example of the paging convention of §10.2.3.
 
 ```
-request:  00 04 <index>        0xFF = first; thereafter the index last returned
-                               past the end -> dir=0x05, 0x0003 not_found
+request:  <begin> <end> <last>   begin/end bound the port range; last is the
+                                 resume key -- 0xFF (outside the range) starts
+00 04 FF -> 00 04 00 -> 00 04 01 the walk, thereafter the port just returned
+-> 00 04 02 -> 00 04 03          past the end -> dir=0x05, 0x0003 not_found
+-> 00 04 04
 ```
+
+An earlier version of this section read the first two bytes as a fixed prefix
+and the third as an index. They are the requested range: **the caller chooses
+which ports to enumerate**, and every observed walk asked for `0`–`4`. [W]
 
 The reply is a TLV sequence: the node's own name, two single-`.` TLVs, then two
 TLVs in the `;key=value;` form of §10.2.1, then a human-readable description.
@@ -3579,6 +3587,48 @@ This is the cheapest way to learn what links a panel actually has, and it is
 directly relevant to §6.8: these panels carry a modem port, an HMI port and a
 tool port, all serial, all enumerable over the network with their line
 parameters. [W]
+
+#### 10.2.3 Range-and-resume: how every enumeration is paged
+
+Every bulk read in P2 is a **single-record walk driven by a resume key the
+caller echoes back**, and the request is always the same two parts: a selector
+saying what to enumerate, and the key of the last record received. There is no
+frame-level continuation flag and no server-side cursor — §12 makes the same
+point for `UPL_ALL_*`; this is the request-side shape it takes. [W][S]
+
+The selector comes in four encodings, and which one an operation uses is
+predictable from what its objects are named by:
+
+| Selector | Objects | Example operations |
+|---|---|---|
+| **name + suffix** (`name_space`, name pattern, suffix pattern) | things with a point-style two-part name | upload point, alarm setup, alarm mode, trend |
+| **name only** (`name_space`, name pattern) | things with a single name | upload PPCL, TEC, EQS zone/mode, SSTO, UC, LON, MS/TP device, program |
+| **numeric range** (`begin`, `end`) | things addressed by number | ports (`u8`), partners (`u16`), alarm messages (`u16`) |
+| **object id** (`u32`) | BACnet-side objects | the BACnet object upload |
+
+The resume key follows the selector and its width tracks the object: nothing at
+all where the search pattern itself carries the resume name, one byte for alarm
+mode, two for PPCL, and the same width as the range for numeric selectors. Two
+conventions are worth stating because a client gets them wrong on the first
+try:
+
+**A resume value outside the requested range means "start at the beginning".**
+Ports use `0xFF` against a `0`–`4` range, partners `0xFFFF` against `0`–`16`,
+alarm messages `0` against `1`–`250`. It is not a fixed sentinel — it is any
+value the range cannot contain. [W]
+
+**Paging can happen inside an object, not only across objects.** The PPCL upload
+resumes on a **line number** (`u16`): the walk enumerates program text one line
+at a time, and the resume key advances within the program before moving to the
+next one. Its responses carry the program name, a mode field, and the line's
+text — PPCL source travels in clear. [W]
+
+Measured across the corpus: of the upload requests whose object class uses a
+name selector, **6,998 are exactly the search struct** with no resume tail and
+**2,517 carry the two-byte PPCL line key**; the alarm-mode walk's one-byte key
+appears exactly where the struct table says it should. A handful of families
+(TEC, the EQS schedule set, trend delete) carry additional keys this document
+does not yet describe. [W]
 
 ### 10.3 Read / command / COV core
 
