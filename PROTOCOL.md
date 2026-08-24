@@ -711,7 +711,7 @@ A panel may alternatively host a BACnet MS/TP field bus in place of P1 (`Fln_typ
 
 > **[OPEN, PARTLY ANSWERED] Serial-BLN P2 link framing bytes.** Only the line parameters (8/N/1, baud tiers, trunk numbering) were established for the dedicated serial BLN. **The message layer above the framing is now recovered from controller firmware — see §6.8** — giving the address byte and its position, a compact operation encoding, a 253-byte cap, and the forwarding rule for a message addressed elsewhere. What is still unobserved is the **link** layer beneath it: start/sync delimiting, CRC/checksum, and the medium's segmentation, all of which a lower layer has already stripped before the code in §6.8 sees the message. An AEM Channel-1 capture (TCP/3001) would expose those bytes, since the AEM tunnels the serial stream verbatim.
 
-> **[OPEN] FLN/P1 frame bytes.** The P1 fieldbus discovery transaction (P1WhoAreYou), addressing (drop + application number), physical layer (RS-485 2-wire), and baud are documented, but the P1 frame byte layout itself is unobserved. The on-wire P1 frame structure, the WhoAreYou request/response bytes, and the per-poll cadence/retry behavior require a P1-bus capture or a route-through capture from the BLN. **The route-through opcode is now named: `0x0313 AP2_P1_ROUTE`, with `0x0314` alongside it** (§9.1.1). Fifteen distinct field-device operations tunnel through `0x0313`, so a capture containing it carries P1 payloads inside a P2 frame — which is the cheapest route to these bytes, and needs no access to the RS-485 segment itself. Neither opcode occurs in any capture in the present corpus.
+> **[OPEN] FLN/P1 frame bytes.** The P1 fieldbus discovery transaction (P1WhoAreYou), addressing (drop + application number), physical layer (RS-485 2-wire), and baud are documented, but the P1 frame byte layout itself is unobserved. The on-wire P1 frame structure, the WhoAreYou request/response bytes, and the per-poll cadence/retry behavior require a P1-bus capture or a route-through capture from the BLN. **The route-through opcode is now named: `0x0313 AP2_P1_ROUTE`, with `0x0314` alongside it** (§9.1.1). Sixteen distinct field-device operations tunnel through `0x0313`, so a capture containing it carries P1 payloads inside a P2 frame — which is the cheapest route to these bytes, and needs no access to the RS-485 segment itself. Neither opcode occurs in any capture in the present corpus.
 
 > **[OPEN] P2 segmentation thresholds and reassembly rules.** The ~256-byte figure from vendor connection-test material is a *connection-test ping* size, **not** a maximum P2 data-packet cap — single P2 frames are observed with `total_len` up to ≈1,587 bytes (a ~1,530-byte body of packed records plus header+slots) in one response, so a single frame's `total_len` is bounded only by the u32 length field (§6.7) [W]. The P2 application layer still carries an explicit more-follows segmentation flag and segment-mapping at the ASDU layer for results large enough to exceed an implementation ceiling [S], but the exact segmentation threshold and the more-follows flag offset/reassembly rules are not pinned on the wire. Needs a multi-segment upload capture for confirmation.
 
@@ -2106,64 +2106,108 @@ document previously treated as anomalies. [S]
 ```
 
 The command object exposes both lower tiers side by side —
-`GetAP2FunctionCode` / `SetAP2FunctionCode` alongside `GetCPIFunctionCode`,
-with a `BLN2CPI` translation — so the two codes are genuinely distinct fields,
-not two names for one value. [S]
+`GetAP2FunctionCode` / `SetAP2FunctionCode` alongside `GetCPIFunctionCode` — so
+the two codes are genuinely distinct fields, not two names for one value. They
+are reachable from either end: one factory builds a command from a CPI code,
+another (`BLN2CPI`) builds one by parsing a received wire frame and dispatching
+on the AP2 function code inside it. [S]
 
-Scale: **353 CPI codes carry a recovered operation name**, and **339 CPI→AP2
-mappings** resolve onto **261 distinct wire opcodes**. The names are plainly
+Scale: **353 CPI codes carry a recovered operation name**, **356** reach a
+command class, and **347** of those have a request encoder that resolves onto
+**399 distinct wire opcodes**. The names are plainly
 descriptive (`__RpcRegisterCOVxx`, `__RpcCancelCOVxx`, `__RpcColdStartCabinet`,
 `__RpcMakeNodeOffline`, `__RpcBACnetWhoIs`, `__RpcBPing`), which makes the CPI
 tier the most legible statement of *what operations exist* that this protocol
 has. [S]
 
-#### The mapping is not one-to-one, and eight opcodes prove it
+#### The opcode carries an operand, which is why the catalog is so large
 
-For 253 of the 261 wire opcodes the mapping is injective and the wire opcode
-does identify the operation. **Eight do not**, and the exceptions are
-structural rather than incidental:
+The obvious model — one operation, one wire opcode — is wrong, and the way it is
+wrong is useful. **The wire opcode is selected while the request is being
+encoded, not when the command is created.** The supervisor builds the body
+first, and only then reads the function code out of the command object and
+writes it into the frame. An operation whose parameter can take a few values
+therefore emits a *different opcode per value*, and that parameter never appears
+in the body at all. [S]
 
-| Wire opcode | CPI codes mapping to it | What it is |
-|---|---:|---|
-| `0x0313` `AP2_P1_ROUTE` | **15** | a P1 fieldbus tunnel |
-| `0x0034` | 3 | |
-| `0x0220`, `0x005B`, `0x0275`, `0x0314`, `0x0547`, `0x0548` | 2 each | |
+The relation, measured across the supervisor's whole operation catalog: [S]
 
-`0x0313` is the clear case and it explains itself: the fifteen operations that
-share it are UC upload, UC point/PPCL/TOD definition and readback, TEC point
-and report info, a P1 LAN line test, and a trace-bit clear — every one of them
-an operation *against a field device rather than the panel*. The wire opcode
-does not name the operation because its job is to say **"route this onto P1"**.
-The operation is inside the payload. `0x0314` pairs with it and includes an
-explicit pass-through. [S]
+| | |
+|---|---:|
+| operations that emit exactly one opcode | **299** |
+| two | 26 |
+| three | 20 |
+| four | 1 |
+| thirteen | 1 |
+| opcodes emitted by exactly one operation | **385 of 399** |
+| by two or three | 13 |
+| by sixteen | 1 — `0x0313`, the P1 tunnel |
 
-**For a dissector this is the important consequence:** labelling a frame from
-its AP2 opcode alone is correct for 253 opcodes and wrong for `0x0313` in
-particular, where it collapses fifteen distinct operations into one name. Such
-frames must be decoded a level deeper or labelled as tunnelled.
+So for the large majority the opcode does identify the operation. The
+exceptions divide into two kinds, and both are worth knowing.
 
-> **Reliability caveat, and it matters.** The *structure* above — three tiers,
-> the counts, and `0x0313` as a tunnel — rests on agreement between several
-> independent facts: fifteen CPI names that form one semantically coherent
-> family, an opcode independently named `AP2_P1_ROUTE`, and a command object
-> that exposes both code spaces. **Individual CPI→opcode assignments are a
-> different matter and should not be treated as authoritative.** Six were spot
-> checked against captured request bodies and at least three are plainly wrong:
-> one operation whose body carries a point name and descriptor was assigned a
-> holiday-schedule name, one whose body is nothing but the scope preamble with
-> a two-byte reply was assigned a schedule read, and a wildcard query was
-> assigned a write. Where a derived name disagrees with what a panel was
-> observed to do, **the observed behaviour wins** — the naming layer is a lead,
-> not evidence. [S]
+**Kind one: the opcode encodes a parameter.** These families are enumerations
+of one operation, not lists of separate operations:
+
+| Parameter in the opcode | Operation | Opcodes |
+|---|---|---|
+| **filter**, 13 values | point log | `0x0220`–`0x022C`: `POINT_LOG_` `VALUE`, `ALARM`, `CTRL_STAT`, `FAILED`, `TOTAL`, `PRIORITY`, `DISABLED`, `TYPE`, `TROUBLE`, `ANY`, `ODSB`, `PDSB`, `ALARM_CMD` |
+| **state**, 4 values | point command | `0x0244` `CMD_ALARM`, `0x0245` `CMD_NORMAL`, `0x024C` `CMD_INTO_TROUBLE`, `0x024D` `CMD_OUTOF_TROUBLE` |
+| **bus number** | set FLN baud rate | `0x0123` / `0x0124` / `0x0125` (FLN 1/2/3) |
+| **port number** | set MMI baud rate | `0x0120` / `0x0121` |
+| **upload phase** | upload PPCL, program, EQS zone, trend, … | `UPL_DEL_x` → `UPL_ADDED_x` → `UPL_ALL_x` |
+| **boolean** | enable / disable anything | `TELNET_ENABLE`/`DISABLE`, `PPCL_ENABLE_LINES`/`DISABLE_LINES`, `EQS_ZONE_ENABLE`/`DISABLE`, `POINT_CMD_ENABLE`/`DISABLE` |
+
+This is the practical reading of §9.5's catalog: whole runs of consecutive
+opcodes are one operation with a dial on it. `0x0220`, one of the busiest
+opcodes in any capture, is not "the read opcode" — it is **point log with the
+filter set to value**, and `0x0221`–`0x022C` are the same operation asking for
+points in alarm, failed points, disabled points, points of a given type, and so
+on. A decoder that treats the run as an enumeration recovers the operand for
+free.
+
+**Kind two: a tunnel.** `0x0313 AP2_P1_ROUTE` is emitted by **16** distinct
+operations — a P1 pass-through, TEC point and revision reads, and the whole
+unitary-controller upload/define set including its time-set and trace-clear.
+Sixteen operations, sixteen command classes, **one shared encoder**: the wire
+opcode does not name the operation because its job is to say *route this onto
+P1*. The operation is inside the payload. `0x0314 AP2_P1_LINETEST` pairs with it
+and is shared by two. `0x0136 AP2_P2_ROUTE` is the same idea for the panel-local
+serial link of §6.8. [S]
+
+**For a dissector:** labelling a frame from its AP2 opcode alone is right for
+the great majority, wrong for `0x0313` in particular — where it collapses
+sixteen operations into one name — and *incomplete* for the enumerated families,
+where the opcode also carries a parameter the label should mention.
+
+> **How much of this to trust.** The structure above is read out of the
+> supervisor's own dispatch and encoders: each operation reaches a command class,
+> and that class's request encoder writes the opcodes listed for it. The value,
+> the class and the opcode all come from one path, so the pairing cannot drift —
+> an earlier version of this section relied on a mapping that paired two
+> separately collected lists and was displaced by one entry, which is why it
+> reported eight many-to-one opcodes and fifteen operations on `0x0313`.
+> Cross-checks: **86 of the 125 wire-attested opcodes** in the corpus are
+> accounted for here, and when the operation names are deliberately shifted by
+> one entry the agreement between operation names and opcode names collapses
+> eightfold. Where a derived name still disagrees with what a panel was observed
+> to do, **the observed behaviour wins**. [S]
 
 #### The second selector exists - and never reaches the wire
 
 The command object carries a **second 16-bit selector** beside the opcode: the
-AP2 function code sits at object offset `+0x04` and this value at `+0x06`. It is
-populated for **134 operations**, and it is tempting to call it a sub-opcode and
-go looking for it in the body.
+AP2 function code sits at object offset `+0x04` and this value at `+0x06`, and it
+is tempting to call it a sub-opcode and go looking for it in the body.
 
-**It is not in the body.** Nine operations with a known selector value were
+**It is the CPI function code** — the middle tier of the model above. The
+supervisor's accessors settle it: one reads the halfword at `+0x04` and is named
+for the AP2 function code, the next reads the halfword at `+0x06` and is named
+for the CPI function code. The two identifiers of a command sit four bytes apart
+in the same object, which is also why a command can be built either from a CPI
+code or by parsing a wire frame — the supervisor has a factory for each
+direction. [S]
+
+**And it is not in the body.** Nine operations with a known selector value were
 checked against their captured request bodies - `0x0271` (0x0010), `0x0273`
 (0x0011), `0x0272` (0x0012), `0x0241` (0x0030), `0x0294` (0x0704), `0x0295`
 (0x0702) among them. In **none** of them does the value appear anywhere in the
