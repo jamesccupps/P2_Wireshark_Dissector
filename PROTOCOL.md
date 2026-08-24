@@ -3904,6 +3904,45 @@ PPCL statement keywords (the `PPCL_statement_type` enum, 71 members: WHOPLOOP/WH
 
 **Alarm representative — `AP2_POINT_LOG_ALARM` response (0x0221)** reuses the `name_response` + `point : All_points` + `lenum_address` + `point_extension2` shape; the alarm configuration itself is the `Alarm_object` CHOICE (tagged by `Alarm_object_type`: no_alarming / std_digital / std_single_analog / std_analog / enhanced_* / bacnet_alarm_*), each alternative carrying `Alarm_level[]` records (`offset:FLOAT_, alarm_priority, category:u8, msg_number:u16`). [S]
 
+**`AP2_UPL_ALL_ALARM_MODE` response (0x0983) — an enhanced-alarm definition, on
+the wire.** The alarm-mode upload returns one complete definition per record, and
+its tail is self-validating: the last field is a count and exactly `count × 8`
+bytes follow. [W]
+
+```
+u16                 name space
+TLV                 point name
+TLV                 point suffix
+TLV                 mode point name        (enhanced alarming requires a mode point)
+TLV                 mode point suffix
+TLV                 engineering units      "PSI", "DEG F", or empty
+5 B                 a flag plus four destination category bytes
+8 B * 3             three DATE_TIME stamps (§8.3.4); two are equal in most records
+...                 level_delay / mode_delay (u16 each), differential (f32), flags
+f32                 set point
+u16                 level count
+count * 8 B         Alarm_level: f32 offset | u8 priority | u8 category | u16 msg
+```
+
+`Alarm_level` on the wire is byte-for-byte the catalog structure above, and the
+level count never exceeds **six** for an analog point — which is the documented
+maximum. (Enumerated points allow up to 64 levels, so a parser must read the
+count rather than assume six.) The `f32` before the count is the **set point**;
+each level's `offset` is relative to it, so a definition reads as *set point
+64 °F, levels at +10 / +9 / +8 with priorities 6 / 5 / 3* — the alarm escalating
+as the deviation grows, each level able to carry its own message number and
+routing category. Single-level definitions in the corpus use **priority 3**,
+the "standard alarming" default. [W][D]
+
+Two decoding notes. The three timestamps are ordinary `DATE_TIME` (`year-1900,
+month, day, hour, minute, second`, plus two bytes), and validating them as
+calendar values is a good sanity check on a parser's alignment — they span years
+in a plausible edit history rather than clustering. And the block between the
+timestamps and the set point carries the documented `level_delay`, `mode_delay`
+and `differential` fields, but **its byte alignment shifts between records**, so
+anchor on the count-validated tail and work backwards rather than assuming a
+fixed offset. [W]
+
 ### 10.9 The full structure set is enumerable
 
 The ~30 structures above cover the read/command/COV core, the firmware/identity block, the session block, and one representative of each remaining major family (upload, PPCL, trend, TEC, alarm, node-management). The remaining ~1,110 structures follow the same conventions — ordered typed fields, the shared sub-types of §10.2, counted arrays, and CHOICE unions — and each maps one-to-one to a `*_Request` / `*_Response` pair for an opcode in the §9 catalog. For any opcode not detailed here, its body is the like-named ASDU structure (e.g. `AP2_<name>_Request` / `AP2_<name>_Response`), readable from the structure library with the §10.1 type mapping. [S]
