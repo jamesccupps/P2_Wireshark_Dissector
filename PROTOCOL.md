@@ -60,9 +60,11 @@
   - [8.5 ASDU field convention [S]](#85-asdu-field-convention-s)
 - [9. Function-Code (Opcode) Catalog](#9-function-code-opcode-catalog)
   - [9.1 The AP2 function code](#91-the-ap2-function-code)
+  - [9.1.1 The wire opcode is the bottom of a three-tier model](#911-the-wire-opcode-is-the-bottom-of-a-three-tier-model)
   - [9.2 Naming, families, and value layout](#92-naming-families-and-value-layout)
   - [9.3 Destructive and sensitive operations](#93-destructive-and-sensitive-operations)
   - [9.4 Family overview](#94-family-overview)
+  - [9.4.1 Which of these does a panel actually implement?](#941-which-of-these-does-a-panel-actually-implement)
   - [9.5 The catalog](#95-the-catalog)
   - [9.6 The session/keepalive opcode 0x4640 (EBLN_PING)](#96-the-sessionkeepalive-opcode-0x4640-ebln_ping)
   - [9.7 Wire behavior: message classes, directions, error tails](#97-wire-behavior-message-classes-directions-error-tails)
@@ -2202,6 +2204,78 @@ A subset of opcodes mutate panel firmware state, node-table membership, point va
 - **IO** (0x5300/0x5303/0x5305) — global and local I/O-module display (incl. MEC expansion bus).
 - **FLASH** (0x5330–0x5332) — flash-database backup (read), restore (overwrite), clear (erase).
 - **HOA** (0x5351/0x5354/0x5355) — Hand-Off-Auto map modify/look/add (physical HOA-switch mapping).
+
+### 9.4.1 Which of these does a panel actually implement?
+
+The catalog that follows joins a supervisor-side enumeration with a wire census.
+Both are one-sided. The enumeration says what a supervisor knows how to *ask*;
+the census says what one particular supervisor happened to ask during the
+captures. Neither answers the question an implementer actually has, which is
+whether a controller will do anything with a given function code.
+
+There is a third source, and it sits on the other end of the wire. Controller
+firmware images carry a **dispatch table pairing a one-byte handler id with a
+16-bit function code**, laid out as 4-byte records:
+
+```
+  00 c1 02 20     handler 0xc1  <-  0x0220
+  00 c1 02 29     handler 0xc1  <-  0x0229
+  00 a1 02 73     handler 0xa1  <-  0x0273
+  00 b4 05 47     handler 0xb4  <-  0x0547
+```
+
+The same table is present in images built for **two different instruction sets**
+— 68000-family and PowerPC — at the same size and with the same contents. That
+is what identifies it as protocol data rather than compiled code. [F]
+
+Across 42 images spanning firmware revisions 1.3 to 2.6 and the MEC, MBC, FLN,
+SV5, PPC, LON and MECF product lines, **164 function codes appear both in a
+panel's dispatch table (in at least 28 of the 42 images) and in the supervisor
+enumeration**. For sets of that size drawn from a 16-bit space, chance overlap
+would be about 2.5. Those 164 are the subset of the catalog that is confirmed
+implemented at both ends. [F][S]
+
+**A caution on reading the tables directly.** The blob holds several adjacent
+sub-tables that do not share a 4-byte phase, and its tail reverses the field
+order to `(code, handler)`. An extractor that assumes one layout will mis-split
+a minority of records. This is why the count above is stated as the intersection
+with an independent source rather than as a raw table read: 234 further codes
+appear in the firmware tables alone, and those are candidates, not findings.
+
+#### The supervisor vocabulary has real gaps, and the firmware shows them
+
+Seven function codes observed on the wire are missing from the supervisor
+enumeration. **Six of the seven are in the panel dispatch tables:**
+
+| Code | In panel firmware |
+|---|---|
+| `0x0203`, `0x0204`, `0x0260`, `0x0274`, `0x0508` | 30 of 42 images |
+| `0x4500` | 28 of 42 images |
+| `0x5038` | not present |
+
+`0x0274` is the COV value push — the single highest-volume operation in any
+capture. Its absence from the enumeration is by itself enough to show that the
+enumeration is not a specification of the protocol. This is the concrete form of
+the rule stated in §9.5: **classify an operation by what the panel did with it,
+never by its absence from a derived name list.** [W][F]
+
+#### The high bands are a later protocol generation
+
+Coverage by the firmware tables splits sharply by the function code's high byte:
+
+| High byte | Present in these images |
+|---|---|
+| `0x00`–`0x09`, `0x41`, `0x42`, `0x45` | yes, near-completely |
+| `0x40`, `0x44`, `0x46`, `0x48`, `0x49`, `0x4B`, `0x50`, `0x53`, `0xF0` | **no, entirely absent** |
+
+That is not a gap in the extraction. These images are revision 2.6 and earlier;
+the absent bands are present in the newer supervisor stack and are answered by
+current panels on the wire. **The `0x46xx`, `0x48xx` and `0x50xx` families are a
+later addition to the protocol.** [F][W]
+
+For the unnamed `0x4646`–`0x4650` block this settles one question and reframes
+another: these images cannot name it, and its absence from them is evidence of
+the block's age rather than of its non-existence.
 
 ### 9.5 The catalog
 
@@ -5356,6 +5430,7 @@ reader can weigh provenance. The tags are:
 |---|---|
 | **[W]** | Wire-verified — observed directly in a packet capture or the opcode census. Ground truth for wire-format claims. |
 | **[S]** | Struct/metadata-derived — from the AP2 function-code enumeration or the ASDU structure definitions. Definitional truth for field names, types, and order, but not by itself proof of the on-wire byte offset. |
+| **[F]** | Firmware-attested — the value or behavior is carried in the controller firmware itself, in a panel image rather than in a supervisor-side binary. Stronger than [S] for the question *does a panel actually implement this*, because [S] describes only what a supervisor knows how to ask for. |
 | **[D]** | Doc-sourced — a behavioral, topology, or semantic statement from vendor documentation/help. Never presented as a byte-level wire fact. |
 | **[I]** | Inferred / synthesis — reasoned from [W], [S], and/or [D] above. |
 | **[OPEN]** | Not yet confirmed; needs a capture or test. Collected in Appendix D. |

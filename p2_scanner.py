@@ -1052,6 +1052,19 @@ EBLN_STALL_RISK = frozenset({0x4636, 0x4647})
 
 REFUSED_OPCODES = EBLN_WRITES | EBLN_STALL_RISK
 
+
+def op_label(opcode):
+    """`0x0274 AP2_COV_ANNUNCIATE`, or bare hex where no mnemonic is known.
+
+    The unnamed ones are not an oversight: they are panel-side operations the
+    supervisor's own function-code vocabulary does not carry (the 0x464x and
+    0x486x blocks, for instance), so there is no vendor name to print.
+    """
+    if opcode is None:
+        return '?'
+    name = p2_data.opcode_name(opcode)
+    return "0x%04X %s" % (opcode, name) if name else "0x%04X" % opcode
+
 # The EBLN replication diagnostic block. Every value here answered success with
 # a structured body when probed, and all but 0x464C are unidentified: the panel
 # firmware names six replication reports, two of which are "Add Data Store" and
@@ -1078,16 +1091,16 @@ def check_emit_allowed(opcode: int) -> None:
         return
     if opcode in EBLN_STALL_RISK:
         raise PermissionError(
-            f"0x{opcode:04X} is a denial-of-service risk (observed ~18 s panel "
+            f"{op_label(opcode)} is a denial-of-service risk (observed ~18 s panel "
             f"outage) and is never emitted by this tool.")
     if opcode in EBLN_WRITES:
         raise PermissionError(
-            f"0x{opcode:04X} is an EBLN write/configuration operation and is "
+            f"{op_label(opcode)} is an EBLN write/configuration operation and is "
             f"never emitted by this tool. Use the panel console if you intend "
             f"to change configuration.")
     if opcode in EBLN_DIAGNOSTIC_RANGE and opcode not in EBLN_READS:
         raise PermissionError(
-            f"0x{opcode:04X} is in the EBLN replication diagnostic block and "
+            f"{op_label(opcode)} is in the EBLN replication diagnostic block and "
             f"has not been identified. Two of the six reports this family "
             f"produces are 'Add Data Store' and 'Delete Data Store', and the "
             f"opcode-to-report mapping is unknown, so this tool will not send "
@@ -7074,6 +7087,10 @@ def listen_for_push_notifications(port: int = 5033, duration: Optional[int] = No
                                 op_bytes = body[:2]
                                 op = struct.unpack('>H', op_bytes)[0] if len(op_bytes) == 2 else None
                                 event['opcode'] = f'0x{op:04X}' if op is not None else '?'
+                                if op is not None:
+                                    nm = p2_data.opcode_name(op)
+                                    if nm:
+                                        event['opcode_name'] = nm
                                 if op_bytes == P2Message.MARKER_VALUE_PUSH:
                                     parsed = parse_cov_notification(body)
                                     if parsed:
