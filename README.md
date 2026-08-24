@@ -13,44 +13,25 @@ equipment. This repository contains three things:
 The dissector is built and validated from wire captures; the opcode names are the
 protocol's AP2 function-code vocabulary.
 
-> **v2.6 — accuracy pass.** The `0x29` / `0x2A` carrier labels are corrected: they were
-> named "peer maintenance" and "peer COV-subscribe," and the corpus establishes neither
-> function. They are now **session carrier** and **peer-session carrier (panel↔panel)**,
-> matching PROTOCOL.md §6.2; both carry the `EBLN_PING` (`0x4640`) identity exchange.
-> Error code `0x0E12` is named `record_state_rejected (unconfirmed)` — observed a handful
-> of times, adjacent to already-exists, precise meaning not pinned — and opcode `0x0030`
-> `AP2_SET_GLOBAL_DATA` is added. **Bug fix:** the error-tail read guarded on frame
-> length rather than on the post-slot offset, so a truncated `dir==0x05` frame could
-> render two header bytes as a phantom error code (observed: a 13-byte frame reporting
-> "ERROR 0x0105"). It now guards on the slot offset.
->
-> **v2.5 — response correlation + more body decoders.** Responses carry no opcode on the
-> wire (only requests do) but echo their request's sequence; the dissector now keeps a
-> per-TCP-stream `{sequence → opcode}` map and **labels and decodes responses** — the
-> `CABINET_DISPLAY` firmware banner (revision / platform / build date / node-site-BLN), the
-> value responses (point name + engineering-units + value), and the identity exchange. New
-> request decoders too: the addressing family — point read/command, COV enable/disable,
-> trend, bulk upload (scope tag + name + suffix + commanded value) — and `ALARM_PRINT`
-> (`0x0508`) with its value block and three 8-byte event timestamps. Validated with zero
-> Lua errors across a ~530k-frame corpus.
->
-> **v2.2 — message-class model corrected from fleet captures.** The message classes are
-> legacy/modern **pairs chosen by a panel's firmware generation, not by direction**:
-> data `0x33` (legacy) / `0x34` (modern); second channel `0x2E` / `0x2F` (identity +
-> DB-change/replication records + alarm prints); peer carriers `0x29` / `0x2A`
-> (panel↔panel, visible only from a panel-side mirror). Fingerprint a panel with
-> `CABINET_DISPLAY` (`0x010C`) and pick the dialect from its firmware. Also: COV
-> condition byte0/byte1 (priority/control-status) wire-confirmed; sequence is
-> per-(peer,channel) with gaps (not one global counter); `UPL_ALL_*` continuation is
-> application-layer cursoring, not a frame more-follows bit; event timestamps are 8 bytes
-> (`yr-1900, mo, day, day-of-week, hr, min, sec, cs`).
->
-> **v2.1 — wire-verified rebuild.** Opcode names corrected to the full
-> set; the framing model fixed (the opcode is read only on request frames, at its true
-> variable offset); accurate body decoders for the common operations; per-opcode
-> *expected-body schema* notes; and the old UDP/10001 "multicast presence beacon"
-> decoder **removed** (it was a misattribution of unrelated gateway traffic — see
-> *Correctness notes*).
+> **v2.7 — the operand, the paging model, and four decoded records.**
+> Many opcodes turn out to be **one operation with a parameter encoded in the
+> opcode** rather than in the body, so a run of consecutive codes is an
+> enumeration: `0x0220`–`0x022C` is *point log* with thirteen filters,
+> `UPL_DEL_x`/`UPL_ADDED_x`/`UPL_ALL_x` is one upload with three phases. The
+> dissector now names the operand (`p2.operand`) — 55 families, 146 opcodes,
+> about a fifth of the request frames in a real capture — and the scanner prints
+> it too. Bulk reads are documented as one **range-and-resume** idiom with four
+> selectors, and a resume value outside the requested range means "start at the
+> beginning". Four record types are decoded and dissected: the enhanced-alarm
+> definition (mode point, set point, and the alarm-level table) and the three
+> equipment-scheduling records (zone, per-mode command table, and the mode
+> schedule with its effective dates and start time). Dates carry a weekday byte
+> and the dissector **checks it against the date**, reporting a mismatch instead
+> of hiding it. `PROTOCOL.md` had a full accuracy audit: the §9.5 catalog is now
+> generated from the same data the tools ship (names, wire tags and counts agree
+> row for row), every corpus figure is reproducible from one stated census, and
+> the table of contents is complete. See [CHANGELOG.md](CHANGELOG.md) for
+> earlier releases.
 
 ## What it does
 
@@ -127,8 +108,9 @@ port it arrived on.
   DB-change/replication records + alarm prints), all carrying the `EBLN_PING 0x4640`
   identity exchange; and a data band, `0x33` (legacy) / `0x34` (modern). The pairs are
   chosen by a panel's firmware generation, not by direction.
-- **Opcodes** — 630 AP2 function codes are named, matching the `PROTOCOL.md` §9.5
-  catalog one-for-one. The common operations are byte-decoded; the rest show their name +
+- **Opcodes** — 638 AP2 function codes are named (the 630-value vendor enum plus
+  eight panel-side codes), matching the `PROTOCOL.md` §9.5 catalog one-for-one —
+  the catalog is generated from the same table the tools ship, so they cannot drift. The common operations are byte-decoded; the rest show their name +
   expected-body schema + a generic body walk. An opcode outside the catalog renders as
   `unknown_0x….`
 - **Errors** — all seven wire-observed codes from `PROTOCOL.md` §7.2.2: `0x0003`
