@@ -298,6 +298,15 @@ Some installations run a supervisor that **also** listens on TCP/5034 as a secon
 
 The decisive evidence that 5034 is not a protocol feature: a supervisor's identity string commonly carries a `|5034` suffix (e.g. `DCC-SVR|5034`), and that exact suffixed identity appears in thousands of frames captured on a **5033-only** connection, while the literal text `5033` appears in zero frames anywhere. The supervisor stamps its `HOST|PORT` identity into the routing slot regardless of which TCP port carries the frame — so the `|PORT` suffix is part of the *identity string*, not a live port indicator (§2.1.5, §6.4). [W] A conformant implementation derives all frame semantics from the frame's direction and contents, never from the TCP port that carried it, and defaults to 5033 only (exposing any other port as explicit configuration). [I]
 
+**And the two listeners on a supervisor need not behave alike.** At one observed
+supervisor, panel-initiated sessions succeed on `5034` — a panel connects, pushes
+COV reports and point commands, and every one is answered — while the same
+supervisor's `5033` accepts the connection, reads the request and then closes
+with no application reply at all: 984 such connections in 25 minutes, nine
+panels retrying every 14 seconds, zero payload bytes returned (§5.1). A client
+MUST NOT infer from an open port that the peer will serve it, and MUST treat a
+silently closed session as a policy outcome rather than a fault. [W]
+
 #### 2.1.3 The serial BLN (legacy datalink, context only)
 
 Before Ethernet, the BLN was a **terminated RS-485 multidrop trunk** (8 data bits, no parity, 1 stop bit), with up to a few trunks (trunk numbers 0–3) and a firmware-tiered baud rate (e.g. 38400 baud where all firmware on the trunk is recent enough, otherwise 19200; modem links lower). [D] The serial BLN implements the same peer model and the same data model as the Ethernet BLN, but with the serial-era mechanics (token, CRC, packed addressing) noted in §1.5. It is **not** the subject of this document; an implementer targeting TCP/5033 does not implement it. [I]
@@ -794,7 +803,16 @@ BLN size.
 
 ### 5.1 EPing — Ethernet-BLN availability probe (liveness, not a beacon)
 
-The Ethernet BLN's availability/liveness primitive is **EPing** (Ethernet Ping). On the wire EPing is the **AP2 function code `0x4640` (`AP2_EBLN_PING`)** [S], and `0x4640` is one of the two highest-frequency opcodes in the capture corpus (second only to the COV value-push `0x0274`) — the steady ~10-second per-peer heartbeat, present in the tens of thousands of frames in any multi-hour supervisor capture [W]. The same `0x4640` opcode also serves as the session establish / IdentifyBlock exchange and the in-session keepalive (see §6, §7): establishing presence and proving continued liveness are the same operation, which is why this one opcode is so prominent in the traffic. `0x4640` is observed under every message class the corpus contains — `0x29`, `0x2E`, `0x2F`, `0x33`, `0x34` — and on both observed ports `5033/5034`. (`0x2A` is not observed at all; see §9.7.) Its success-response **body length is variable — `35 + node-name length`** (so 40 B for a 5-char name, 41 B for 6, 45 B for 10, 47 B for 12 — all observed); a parser MUST treat the length as variable, not as one of two fixed sizes. Every `0x4640` request in the corpus drew a reply (no no-response outcome was observed on the wire). [W]
+The Ethernet BLN's availability/liveness primitive is **EPing** (Ethernet Ping). On the wire EPing is the **AP2 function code `0x4640` (`AP2_EBLN_PING`)** [S], and `0x4640` is one of the two highest-frequency opcodes in the capture corpus (second only to the COV value-push `0x0274`) — the steady ~10-second per-peer heartbeat, present in the tens of thousands of frames in any multi-hour supervisor capture [W]. The same `0x4640` opcode also serves as the session establish / IdentifyBlock exchange and the in-session keepalive (see §6, §7): establishing presence and proving continued liveness are the same operation, which is why this one opcode is so prominent in the traffic. `0x4640` is observed under every message class the corpus contains — `0x29`, `0x2E`, `0x2F`, `0x33`, `0x34` — and on both observed ports `5033/5034`. (`0x2A` is not observed at all; see §9.7.) Its success-response **body length is variable — `35 + node-name length`** (so 40 B for a 5-char name, 41 B for 6, 45 B for 10, 47 B for 12 — all observed); a parser MUST treat the length as variable, not as one of two fixed sizes. **Whether a ping is answered depends on which side opened the session.** Every
+*supervisor-initiated* `0x4640` in the corpus drew a reply. Panel-initiated pings
+into a supervisor's `5033` may not: in a 25-minute capture at one supervisor, nine
+panels each opened a fresh TCP connection to its `5033` every **14.0 seconds**,
+sent a well-formed `EBLN_PING`, and were answered with **zero payload bytes and a
+FIN** — 984 connections, no application reply on any of them, while that same
+supervisor answered its own outbound pings to those panels on a 10.0-second
+cadence, 100%. A client must therefore treat an unanswered EPing as a possible
+*policy* outcome and not only as a liveness failure, and must not assume the
+absence of a reply means the peer is down. [W]
 
 On the wire the `EBLN_PING` (`0x4640`) request and response bodies each carry, in order: `TLV(node-name)` + `TLV(site)` + `TLV(BLN-name)`, then the `eBLN_Node` trailer — **five 1-byte boolean flags** (`failed, ready, replication_online, reresolve_all, reresolve_unresolved`; observed `00 01 01 00 00`), a `u32 spare` (0), a **`u32 baseTime` — an absolute Unix-epoch wall-clock timestamp** (e.g. `0x6A3D…` ≈ a 2026 date/time; it advances frame-to-frame because it tracks wall-clock, **not** an uptime/tick counter), a `u16` timezone offset, and a `u8` DST flag. [W] This is the `eBLN_Node` identity element of §10.6 realized on the wire — the node/site/BLN triple is the same identity the access gate checks (§6).
 
@@ -1903,7 +1921,15 @@ Most addressable requests open with a **scope tag**: a scope-name string TLV (§
                         scope_byte=0x23, then wildcard mask 3F FF FF FF
 ```
 
-The trailing `3F FF FF FF` is a fixed wildcard mask. The leading `scope_byte` **is the command priority** at which the operation acts — it is not a separate flag. The same byte both sets the priority a write commands the target at, and (through the read-vs-write handler split) selects the body grammar that follows. [W][S]
+The trailing `3F FF FF FF` is a wildcard mask, and it is all but invariant:
+**19,066 of the 19,067 scope tags in the corpus carry exactly those four bytes.**
+The exception is a single `AP2_TEC_DEFINITION` request that carries
+`BF FF FF FF` — the same mask with the top bit set — so a parser should read the
+four bytes rather than assert them. The scope names seen at this position are
+`NONE` (13,557), `SYST` (5,448), `CC` (59, on alarm print and acknowledge) and
+`HIGH` (the one `BF` frame); two further four-character names appear once each in
+the same position on operations that also carry named objects, so whether they
+are scope names or object names is not settled. [W] The leading `scope_byte` **is the command priority** at which the operation acts — it is not a separate flag. The same byte both sets the priority a write commands the target at, and (through the read-vs-write handler split) selects the body grammar that follows. [W][S]
 
 Defined scope-name TLVs observed on the wire: [W]
 
@@ -3419,7 +3445,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 
 ### 9.6 The session/keepalive opcode 0x4640 (EBLN_PING)
 
-`AP2_EBLN_PING` (0x4640) is the most cross-cutting opcode in the corpus: it is the only opcode that appears under every message class the corpus contains — 0x29, 0x2E, 0x2F, 0x33 and 0x34, measured over 206,050 trusted frames — and it is the **only** opcode ever seen under class 0x29 at all (see §9.7; `0x2A` is unobserved) — and it serves three roles. As **session establish** it is the IdentifyBlock handshake carrying the peer's identity slots; as **keepalive** it recurs on a ~10-second cadence (the EPing / Ethernet-Ping liveness heartbeat); and its request/response body is the `eBLN_Node` block (§10.6). It is also the opcode whose malformed slot-walk produces the `0x0C44`/`0x4443` phantoms in §9.5. Its response length is variable and deterministic — `35 + node-name length` (40/41/45/47 B observed for 5/6/10/12-char names) — so a parser must treat 0x4640 response-length as variable; every request in the corpus drew a reply (§9.7). [W][S]
+`AP2_EBLN_PING` (0x4640) is the most cross-cutting opcode in the corpus: it is the only opcode that appears under every message class the corpus contains — 0x29, 0x2E, 0x2F, 0x33 and 0x34, measured over 206,050 trusted frames — and it is the **only** opcode ever seen under class 0x29 at all (see §9.7; `0x2A` is unobserved) — and it serves three roles. As **session establish** it is the IdentifyBlock handshake carrying the peer's identity slots; as **keepalive** it recurs on a ~10-second cadence (the EPing / Ethernet-Ping liveness heartbeat); and its request/response body is the `eBLN_Node` block (§10.6). It is also the opcode whose malformed slot-walk produces the `0x0C44`/`0x4443` phantoms in §9.5. Its response length is variable and deterministic — `35 + node-name length` (40/41/45/47 B observed for 5/6/10/12-char names) — so a parser must treat 0x4640 response-length as variable. Every *supervisor-initiated* request in the corpus drew a reply; panel-initiated pings into a supervisor's `5033` are a different matter (§5.1). [W][S]
 
 ### 9.7 Wire behavior: message classes, directions, error tails
 
