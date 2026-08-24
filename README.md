@@ -60,6 +60,14 @@ Click a P2 packet and get:
 - **Routing slots** — the four NUL-terminated ASCII slots `[BLN, dst-node, BLN, src-node]`
 - **Opcode** — the 2-byte AP2 function code, labelled against the full
   name set; an opcode that isn't a defined function code shows as `unknown_0x….`
+- **Operand** (`p2.operand`) — many opcodes are one operation with a parameter
+  encoded in the opcode rather than the body, so a run of consecutive codes is an
+  enumeration: `0x0220`–`0x022C` is *point log* with thirteen filters,
+  `0x0244`/`0x0245`/`0x024C`/`0x024D` is *point command* with four states,
+  `UPL_DEL_x`/`UPL_ADDED_x`/`UPL_ALL_x` is one upload with three phases. Where
+  the opcode is part of such a family the dissector names the operand —
+  `point log - filter: value` — and appends it to the Info column. 55 families,
+  146 opcodes; about a fifth of the request frames in a real capture carry one.
 - **Per-opcode body** — wire-verified decoders for the common operations:
   - **COV value push** (`0x0274`) — point name, present value (`f32` BE), and the
     10-byte condition/priority block split into its named fields
@@ -154,6 +162,13 @@ Heuristic to spot Siemens PXC field panels in a capture without decoding payload
 ```bash
 tshark -r capture.pcapng -Y "tcp.flags.syn==1" \
     -T fields -e ip.src -e ip.ttl -e tcp.window_size_value | sort -u
+```
+
+What a supervisor is actually asking for, by operand:
+
+```bash
+tshark -r capture.pcapng -X lua_script:p2.lua -Y p2.operand \
+    -T fields -e p2.opcode -e p2.operand | sort | uniq -c | sort -rn
 ```
 
 ## Protocol specification

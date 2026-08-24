@@ -115,6 +115,8 @@
 --   p2data.point_types  type code -> {mnemonic, name, default_enum}
 --   p2data.enum_types   enum id -> {name, apogee, levels}
 --   p2data.revisions    revision string -> {level, cab, str}
+--   p2data.families     opcode -> {family, param, value}; a run of opcodes
+--                       that is one operation with a parameter in the opcode
 local p2data = {}
 p2data.opcodes = {
   [48] = {tag="F", note="panel firmware 30/42 images + supervisor stack"},
@@ -376,6 +378,155 @@ p2data.opcodes = {
   [61490] = {tag="X", note="panel export, body 105-111 B"},
   [61492] = {tag="X", note="panel export, body 55-61 B"},
   [61494] = {tag="X", note="panel export, body 29-35 B"},
+}
+
+p2data.families = {
+  [288] = {family="set operator-port baud rate", param="port", value="MMI 1"},
+  [289] = {family="set operator-port baud rate", param="port", value="MMI 2"},
+  [291] = {family="set field-bus baud rate", param="bus", value="FLN 1"},
+  [292] = {family="set field-bus baud rate", param="bus", value="FLN 2"},
+  [293] = {family="set field-bus baud rate", param="bus", value="FLN 3"},
+  [544] = {family="point log", param="filter", value="value"},
+  [545] = {family="point log", param="filter", value="in alarm"},
+  [546] = {family="point log", param="filter", value="control status"},
+  [547] = {family="point log", param="filter", value="failed"},
+  [548] = {family="point log", param="filter", value="totalized"},
+  [549] = {family="point log", param="filter", value="by priority"},
+  [550] = {family="point log", param="filter", value="disabled"},
+  [551] = {family="point log", param="filter", value="by type"},
+  [552] = {family="point log", param="filter", value="in trouble"},
+  [553] = {family="point log", param="filter", value="any"},
+  [554] = {family="point log", param="filter", value="ODSB"},
+  [555] = {family="point log", param="filter", value="PDSB"},
+  [556] = {family="point log", param="filter", value="alarm-commanded"},
+  [578] = {family="point command (enable)", param="state", value="enable"},
+  [579] = {family="point command (enable)", param="state", value="disable"},
+  [580] = {family="point command (alarm state)", param="state", value="alarm"},
+  [581] = {family="point command (alarm state)", param="state", value="normal"},
+  [582] = {family="point command (alarm enable)", param="state", value="enable"},
+  [583] = {family="point command (alarm enable)", param="state", value="disable"},
+  [588] = {family="point command (alarm state)", param="state", value="into trouble"},
+  [589] = {family="point command (alarm state)", param="state", value="out of trouble"},
+  [625] = {family="COV", param="state", value="enable"},
+  [627] = {family="COV", param="state", value="disable"},
+  [658] = {family="trend", param="state", value="enable"},
+  [659] = {family="trend", param="state", value="disable"},
+  [736] = {family="point total", param="state", value="enable"},
+  [737] = {family="point total", param="state", value="disable"},
+  [864] = {family="ems dial", param="state", value="enable"},
+  [865] = {family="ems dial", param="state", value="disable"},
+  [1348] = {family="category printing", param="state", value="enable"},
+  [1350] = {family="category printing", param="state", value="disable"},
+  [1353] = {family="category node list", param="action", value="append"},
+  [1354] = {family="category node list", param="action", value="remove"},
+  [1377] = {family="alarm message", param="state", value="enable"},
+  [1378] = {family="alarm message", param="state", value="disable"},
+  [2401] = {family="upload point", param="phase", value="deleted"},
+  [2402] = {family="upload alarm setup", param="phase", value="deleted"},
+  [2403] = {family="upload alarm mode", param="phase", value="deleted"},
+  [2404] = {family="upload trend", param="phase", value="deleted"},
+  [2405] = {family="upload ppcl", param="phase", value="deleted"},
+  [2406] = {family="upload tec", param="phase", value="deleted"},
+  [2407] = {family="upload eqs zone", param="phase", value="deleted"},
+  [2408] = {family="upload eqs cmd table", param="phase", value="deleted"},
+  [2409] = {family="upload eqs mode sched", param="phase", value="deleted"},
+  [2410] = {family="upload loop", param="phase", value="deleted"},
+  [2411] = {family="upload alarm message", param="phase", value="deleted"},
+  [2417] = {family="upload point", param="phase", value="added"},
+  [2418] = {family="upload alarm setup", param="phase", value="added"},
+  [2419] = {family="upload alarm mode", param="phase", value="added"},
+  [2420] = {family="upload trend", param="phase", value="added"},
+  [2421] = {family="upload ppcl", param="phase", value="added"},
+  [2422] = {family="upload tec", param="phase", value="added"},
+  [2423] = {family="upload eqs zone", param="phase", value="added"},
+  [2424] = {family="upload eqs cmd table", param="phase", value="added"},
+  [2425] = {family="upload eqs mode sched", param="phase", value="added"},
+  [2426] = {family="upload loop", param="phase", value="added"},
+  [2427] = {family="upload alarm message", param="phase", value="added"},
+  [2428] = {family="upload ssto general", param="phase", value="added"},
+  [2429] = {family="upload ssto start", param="phase", value="added"},
+  [2430] = {family="upload ssto stop", param="phase", value="added"},
+  [2431] = {family="upload ssto night", param="phase", value="added"},
+  [2433] = {family="upload point", param="phase", value="all"},
+  [2434] = {family="upload alarm setup", param="phase", value="all"},
+  [2435] = {family="upload alarm mode", param="phase", value="all"},
+  [2436] = {family="upload trend", param="phase", value="all"},
+  [2437] = {family="upload ppcl", param="phase", value="all"},
+  [2438] = {family="upload tec", param="phase", value="all"},
+  [2439] = {family="upload eqs zone", param="phase", value="all"},
+  [2440] = {family="upload eqs cmd table", param="phase", value="all"},
+  [2441] = {family="upload eqs mode sched", param="phase", value="all"},
+  [2443] = {family="upload alarm message", param="phase", value="all"},
+  [2444] = {family="upload ssto general", param="phase", value="all"},
+  [2445] = {family="upload ssto start", param="phase", value="all"},
+  [2446] = {family="upload ssto stop", param="phase", value="all"},
+  [2447] = {family="upload ssto night", param="phase", value="all"},
+  [2461] = {family="upload port", param="phase", value="deleted"},
+  [2462] = {family="upload port", param="phase", value="added"},
+  [2463] = {family="upload port", param="phase", value="all"},
+  [2465] = {family="upload partner", param="phase", value="deleted"},
+  [2466] = {family="upload partner", param="phase", value="added"},
+  [2467] = {family="upload partner", param="phase", value="all"},
+  [2469] = {family="upload eqs override", param="phase", value="deleted"},
+  [2470] = {family="upload eqs override", param="phase", value="added"},
+  [2471] = {family="upload eqs override", param="phase", value="all"},
+  [2473] = {family="upload uc", param="phase", value="deleted"},
+  [2474] = {family="upload uc", param="phase", value="added"},
+  [2475] = {family="upload uc", param="phase", value="all"},
+  [2481] = {family="upload tod point", param="phase", value="deleted"},
+  [2482] = {family="upload tod point", param="phase", value="added"},
+  [2483] = {family="upload tod point", param="phase", value="all"},
+  [2485] = {family="upload tod cmd", param="phase", value="deleted"},
+  [2486] = {family="upload tod cmd", param="phase", value="added"},
+  [2487] = {family="upload tod cmd", param="phase", value="all"},
+  [2489] = {family="upload lon", param="phase", value="deleted"},
+  [2490] = {family="upload lon", param="phase", value="added"},
+  [2491] = {family="upload lon", param="phase", value="all"},
+  [2497] = {family="upload mstp device", param="phase", value="deleted"},
+  [2498] = {family="upload mstp device", param="phase", value="added"},
+  [2499] = {family="upload mstp device", param="phase", value="all"},
+  [14339] = {family="racs partner", param="state", value="disable"},
+  [14341] = {family="racs partner", param="state", value="enable"},
+  [14355] = {family="racs port", param="state", value="disable"},
+  [14357] = {family="racs port", param="state", value="enable"},
+  [14371] = {family="racs system", param="state", value="disable"},
+  [14373] = {family="racs system", param="state", value="enable"},
+  [16644] = {family="PPCL lines", param="state", value="enable"},
+  [16645] = {family="PPCL lines", param="state", value="disable"},
+  [16654] = {family="report PPCL", param="variant", value="lines"},
+  [16682] = {family="report PPCL", param="variant", value="unresolved references"},
+  [16689] = {family="upload program", param="phase", value="deleted"},
+  [16690] = {family="upload program", param="phase", value="added"},
+  [16691] = {family="upload program", param="phase", value="all"},
+  [16912] = {family="TEC log", param="log", value="member"},
+  [16913] = {family="TEC log", param="log", value="report"},
+  [16944] = {family="FLN scan", param="state", value="enable"},
+  [16945] = {family="FLN scan", param="state", value="disable"},
+  [17168] = {family="LON log", param="log", value="member"},
+  [17169] = {family="LON log", param="log", value="report"},
+  [17666] = {family="tod point", param="state", value="enable"},
+  [17667] = {family="tod point", param="state", value="disable"},
+  [17988] = {family="EBLN telnet", param="state", value="enable"},
+  [17989] = {family="EBLN telnet", param="state", value="disable"},
+  [18466] = {family="upload bbmd", param="phase", value="deleted"},
+  [18467] = {family="upload bbmd", param="phase", value="added"},
+  [18468] = {family="upload bbmd", param="phase", value="all"},
+  [18481] = {family="upload covtab", param="phase", value="deleted"},
+  [18482] = {family="upload covtab", param="phase", value="added"},
+  [18483] = {family="upload covtab", param="phase", value="all"},
+  [18500] = {family="upload bac trend", param="phase", value="deleted"},
+  [18501] = {family="upload bac trend", param="phase", value="added"},
+  [18502] = {family="upload bac trend", param="phase", value="all"},
+  [18552] = {family="upload BACnet object", param="phase", value="added"},
+  [18553] = {family="upload BACnet object", param="phase", value="deleted"},
+  [20484] = {family="eqs zone", param="state", value="enable"},
+  [20485] = {family="eqs zone", param="state", value="disable"},
+  [20516] = {family="eqs mode entry", param="state", value="enable"},
+  [20517] = {family="eqs mode entry", param="state", value="disable"},
+  [20547] = {family="eqs ssto", param="state", value="enable"},
+  [20548] = {family="eqs ssto", param="state", value="disable"},
+  [21248] = {family="I/O module display", param="scope", value="global"},
+  [21253] = {family="I/O module display", param="scope", value="local"},
 }
 
 p2data.enum_types = {
@@ -2790,6 +2941,7 @@ f.src       = ProtoField.string("p2.src","Source/Self Node (slot 3)")
 f.opcode    = ProtoField.uint16("p2.opcode","AP2 Function Code",base.HEX,OPCODES)
 f.err       = ProtoField.uint16("p2.err","Error Code",base.HEX,ERRORS)
 f.schema    = ProtoField.string("p2.schema","Expected body fields [struct-derived]")
+f.operand   = ProtoField.string("p2.operand","Operation operand [opcode-encoded]")
 f.tlv       = ProtoField.string("p2.tlv","TLV String")
 f.scope     = ProtoField.string("p2.scope","Scope Tag")
 f.priority  = ProtoField.uint8 ("p2.priority","Command Priority",base.HEX,PRIORITY)
@@ -2840,7 +2992,7 @@ f.eu        = ProtoField.string("p2.eu","Engineering Units")
 f.body      = ProtoField.bytes ("p2.body","Body")
 p2.fields = {
   f.total_len,f.msg_type,f.msg_class,f.seq,f.dir,f.bln1,f.dst,f.bln2,f.src,
-  f.opcode,f.err,f.schema,f.tlv,f.scope,f.priority,f.value,
+  f.opcode,f.err,f.schema,f.operand,f.tlv,f.scope,f.priority,f.value,
   f.cov_count,f.cov_point,f.cov_cond,
   f.cov_pri,f.cov_ctrl,f.cov_oos,f.cov_fail,f.cov_proof,f.cov_opdis,f.cov_pgmdis,f.cov_cmdal,f.cov_astate,f.cov_apri,
   f.r_name,f.r_ver,f.r_tabver,f.r_count,
@@ -3078,11 +3230,23 @@ local function dissect_one(tvb, pinfo, tree)
   local sinfo = f_tcp_stream()
   local skey = (sinfo and tostring(sinfo.value) or "?") .. ":" .. seq
   local opname, rop = nil, nil
-  local function rlabel(o) return OPCODES[o] or string.format("0x%04X", o) end
+  -- A run of opcodes is often one operation with a parameter encoded in the
+  -- opcode rather than the body, so name the operand alongside the mnemonic.
+  local function rlabel(o)
+    local n = OPCODES[o] or string.format("0x%04X", o)
+    local fm = p2data.families[o]
+    return fm and (n .. string.format(" (%s=%s)", fm.param, fm.value)) or n
+  end
   if dir == 0x00 then
     if off + 2 <= total then
       local op = tvb(off,2):uint(); st:add(f.opcode, tvb(off,2))
       opname = OPCODES[op] or string.format("unknown_0x%04X", op)
+      local fam = p2data.families[op]
+      if fam then
+        st:add(f.operand, tvb(off,2), string.format("%s - %s: %s",
+               fam.family, fam.param, fam.value)):set_generated()
+        opname = opname .. string.format(" (%s=%s)", fam.param, fam.value)
+      end
       if not pinfo.visited then resp_op[skey] = op end   -- remember for the matching response
       off = off + 2
       if off < total then

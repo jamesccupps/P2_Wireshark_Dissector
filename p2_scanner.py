@@ -1068,7 +1068,12 @@ def op_label(opcode):
     if opcode is None:
         return '?'
     name = p2_data.opcode_name(opcode)
-    return "0x%04X %s" % (opcode, name) if name else "0x%04X" % opcode
+    out = "0x%04X %s" % (opcode, name) if name else "0x%04X" % opcode
+    # A run of opcodes is often one operation with a parameter encoded in the
+    # opcode: 0x0221 is point log with the filter set to in-alarm, the same
+    # operation as 0x0220 asking a different question.  Name the operand.
+    fam = p2_data.opcode_operand(opcode)
+    return "%s (%s=%s)" % (out, fam[1], fam[2]) if fam else out
 
 # The EBLN replication diagnostic block. Every value here answered success with
 # a structured body when probed, and all but 0x464C are unidentified: the panel
@@ -7096,6 +7101,9 @@ def listen_for_push_notifications(port: int = 5033, duration: Optional[int] = No
                                     nm = p2_data.opcode_name(op)
                                     if nm:
                                         event['opcode_name'] = nm
+                                    fam = p2_data.opcode_operand(op)
+                                    if fam:
+                                        event['operand'] = "%s=%s" % (fam[1], fam[2])
                                 if op_bytes == P2Message.MARKER_VALUE_PUSH:
                                     parsed = parse_cov_notification(body)
                                     if parsed:

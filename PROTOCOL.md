@@ -2166,6 +2166,33 @@ points in alarm, failed points, disabled points, points of a given type, and so
 on. A decoder that treats the run as an enumeration recovers the operand for
 free.
 
+#### Which operands live traffic actually uses
+
+Knowing the enumeration exists is half of it; the other half is which values a
+working supervisor sends. Across the corpus **21% of all request frames carry an
+opcode-encoded operand**, and the distribution is lopsided: [W]
+
+| Operand | Frames | Reading |
+|---|---:|---|
+| upload phase = **all** | 5,534 | bulk re-read of a whole object class |
+| upload phase = added | 56 | the live-change tail |
+| upload phase = deleted | 38 | the live-change tail |
+| COV state = enable | 3,291 | subscriptions being created |
+| COV state = disable | 2,914 | and torn down, in near-equal number |
+| point log filter = **value** | 3,095 | the only filter of the thirteen ever seen |
+| point command state = alarm / normal | 2 / 2 | barely exercised |
+| category node list action = append / remove | 10 / 1 | |
+
+Three things an implementer can take from this. Uploads in practice are
+**whole-class re-reads**, not incremental sync — the added/deleted phases exist
+and are used, but as a thin live tail against a bulk baseline, which matches
+what §5.3 describes for replication. COV subscribe and unsubscribe arrive in
+near-equal numbers, so a panel implementation must expect subscriptions to churn
+rather than accumulate. And of point log's thirteen filters, **only `value` was
+ever observed** — the other twelve are a defined but unexercised surface, which
+is worth knowing both for a decoder (do not expect them) and for anyone
+assessing what a panel will answer that nobody normally asks.
+
 **Kind two: a tunnel.** `0x0313 AP2_P1_ROUTE` is emitted by **16** distinct
 operations — a P1 pass-through, TEC point and revision reads, and the whole
 unitary-controller upload/define set including its time-set and trace-clear.
