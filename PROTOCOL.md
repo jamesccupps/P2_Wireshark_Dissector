@@ -2243,10 +2243,54 @@ capacity and an overflow flag — which memcpys it and advances the cursor. **Th
 id is emitted into an outgoing message.** A miss yields `-1`, which is a
 sentinel a translator writes, not an index a dispatcher could use.
 
-So the panel keeps, per peer class, a mapping from the AP2 function code to
-some other numbering that it emits on that peer's behalf. That is the same
-CPI/AP2 two-level relationship as §9.1.1, observed from the panel end rather
-than the supervisor end. What the emitted id *means* is **[OPEN]**. [F]
+So the panel converts a wire opcode into some other number and emits it. Two
+questions follow — whether that number reaches the wire, and what it is — and
+both are now answered.
+
+**It does not reach the wire.** Every trusted request frame in the capture
+corpus whose opcode has a mapping was searched for its own id as a 16-bit
+big-endian value at every body offset, against a shuffled-pairing control:
+**83,771 frames, 69 opcodes, 3 real hits against 2 control**. Repeating it on
+the panel's *replies* — paired back to their request by sequence number, since
+a response carries no opcode — gives **83,876 pairs, 72 opcodes, 1 real hit
+against 315 control**. The real mapping scored worse than its own control.
+Whatever the panel writes the number into, **it is not a P2 frame**. [W]
+
+**It is a two-stage internal operation number.** The default table maps an
+opcode to a *group*; where the group needs finer resolution, that group has its
+own table mapping the same opcodes to an *ordinal*. The group id and the second
+table's selector are the same value, which is why the eight selectors are
+themselves ids in the default table. `0xB6` is the plainest case — the default
+assigns it to nine `CABINET_SET_*` opcodes, and table `0xB6` numbers exactly
+those nine 1…11:
+
+```
+0x0120 SET_MMI1_BAUDRATE -> 1     0x0126 SET_BLN_BAUDRATE -> 6
+0x0121 SET_MMI2_BAUDRATE -> 2     0x0128 SET_BLN_ADDRESS  -> 7
+0x0123 SET_FLN1_BAUDRATE -> 3     0x0129 SET_MODEM_STATE  -> 8, 9
+0x0124 SET_FLN2_BAUDRATE -> 4     0x0127 SET_PBUS_STATE   -> 10, 11
+0x0125 SET_FLN3_BAUDRATE -> 5
+```
+
+Seven of the eight group tables hold only opcodes the default assigns that
+group. Group `0xC1` is the catch-all — 144 of 317 opcodes, across every family —
+and needs no second stage; 61 groups contain a single opcode each, skewed toward
+the specific and destructive (`SET_NODE_STATE`, `CABINET_ADD`/`REMOVE`,
+`CABINET_COLDSTART`, `CABINET_MEMORY_MODIFY`, the point limit and totaliser
+commands). [F]
+
+Note that `0x0129` and `0x0127` each appear **twice** with consecutive ordinals —
+one wire opcode, two sub-operations. The lookup is a linear scan returning the
+first match, so the opcode alone cannot select the second; what does is
+**[OPEN]**.
+
+**Why this matters to an implementer, given it is never transmitted.** §9.1.1
+records the supervisor carrying a second 16-bit selector per operation that
+likewise appears in no captured body. Both ends of the wire maintain a
+sub-operation number, and **neither serialises it**. So where several operations
+share one wire opcode, a receiver is not reading a sub-code off the frame — it
+is dispatching on the body. Build a decoder the same way: key on
+`(opcode, body shape)`, never on a sub-field that is not there. [W][F]
 
 **There is more than one table, and a class code selects between them.** The
 firmware stores each table's length in a 16-bit word immediately after it, so
@@ -2261,10 +2305,8 @@ end, each stored count matching its span:
 | `0xB2` | 9 | | `0xA6` | 6 |
 | `0xB8` | 3 | | (unlabelled) | 142 |
 
-The selector comes from a method on the peer object, and the default table is
-used when no class-specific one matches. An implementer should read this as
-evidence that **the panel's view of the function-code space is peer-dependent**,
-not uniform. [F]
+The selector comes from a method on the calling object, and the default table
+applies when no group-specific one matches. [F]
 
 Presence in these tables says the panel firmware *knows* the function code and
 carries a translation for it. It does not by itself prove the panel implements
