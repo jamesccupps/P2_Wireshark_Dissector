@@ -82,6 +82,14 @@ Click a P2 packet and get:
     name + suffix, and (for commands) the `f32` value
   - **Alarm reports** (`0x0508`) — point + descriptor, the value block, and the event
     timestamps
+  - **Enhanced-alarm definitions** (`0x0983` responses) — point, mode point, units,
+    set point, and the alarm-level table: offset, priority, category and message
+    number per level
+  - **Equipment scheduling** (`0x0987`/`0x0988`/`0x0989` responses) — the zone, the
+    per-mode command table (which point is driven to what value in each mode), and
+    the mode schedule with its effective-from/until dates and start time. Dates
+    carry a weekday byte, and the dissector checks it against the date — a
+    mismatch is reported rather than hidden
   - **Responses** — correlated to their request by sequence and decoded: the
     `CABINET_DISPLAY` firmware banner, value/read results, and the identity block
   - **Scope tag + command priority**, **error codes**, and a generic TLV / value walk

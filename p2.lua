@@ -2942,6 +2942,17 @@ f.opcode    = ProtoField.uint16("p2.opcode","AP2 Function Code",base.HEX,OPCODES
 f.err       = ProtoField.uint16("p2.err","Error Code",base.HEX,ERRORS)
 f.schema    = ProtoField.string("p2.schema","Expected body fields [struct-derived]")
 f.operand   = ProtoField.string("p2.operand","Operation operand [opcode-encoded]")
+f.date      = ProtoField.string("p2.date","Date (y/m/d + weekday)")
+f.modept    = ProtoField.string("p2.mode_point","Mode Point")
+f.setpoint  = ProtoField.float ("p2.setpoint","Set Point")
+f.lvl_off   = ProtoField.float ("p2.alarm_offset","Alarm Level Offset")
+f.lvl_pri   = ProtoField.uint8 ("p2.alarm_priority","Alarm Priority",base.DEC)
+f.lvl_cat   = ProtoField.uint8 ("p2.alarm_category","Alarm Category",base.DEC)
+f.lvl_msg   = ProtoField.uint16("p2.alarm_message","Alarm Message Number",base.DEC)
+f.eqs_mode  = ProtoField.uint16("p2.eqs_mode","EQS Mode Index",base.DEC)
+f.eqs_val   = ProtoField.float ("p2.eqs_value","Commanded Value")
+f.eqs_time  = ProtoField.string("p2.eqs_time","Scheduled Time")
+f.rec_index = ProtoField.uint32("p2.record_index","Record Index (resume key)",base.DEC)
 f.tlv       = ProtoField.string("p2.tlv","TLV String")
 f.scope     = ProtoField.string("p2.scope","Scope Tag")
 f.priority  = ProtoField.uint8 ("p2.priority","Command Priority",base.HEX,PRIORITY)
@@ -2993,6 +3004,8 @@ f.body      = ProtoField.bytes ("p2.body","Body")
 p2.fields = {
   f.total_len,f.msg_type,f.msg_class,f.seq,f.dir,f.bln1,f.dst,f.bln2,f.src,
   f.opcode,f.err,f.schema,f.operand,f.tlv,f.scope,f.priority,f.value,
+  f.date,f.modept,f.setpoint,f.lvl_off,f.lvl_pri,f.lvl_cat,f.lvl_msg,
+  f.eqs_mode,f.eqs_val,f.eqs_time,f.rec_index,
   f.cov_count,f.cov_point,f.cov_cond,
   f.cov_pri,f.cov_ctrl,f.cov_oos,f.cov_fail,f.cov_proof,f.cov_opdis,f.cov_pgmdis,f.cov_cmdal,f.cov_astate,f.cov_apri,
   f.r_name,f.r_ver,f.r_tabver,f.r_count,
@@ -3101,6 +3114,27 @@ local function ts8(tvb, off, last)
      or hh>23 or mm>59 or ss>59 or cs>99 then return nil end
   return string.format("%04d-%02d-%02d %s %02d:%02d:%02d.%02d", 1900+yr, mo, dy, DOW[dw] or "?", hh, mm, ss, cs)
 end
+-- 4-byte calendar date [yr-1900][mo][day][DOW 1=Mon..7=Sun] -- the same encoding
+-- as ts8 above, truncated before the time.  The weekday is redundant with the
+-- date, which makes it a free alignment check: every date in the reference
+-- corpus carries the correct weekday, so a mismatch means the parse has drifted.
+local function date4(tvb, off, last)
+  if off + 4 > last then return nil end
+  local yr=tvb(off,1):uint(); local mo=tvb(off+1,1):uint()
+  local dy=tvb(off+2,1):uint(); local dw=tvb(off+3,1):uint()
+  if mo == 0 and dy == 0 then return "(none)" end
+  if yr<100 or yr>199 or mo>12 or dy>31 or dw<1 or dw>7 then return nil end
+  -- Sakamoto: weekday of a Gregorian date, 0=Sunday
+  local y = 1900 + yr
+  local t = {0,3,2,5,0,3,5,1,4,6,2,4}
+  local yy = (mo < 3) and (y - 1) or y
+  local w = (yy + math.floor(yy/4) - math.floor(yy/100) + math.floor(yy/400)
+             + t[mo] + dy) % 7
+  local iso = (w == 0) and 7 or w                        -- 1=Mon .. 7=Sun
+  return string.format("%04d-%02d-%02d %s%s", y, mo, dy, DOW[dw] or "?",
+                       (iso == dw) and "" or string.format(" [weekday byte %d, date is %s]",
+                                                           dw, DOW[iso] or "?"))
+end
 -- consume an optional scope tag: 01 00 <len> <SCOPE> <command-priority:1> <3F FF FF FF>; returns next_off
 local function scope_tag(tvb, off, last, tree)
   local s, l, no = read_tlv(tvb, off, last)
@@ -3206,6 +3240,94 @@ local function dissect_value_resp(tvb, off, last, tree)
     else off = off + 1 end
   end
 end
+-- UPL_ALL_ALARM_MODE 0x0983 response: an enhanced-alarm definition.  The tail is
+-- self-validating -- a u16 count followed by exactly count*8 bytes of Alarm_level --
+-- so it is located from the end and the middle block is left as a raw block rather
+-- than guessed at (its field offsets shift between records).
+local function dissect_alarmmode(tvb, off, last, tree)
+  if off + 2 > last then return end
+  tree:add(f.ns, tvb(off,2)); off = off + 2
+  local labels = { f.pt_name, f.pt_suffix, f.modept, f.pt_suffix, f.eu }
+  for i = 1, 5 do
+    local v, l, no = read_tlv(tvb, off, last); if not v then break end
+    if l > 0 then tree:add(labels[i], tvb(off+3,l)) end
+    off = no
+  end
+  off = off + 5                                     -- flag + four category bytes
+  for _ = 1, 3 do                                   -- changed / reference / changed
+    local t = ts8(tvb, off, last)
+    if not t then break end
+    tree:add(f.ts, tvb(off,8), t); off = off + 8
+  end
+  -- find the count: the only position where count*8 consumes the rest exactly
+  local cut = nil
+  for j = off, last - 2 do
+    local n = tvb(j,2):uint()
+    if n > 0 and (last - (j + 2)) == n * 8 then cut = j; break end
+    end
+  if not cut then if off < last then tlv_walk(tvb, off, last, tree) end; return end
+  if cut - 4 >= off then tree:add(f.setpoint, tvb(cut-4,4)) end
+  if cut - 4 > off then tree:add(p2, tvb(off, (cut-4)-off), "Setup block (delays, differential)") end
+  local n = tvb(cut,2):uint()
+  local lt = tree:add(p2, tvb(cut, last-cut), "Alarm levels ("..n..")")
+  for k = 0, n - 1 do
+    local b = cut + 2 + k * 8
+    local e = lt:add(p2, tvb(b,8), string.format("Level %d", k + 1))
+    e:add(f.lvl_off, tvb(b,4)); e:add(f.lvl_pri, tvb(b+4,1))
+    e:add(f.lvl_cat, tvb(b+5,1)); e:add(f.lvl_msg, tvb(b+6,2))
+  end
+end
+-- UPL_ALL_EQS_CMD_TABLE 0x0988: zone, commanded point, mode index, value
+local function dissect_eqs_cmd(tvb, off, last, tree)
+  if off + 2 > last then return end
+  tree:add(f.ns, tvb(off,2)); off = off + 2
+  local z, zl, zo = read_tlv(tvb, off, last); if not z then return end
+  tree:add(f.pt_name, tvb(off+3,zl)); off = zo + 2                 -- + second name space
+  local p, pl, po = read_tlv(tvb, off, last); if not p then return end
+  tree:add(f.pt_name, tvb(off+3,pl)); off = po
+  local sf, sl, so = read_tlv(tvb, off, last)
+  if sf then if sl > 0 then tree:add(f.pt_suffix, tvb(off+3,sl)) end; off = so end
+  if off + 6 <= last then
+    tree:add(f.eqs_mode, tvb(off,2)); tree:add(f.eqs_val, tvb(off+2,4)); off = off + 6
+  end
+end
+-- UPL_ALL_EQS_MODE_SCHED 0x0989: zone, record index (the resume key), mode,
+-- effective-from / effective-until dates, and the time the mode starts
+local function dissect_eqs_sched(tvb, off, last, tree)
+  if off + 2 > last then return end
+  tree:add(f.ns, tvb(off,2)); off = off + 2
+  local z, zl, zo = read_tlv(tvb, off, last); if not z then return end
+  tree:add(f.pt_name, tvb(off+3,zl)); off = zo
+  if off + 4 <= last then tree:add(f.rec_index, tvb(off,4)); off = off + 4 end
+  local m, ml, mo = read_tlv(tvb, off, last)
+  if m then if ml > 0 then tree:add(f.eqs_mode, tvb(off+3,ml)) end; off = mo end
+  off = off + 4
+  for _, lab in ipairs({ "Effective from", "Effective until" }) do
+    local d = date4(tvb, off, last)
+    if not d then break end
+    tree:add(f.date, tvb(off,4), lab..": "..d); off = off + 4
+  end
+  if off + 6 <= last then
+    local hh, mm = tvb(off+4,1):uint(), tvb(off+5,1):uint()
+    if hh < 24 and mm < 60 then
+      tree:add(f.eqs_time, tvb(off+4,2), string.format("%02d:%02d", hh, mm))
+    end
+  end
+end
+-- UPL_ALL_EQS_ZONE 0x0987: zone name, its schedule point, and a descriptor
+local function dissect_eqs_zone(tvb, off, last, tree)
+  off = off + 2                                     -- lead u16
+  if off + 2 > last then return end
+  tree:add(f.ns, tvb(off,2)); off = off + 2
+  local n = 0
+  while off < last and n < 3 do
+    local v, l, no = read_tlv(tvb, off, last); if not v then break end
+    n = n + 1
+    if l > 0 then tree:add(n == 3 and f.tlv or f.pt_name, tvb(off+3,l)) end
+    off = no
+    if n < 3 then off = off + ((n == 1) and 2 or 1) end   -- separators
+  end
+end
 -- opcodes whose response carries a value/Point_base-style body
 local VALUE_RESP = {
   [0x0220]=true, [0x0221]=true, [0x0271]=true, [0x0295]=true, [0x0981]=true, [0x0982]=true,
@@ -3281,6 +3403,10 @@ local function dissect_one(tvb, pinfo, tree)
       pcall(function()
         if rop==0x010C then dissect_banner(tvb,off,total,bt)
         elseif rop==0x4640 then dissect_identity(tvb,off,total,bt)
+        elseif rop==0x0983 then dissect_alarmmode(tvb,off,total,bt)
+        elseif rop==0x0987 then dissect_eqs_zone(tvb,off,total,bt)
+        elseif rop==0x0988 then dissect_eqs_cmd(tvb,off,total,bt)
+        elseif rop==0x0989 then dissect_eqs_sched(tvb,off,total,bt)
         elseif rop and VALUE_RESP[rop] then dissect_value_resp(tvb,off,total,bt)
         else tlv_walk(tvb,off,total,bt) end
       end)

@@ -3934,10 +3934,12 @@ as the deviation grows, each level able to carry its own message number and
 routing category. Single-level definitions in the corpus use **priority 3**,
 the "standard alarming" default. [W][D]
 
-Two decoding notes. The three timestamps are ordinary `DATE_TIME` (`year-1900,
-month, day, hour, minute, second`, plus two bytes), and validating them as
-calendar values is a good sanity check on a parser's alignment — they span years
-in a plausible edit history rather than clustering. And the block between the
+Two decoding notes. The three timestamps are ordinary `DATE_TIME` (§8.3.4):
+`year-1900, month, day, weekday (1=Mon…7=Sun), hour, minute, second,
+centiseconds`. The weekday is redundant with the date, which makes it a free
+alignment check — every stamp in the corpus carries the weekday its date
+actually falls on, so a mismatch means the parse has drifted rather than that
+the panel is wrong. And the block between the
 timestamps and the set point carries the documented `level_delay`, `mode_delay`
 and `differential` fields, but **its byte alignment shifts between records**, so
 anchor on the count-validated tail and work backwards rather than assuming a
