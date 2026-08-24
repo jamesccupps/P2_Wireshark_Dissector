@@ -3943,6 +3943,51 @@ and `differential` fields, but **its byte alignment shifts between records**, so
 anchor on the count-validated tail and work backwards rather than assuming a
 fixed offset. [W]
 
+**Equipment scheduling — three records that compose.** The EQS uploads carry a
+zone's schedule, and decoding all three shows one mechanism rather than three
+tables. [W]
+
+**`AP2_UPL_ALL_EQS_CMD_TABLE` (0x0988)** — what a mode does:
+
+```
+u16 name space | TLV zone | u16 name space | TLV point | TLV suffix
+u16 mode index | f32 value | 8 B fixed tail
+```
+
+The mode index runs **0–7**, with 0 and 1 carrying the bulk of the rows; the
+value is `1.0` or `0.0` and nothing else, so these are digital commands. The
+suffix is overwhelmingly the **day/night** subpoint. One row reads: *in mode 0
+drive this point to 1; in mode 1 drive it to 0.*
+
+**`AP2_UPL_ALL_EQS_MODE_SCHED` (0x0989)** — when a mode starts:
+
+```
+u16 name space | TLV zone | u32 record index | TLV mode | u32
+4 B effective-from | 4 B effective-until | u8 | u16 | u8 hour | u8 minute | …
+```
+
+The 4-byte date group is **`year-1900, month, day, weekday`, weekday numbered
+ISO-style (Monday = 1 … Sunday = 7)**. That is worth relying on: every valid
+date in the corpus carries a weekday byte matching the real weekday of that
+date, so a decoder can use the agreement as a self-check on its alignment. A
+month/day of zero is the "no date" sentinel. Times decode as `hour, minute`
+(07:00, 18:00, 20:30 …), and effective-until dates sit far in the future when a
+schedule has no end.
+
+The `u32` after the zone name is the record's own index and is the resume key of
+§10.2.3: the request's ten-byte tail is `u32 0 | u32 last index | u16 0`. Indexes
+are **sparse**, so the walk must echo the key rather than count.
+
+**`AP2_UPL_ALL_EQS_ZONE` (0x0987)** — the zone: a lead `u16`, the zone name, the
+name again after a two-byte separator, a human-readable descriptor, and a
+19-byte fixed tail.
+
+**How they compose.** A mode schedule says *at this time on this weekday, the
+zone enters mode M*; the command table says *in mode M, command these points to
+these values* — typically the day/night point; and a point's **mode point** then
+selects which alarm levels are in force (§10.8, alarm-mode record). Scheduling,
+commanding and alarming are one chain, and the mode point is the joint. [W][D]
+
 ### 10.9 The full structure set is enumerable
 
 The ~30 structures above cover the read/command/COV core, the firmware/identity block, the session block, and one representative of each remaining major family (upload, PPCL, trend, TEC, alarm, node-management). The remaining ~1,110 structures follow the same conventions — ordered typed fields, the shared sub-types of §10.2, counted arrays, and CHOICE unions — and each maps one-to-one to a `*_Request` / `*_Response` pair for an opcode in the §9 catalog. For any opcode not detailed here, its body is the like-named ASDU structure (e.g. `AP2_<name>_Request` / `AP2_<name>_Response`), readable from the structure library with the §10.1 type mapping. [S]
