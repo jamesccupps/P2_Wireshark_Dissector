@@ -1694,10 +1694,10 @@ opcode (§6.4).
   | `0x0003` | `not_found` | 3,996 | `0x0220`, `0x0271`, `0x0273`, `0x0986` |
   | `0x00AC` | `not_supported` | 49 | `0x400F`, `0x4133`, `0x4010`, `0x4011` |
   | `0x0E15` | `physical_point_not_commandable` | 28 | `0x0240` |
-  | `0x0002` | `object_unknown` | 4 | `0x0244`, `0x0564`, `0x0565` |
-  | `0x0E12` | `invalid_point_number` | 3 | `0x4225`, `0x4224` |
-  | `0x0E11` | `already_exists` | 2 | `0x0204` |
-  | `0x0009` | `already_exists_v2` | 1 | `0x0540` |
+  | `0x0002` | `invalid_command` | 4 | `0x0244`, `0x0564`, `0x0565` |
+  | `0x0E12` | `fln_device_failed` | 3 | `0x4225`, `0x4224` |
+  | `0x0E11` | `fln_invalid_drop_number` | 2 | `0x0204` |
+  | `0x0009` | `already_exists` | 1 | `0x0540` |
 
   98% of all errors are `not_found`. Three operations in the corpus **never** succeed —
   `0x0272 COV_DELETE_STUB` (0 ok / 46 err), `0x400F TEAM_DESC_UPLOAD` (0/12) and
@@ -1754,22 +1754,44 @@ These 2-byte codes appear as the `dir == 0x05` error tail in the corpus. Distrib
 P2 frames (7,103 of which are error responses): `0x0003` ≈ 6,860; `0x00AC` ≈ 163; `0x0E15` ≈ 40;
 `0x0002` ≈ 30; `0x0E11` ≈ 6; `0x0E12` ≈ 3; `0x0009` ≈ 1. [W]
 
-| Wire code | Observed meaning | Class correspondence | Tag |
+| Wire code | Meaning | How established | Tag |
 |---|---|---|---|
-| `0x0003` | not found — named point/device/object does not exist (also returned for an "unrecognized opcode" probe) | not yet pinned to a single AP2 class | [W] / [OPEN] |
-| `0x00AC` | not supported — opcode/operation refused in context | (`0x00AC` = decimal 172, the not-supported class) | [W] / [I] |
-| `0x0002` | out of scope — operation rejected for the addressed scope (seen on `POINT_CMD_ALARM 0x0244` / `CMD_ALARM_DISABLE 0x0247` against a point lacking alarm capability) | not yet pinned to a single AP2 class | [W] / [OPEN] |
-| `0x0E11` | already exists — object/record creation collided with an existing entry (seen on `POINT_ADD_LAI`) | not yet pinned to a single AP2 class | [W] / [OPEN] |
-| `0x0E15` | not commandable — point cannot be commanded (seen on `POINT_CMD_VALUE`) | not yet pinned to a single AP2 class | [W] / [OPEN] |
-| `0x0E12` | (observed a few times in the corpus; an `already-exists`/`0x0E11`-adjacent record-state rejection, precise meaning not established) | not yet pinned to a single AP2 class | [W] / [OPEN] |
-| `0x0009` | (observed once in the corpus; precise meaning not established) | not yet pinned to a single AP2 class | [W] / [OPEN] |
+| `0x0003` | **not found** — the named object does not exist on the panel (also returned for an unrecognized-opcode probe) | wire behaviour and the vendor error catalog agree | [W][D] |
+| `0x00AC` | **not supported** — the function code is unused on this panel, **or is specific to a different firmware revision** | wire behaviour and the vendor catalog agree; the revision case is documentary only | [W][D] |
+| `0x0002` | **invalid command** — the command is not valid for the addressed object (seen on `POINT_CMD_ALARM 0x0244` / `CMD_ALARM_DISABLE 0x0247` against a point lacking alarm capability; the documented example is commanding a non-virtual LDI or LAI point) | wire behaviour and the vendor catalog agree | [W][D] |
+| `0x0009` | **already exists** — a define collided with a record already present | vendor catalog; the single wire observation answers `0x0540` | [D][W] |
+| `0x0E11` | **FLN: invalid drop number** — the addressed FLN device's drop number is invalid (seen answering `POINT_ADD_LAI 0x0204`) | vendor catalog | [D][W] |
+| `0x0E12` | **FLN: device failed** | vendor catalog | [D][W] |
+| `0x0E15` | **physical point not commandable** — the point cannot process commands (seen on `POINT_CMD_VALUE`) | wire behaviour and the vendor catalog agree | [W][D] |
 
-**[OPEN]** The exact code↔class pairing is wire-confirmed only for `0x00AC` (not supported).
-The remaining wire codes (`0x0003`, `0x0002`, `0x0E11`, `0x0E12`, `0x0E15`, `0x0009`) are observed as raw 2-byte
-tails with empirically-derived meanings from the operations that produced them, but are **not** yet
-mapped to a specific named AP2 error class from a capture. Pinning the full table requires either a
-codec-level decode of the error-class→code constants or controlled captures eliciting each class with
-a known stimulus. [W][OPEN]
+**`0x0E10`–`0x0E17` is the FLN error band.** Every code in it reports a fault in
+the field-level network, the device, or the physical point — invalid FLN number,
+invalid drop number, device failed, invalid point number, physical point failed,
+not commandable, value out of range, application invalid for device. A client
+should read any `0x0Exx` tail as *field-level*, not as a record-state rejection.
+[D]
+
+**A correction, recorded because the wrong reading shipped.** The error table in
+earlier editions of this document and in the released tools was wrong in **26 of
+its 42 entries**, and almost all of it was a single defect: the list was
+**shifted by one entry** against the vendor's catalog, from `0x0007` through
+`0x0210` and again across the FLN band, so each code carried the name belonging
+to the next code up. The `_v2` suffixes the old table used
+(`already_exists_v2`, `value_out_of_range_v2`) are the tell -- the duplicate
+names the shift produced were suffixed rather than investigated. Among the
+consequences: `0x0009` was unnamed when it is *already exists*, `0x0E11` was
+named *already exists* when it is an invalid FLN drop number, `0x0E12` was
+*invalid point number* when that is `0x0E13`, and `0x000B`/`0x000C` had *value
+out of range* one code early. One consequence was behavioural rather than
+cosmetic: the released scanner treated `0x0E11` as a **success**, so a failed
+FLN point-add was reported as having worked. The whole table is regenerated and
+fixed in the tools and here. [D]
+
+**Still [OPEN].** The correspondence above is between a wire code and a *named
+error*, which is what an implementer needs. What remains unmapped is the code↔
+**AP2 error class** pairing — the per-operation `*_Error_enum` types of the type
+system — which needs either a codec-level decode or controlled captures eliciting
+each class with a known stimulus. [OPEN]
 
 #### 7.2.3 Implementation guidance
 
@@ -3484,7 +3506,7 @@ The corpus distribution grounds the catalog in observed behavior:
 
   > **Why the numbers changed.** A previous edition of this list gave 433,425 / 43,668 / 43,780 / 7,322 / 2,200 / 296, totalling 530,691 frames. That total is reproducible from neither the deduplicated corpus (206,050) nor a naive count over all 726 capture files including duplicates (910,968), and both counts put `0x2A` at zero. The figures appear to derive from a capture set that is not the one in the evidence base. They are replaced here with counts that are reproducible from it, under the stated criteria. [W]
 - **Direction byte.** 0x00 request/push (262,142), 0x01 success response (261,466), 0x05 error response (7,103). A success response carries the operation's payload after the routing slots; an error response carries exactly a 2-byte error code and nothing else. [W]
-- **Error tail values (the 2-byte code on a 0x05 response).** `0x0003` not-found / unrecognized-opcode (6,860×), `0x00AC` not-supported (163×, the not-supported error class), `0x0E15` not-commandable (40×), `0x0002` out-of-scope (30×), `0x0E11` already-exists (6×), `0x0E12` (3×), `0x0009` (1×). An opcode the panel does not implement returns `0x05 ... 00 03`; this is how the defined-but-unimplemented-on-this-firmware opcodes announce themselves on the wire. [W]
+- **Error tail values (the 2-byte code on a 0x05 response).** `0x0003` not-found / unrecognized-opcode (6,860×), `0x00AC` not-supported (163×), `0x0E15` physical-point-not-commandable (40×), `0x0002` invalid-operation (30×), `0x0E11` FLN-invalid-drop-number (6×), `0x0E12` FLN-device-failed (3×), `0x0009` already-exists (1×). See §7.2.2; `0x0E1x` is the FLN band. An opcode the panel does not implement returns `0x05 ... 00 03`; this is how the defined-but-unimplemented-on-this-firmware opcodes announce themselves on the wire. [W]
 - **Per-opcode response shapes.** Response lengths vary by opcode and by the addressed object; representative shapes from the census (opcode → success-response sizes): 0x010C → 230/231 B (firmware/identity block, §10.5); 0x0220 (read) → 126/138 B or `err 0003` when the point is absent; 0x0271 (COV enable) → 96/108 B; 0x0274 (annunciate) → 0 B (acknowledged, no payload); 0x4640 → 40/41/45/47 B (= 35 + node-name length); 0x0981 (enumerate points) → 88/115/118 B. The "0 B success" pattern (direction 0x01, empty body) is a bare acknowledgement used by push/command/replication opcodes. [W]
 
 ---
@@ -6042,16 +6064,16 @@ specific test that would confirm or falsify it.
    ACK-timeout that declares a peer failed is not pinned. *Test:* on a controlled
    peer, count the heartbeat misses that trigger a failed-node transition.
 
-3. **Error-code value↔class meanings.** *Known:* the wire error tails observed are
-   `0x0003` (not found, dominant), `0x00AC` (not supported), `0x0002`
-   (out-of-scope), `0x0E11` (already exists), `0x0E15` (not commandable), `0x0E12`
-   (a few occurrences, an already-exists-adjacent record-state rejection, meaning
-   unconfirmed), `0x0009` (one occurrence, meaning unconfirmed); the AP2 error-class names exist
-   (not-supported, bad-tag-value, bad-packet-length, etc.). *Missing:*
-   the complete value→class map and the meaning of less-common codes (e.g.
-   `0x0009`); whether per-opcode error namespaces exist. *Test:* drive each
-   error-class condition deliberately on a lab panel (malformed length, bad tag,
-   wrong element count) and record the returned code, building the full map.
+3. **Error-code value↔class meanings.** *Known:* all seven wire error tails the
+   corpus exercises are now **named** (§7.2.2) — `0x0003` not-found, `0x00AC`
+   not-supported, `0x0002` invalid-operation, `0x0009` already-exists, `0x0E11`
+   FLN-invalid-drop-number, `0x0E12` FLN-device-failed, `0x0E15`
+   physical-point-not-commandable — and `0x0E10`–`0x0E17` is the FLN band. The
+   AP2 error-**class** names also exist (not-supported, bad-tag-value,
+   bad-packet-length, …). *Missing:* the mapping between the two, i.e. which
+   named class emits which code, and whether per-opcode error namespaces exist.
+   *Test:* drive each error-class condition deliberately on a lab panel
+   (malformed length, bad tag, wrong element count) and record the returned code.
 
 4. **FLN / P1 and serial-AEM frame bytes.** *Known:* FLN points are a separate
    namespace reached via the `0x09xx` browse family over an established node

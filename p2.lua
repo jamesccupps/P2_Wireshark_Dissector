@@ -1,7 +1,21 @@
 -- p2.lua — Siemens APOGEE P2 (Protocol II) Wireshark dissector
--- Version: 2.6  (2026-08-19)  -- carrier-label correction, error/opcode names, tail-guard fix
+-- Version: 2.7  (2026-08-25)  -- error table corrected against the vendor catalog
 --
 -- Changelog
+--   2.7  Error table corrected. Eight names were wrong -- three outright and a
+--        five-code off-by-one -- and are replaced by the full 0x0001..0x0E17 set.
+--        * 0x0E11 was "already_exists"; it is fln_invalid_drop_number. The
+--          scanner had been treating it as a success, so a failed FLN point-add
+--          reported as having worked.
+--        * 0x0E12 was "record_state_rejected (unconfirmed)" / "invalid_point_number";
+--          it is fln_device_failed. Invalid point number is 0x0E13.
+--        * 0x0009 was unnamed; it is already_exists.
+--        * 0x0002 was "out_of_scope"; it is invalid_operation.
+--        * 0x0E10-0x0E17 is the FLN error band -- field-level faults, not
+--          record-state rejections.
+--        * 0x00AC "not_supported" also covers a function code specific to a
+--          different firmware revision, so it does not prove an opcode is
+--          unimplemented.
 --   2.6  Accuracy pass against the corpus.
 --        * 0x29 / 0x2A carrier labels corrected. They were named "peer maintenance"
 --          and "peer COV-subscribe"; the corpus establishes neither function. They
@@ -10,7 +24,7 @@
 --          exchange.
 --        * Error 0x0E12 named "record_state_rejected (unconfirmed)" -- observed a
 --          few times, adjacent to already-exists, precise meaning not pinned.
---          Rendering it as a known-but-unpinned code beats bare hex.
+--          (Superseded in 2.7: it is fln_device_failed.)
 --        * Opcode 0x0030 AP2_SET_GLOBAL_DATA added.
 --        * BUG FIX: the error-tail read guarded on total>=2 and then read
 --          tvb(total-2,2). On a truncated dir==0x05 frame whose routing slots run to
@@ -1818,13 +1832,48 @@ local MSG_CLASS = {
 }
 local DIR = { [0x00]="request / push", [0x01]="success response", [0x05]="error response" }
 local ERRORS = {
-  [0x0003]="not_found", [0x00AC]="not_supported (E172)", [0x0002]="out_of_scope",
-  [0x0E11]="already_exists", [0x0E15]="not_commandable", [0x0009]="error_0009",
-  -- 0x0E12: observed a few times in the corpus; an already-exists-adjacent
-  -- record-state rejection whose precise meaning is not established
-  -- (PROTOCOL.md §7.2.2, Appendix D item 3). Named here so it renders as a
-  -- known-but-unpinned code rather than bare hex.
-  [0x0E12]="record_state_rejected (unconfirmed)",
+  [0x0001]="no_memory_available",
+  [0x0002]="invalid_command",
+  [0x0003]="not_found",
+  [0x0004]="priority_too_low",
+  [0x0005]="no_change",
+  [0x0007]="point_failed",
+  [0x0008]="out_of_service",
+  [0x0009]="already_exists",
+  [0x000A]="trend_already_exists",
+  [0x000B]="value_unchanged",
+  [0x000C]="value_out_of_range",
+  [0x000D]="not_hostcaller_node",
+  [0x0016]="line_not_traced",
+  [0x0028]="invalid_dst_pair",
+  [0x0040]="invalid_report_id",
+  [0x0065]="command_not_supported",
+  [0x0080]="invalid_user_id",
+  [0x0081]="invalid_password",
+  [0x0082]="user_accounts_database_full",
+  [0x00AB]="coldstart_required",
+  [0x00AC]="not_supported",
+  [0x00B7]="too_many_framing_errors",
+  [0x00B8]="scu_no_answer",
+  [0x00F9]="invalid_point_address",
+  [0x00FA]="failed_io_device",
+  [0x00FE]="io_timeout",
+  [0x0200]="monitor_list_full",
+  [0x0202]="flt_transfer_in_progress",
+  [0x0203]="flt_transfer_killed",
+  [0x0205]="tec_not_added",
+  [0x0206]="connection_lost",
+  [0x0207]="warm_started",
+  [0x0209]="protocol_error",
+  [0x0210]="timeout",
+  [0x0E10]="fln_invalid_fln_number",
+  [0x0E11]="fln_invalid_drop_number",
+  [0x0E12]="fln_device_failed",
+  [0x0E13]="fln_invalid_point_number",
+  [0x0E14]="fln_physical_point_failed",
+  [0x0E15]="physical_point_not_commandable",
+  [0x0E16]="fln_value_out_of_range",
+  [0x0E17]="fln_application_invalid_for_device",
 }
 local PRIORITY = {
   [0x00]="NONE (read)", [0x01]="tec_ovrd", [0x05]="PDL", [0x0A]="host_2",

@@ -7,6 +7,26 @@ The current release is summarised at the top of [README.md](README.md).
 > what was believed then; where a later release corrected one, the correction is
 > in that release's entry and in `PROTOCOL.md`.
 
+## v2.7.1 — the error table, corrected
+
+- **26 of the 42 error names were wrong, and it was one defect.** The table was
+  **shifted by one entry** against the vendor's field-panel error catalog, from
+  `0x0007` through `0x0210` and again across the FLN band, so each code carried
+  the name belonging to the next code up. The `_v2` suffixes the old table used
+  (`already_exists_v2`, `value_out_of_range_v2`) are the tell: the duplicate
+  names the shift produced were suffixed rather than investigated.
+- **One consequence was behavioural, not cosmetic.** `0x0E11` was named
+  `already_exists` and `p2_scanner` treated it as a **success**, so a failed FLN
+  point-add was reported as having worked. `0x0E11` is *FLN invalid drop number*;
+  the code that means already-exists is `0x0009`, which had been left unnamed.
+- **`0x0E10`–`0x0E17` is the FLN error band** — field-level faults, not the
+  record-state rejections the old table implied.
+- **`not_supported` (`0x00AC`) is revision-dependent.** It also covers a function
+  code that is specific to a different firmware revision, so a panel answering it
+  does not prove the opcode is unimplemented.
+- The table is now **generated** rather than hand-maintained, and `PROTOCOL.md`
+  §7.2.2 records the correction rather than quietly replacing it.
+
 ## v2.7 — the operand, the paging model, and four decoded records
 
 - **Opcodes carry operands.** A run of consecutive opcodes is usually one

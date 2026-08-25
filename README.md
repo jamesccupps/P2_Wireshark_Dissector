@@ -13,6 +13,10 @@ equipment. This repository contains three things:
 The dissector is built and validated from wire captures; the opcode names are the
 protocol's AP2 function-code vocabulary.
 
+> **v2.7.1 — the error table, corrected.** 26 of 42 error names were wrong
+> (a one-entry shift against the vendor catalog); `0x0E11` had been treated as a
+> success by the scanner. See the [changelog](CHANGELOG.md).
+>
 > **v2.7 — the operand, the paging model, and four decoded records.**
 > Many opcodes turn out to be **one operation with a parameter encoded in the
 > opcode** rather than in the body, so a run of consecutive codes is an

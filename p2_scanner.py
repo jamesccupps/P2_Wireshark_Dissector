@@ -116,7 +116,7 @@ import p2_data            # compiled-in opcode / point-type / enum tables
 # Single source of truth for the scanner library version. Keep in sync
 # with pyproject.toml's [project].version. `import p2_scanner` users can
 # inspect `p2_scanner.__version__` rather than parsing pyproject metadata.
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Console output uses Unicode formatting chars (✓ ✗ ⚠ ── → ═) for readability.
 # Windows defaults to cp1252 in cmd.exe / PowerShell, which crashes on these.
@@ -209,51 +209,48 @@ def effective_scanner_name() -> str:
 # responses. Full catalog of 37 codes per APOGEE_P2_SPEC.md §10.2; codes
 # observed on the wire most often (0x0003, 0x00AC, 0x0E15) are commented.
 _P2_STATUS_ERRORS = {
-    # Common codes
-    0x0002: 'object_unknown',                # E2 — scope-restricted op out of scope
-    0x0003: 'not_found',                     # E3 — dominant error in normal operation
-    0x00AC: 'not_supported',                 # E172 — opcode not on this firmware
-    0x0E11: 'already_exists',                # E3601 — CreateObject; treat as success
-    0x0E15: 'physical_point_not_commandable',# E3605 — 0x0240 vs SYST; retry as 0x4222
-
-    # Vendor-documented (BACnet ALN Manual 125-3020 Appendix C; spec §10.2)
-    0x0001: 'no_memory_available',           # E1
-    0x0004: 'priority_too_low',              # E4
-    0x0005: 'failed_no_change',              # E5
-    0x0007: 'out_of_service',                # E7
-    0x0008: 'field_panel_general_error',     # E8
-    0x0009: 'already_exists_v2',             # E9 — sibling of 0x0E11
-    0x000A: 'trend_already_exists',          # E10 — also value_unchanged
-    0x000B: 'value_out_of_range',            # E11 — also see 0x0E16
-    0x000C: 'line_not_traced',               # E12 — PPCL trace
-    0x000D: 'line_state_mismatch',           # E13 — PPCL enable/exists
-    0x0016: 'has_unresolved_points',         # E22 — PPCL or zone
-    0x0028: 'line_accessed_not_traced',      # E40 — PPCL tracebit
-    0x0040: 'tiu_busy',                      # E64
-    0x0065: 'command_not_supported',         # E101 — sibling of E172
-    0x0080: 'point_in_hand_mode',            # E128
-    0x0081: 'invalid_password',              # E129
-    0x0082: 'user_accounts_database_full',   # E130
-    0x00AB: 'coldstart_required',            # E171
-    0x00B7: 'operation_aborted_warmstart',   # E183
-    0x00B8: 'too_many_framing_errors',       # E184
-    0x00F9: 'invalid_point_address',         # E249
-    0x00FA: 'failed_io_device',              # E250
-    0x00FE: 'monitor_list_full',             # E254 — COV
-    0x0200: 'flt_transfer_in_progress',      # E512 — Firmware Loading Tool
-    0x0202: 'flt_transfer_killed',           # E514
-    0x0203: 'tec_not_added',                 # E515
-    0x0205: 'connection_lost',               # E517
-    0x0206: 'warm_started',                  # E518
-    0x0207: 'protocol_error',                # E519
-    0x0209: 'timeout',                       # E521
-    0x0210: 'invalid_fln_number',            # E528
-    0x0E10: 'invalid_drop_number',           # E3600
-    0x0E12: 'invalid_point_number',          # E3602
-    0x0E13: 'physical_point_failed',         # E3603
-    0x0E14: 'physical_point_not_commandable_v2', # E3604 — sibling of E3605
-    0x0E16: 'value_out_of_range_v2',         # E3606 — sibling of E11
-    0x0E17: 'application_invalid_for_device',# E3607
+    0x0001: 'no_memory_available',               # E1     no memory for the record
+    0x0002: 'invalid_command',                   # E2     the command is not valid for this object (e.g. commanding a non-virtual LDI or LAI point)
+    0x0003: 'not_found',                         # E3     the named object does not exist on the panel
+    0x0004: 'priority_too_low',                  # E4     the commanding priority is below the point's active priority
+    0x0005: 'no_change',                         # E5     the point is already in the requested condition
+    0x0007: 'point_failed',                      # E7     the commanded point is failed (usually hardware)
+    0x0008: 'out_of_service',                    # E8     the point is operator-disabled
+    0x0009: 'already_exists',                    # E9     a define collided with an existing record
+    0x000A: 'trend_already_exists',              # E10    the point is already trended
+    0x000B: 'value_unchanged',                   # E11    the point already holds the requested value
+    0x000C: 'value_out_of_range',                # E12    the value is outside the point's range
+    0x000D: 'not_hostcaller_node',               # E13    the node is not a host-caller node
+    0x0016: 'line_not_traced',                   # E22    a PPCL line was reached but not traced
+    0x0028: 'invalid_dst_pair',                  # E40    the daylight-saving date pair is invalid
+    0x0040: 'invalid_report_id',                 # E64    the requested report does not exist
+    0x0065: 'command_not_supported',             # E101   the selected function is not supported
+    0x0080: 'invalid_user_id',                   # E128   login attempted with an unknown user id
+    0x0081: 'invalid_password',                  # E129   login attempted with a wrong password
+    0x0082: 'user_accounts_database_full',       # E130   the user-account database is full
+    0x00AB: 'coldstart_required',                # E171   the panel cannot accept a database load until it is coldstarted
+    0x00AC: 'not_supported',                     # E172   the P2/P3 function code is not supported by this panel -- unused, or specific to another firmware revision
+    0x00B7: 'too_many_framing_errors',           # E183   excessive framing errors on the network
+    0x00B8: 'scu_no_answer',                     # E184   the SCU did not answer
+    0x00F9: 'invalid_point_address',             # E249   the point address is not valid
+    0x00FA: 'failed_io_device',                  # E250   the input/output board is failed
+    0x00FE: 'io_timeout',                        # E254   input/output timed out during a load or verify
+    0x0200: 'monitor_list_full',                 # E512   the point monitor list is full
+    0x0202: 'flt_transfer_in_progress',          # E514   a database transfer is already running
+    0x0203: 'flt_transfer_killed',               # E515   the database transfer aborted
+    0x0205: 'tec_not_added',                     # E517   point addition failed -- the panel lacks long-point-name support
+    0x0206: 'connection_lost',                   # E518   a panel failed while a command was in progress
+    0x0207: 'warm_started',                      # E519   a warmstart occurred while a command was in progress
+    0x0209: 'protocol_error',                    # E521   a low-level protocol error occurred during a command
+    0x0210: 'timeout',                           # E528   the server panel did not answer in the allotted time
+    0x0E10: 'fln_invalid_fln_number',            # E3600  FLN number outside the supported range
+    0x0E11: 'fln_invalid_drop_number',           # E3601  the FLN device's drop number is invalid
+    0x0E12: 'fln_device_failed',                 # E3602  the FLN device is failed
+    0x0E13: 'fln_invalid_point_number',          # E3603  the point address is outside the device's range
+    0x0E14: 'fln_physical_point_failed',         # E3604  the physical point is failed
+    0x0E15: 'physical_point_not_commandable',    # E3605  the physical point cannot process commands
+    0x0E16: 'fln_value_out_of_range',            # E3606  the commanded value is outside the point's physical range
+    0x0E17: 'fln_application_invalid_for_device', # E3607  the application is not valid for this FLN device
 }
 
 
