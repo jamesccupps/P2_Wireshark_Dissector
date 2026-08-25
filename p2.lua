@@ -1829,7 +1829,7 @@ local resp_op = {}
 -- (fingerprint via CABINET_DISPLAY 0x010C), NOT by direction:
 --   data channel:    0x33 legacy / 0x34 modern  (same opcodes + same f32 encoding)
 --   2nd channel:     0x2E legacy / 0x2F modern  (identity + DB-change/replication records + alarm prints)
---   peer (mirror-only): 0x29 maintenance / 0x2A panel<->panel COV-subscribe
+--   peer (mirror-only): 0x29 / 0x2A session carriers; both dominated by EBLN_PING
 local MSG_CLASS = {
   [0x33]="data (legacy panel)", [0x34]="data (modern panel)",
   -- Labels follow PROTOCOL.md §6.2. 0x29 is the low-volume session carrier seen
