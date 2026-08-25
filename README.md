@@ -13,14 +13,12 @@ equipment. This repository contains three things:
 The dissector is built and validated from wire captures; the opcode names are the
 protocol's AP2 function-code vocabulary.
 
-> **v2.8.1 — the segmentation ceiling.** A segment buffer is 16,384 bytes, of
-> which the encoder may fill 16,382; the two reserved bytes at the head are the
-> `u16` function code, which is why the wire carries the opcode immediately
-> before the body and why `total_length` counts it. Reassembly is a cursor
-> against a declared total. The ceiling is not exercised by any capture we hold,
-> so the on-wire form of a multi-segment exchange stays open.
->
-> Earlier releases are in the [changelog](CHANGELOG.md).
+> **v2.8.2 — the decode side.** A request may carry a **zero-length body** — 220
+> in the corpus do, and it is how a parameterless operation is encoded: the `u16`
+> opcode is the whole message. And the opcode's high byte is a **structural**
+> family band, not a descriptive one: the codec's command factory switches on
+> `opcode & 0xFF00`.
+>> Earlier releases are in the [changelog](CHANGELOG.md).
 
 Click a P2 packet and get:
 

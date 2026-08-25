@@ -7,6 +7,22 @@ The current release is summarised at the top of [README.md](README.md).
 > what was believed then; where a later release corrected one, the correction is
 > in that release's entry and in `PROTOCOL.md`.
 
+## v2.8.2 — the decode side
+
+- **A request may carry a zero-length body**, and 220 in the corpus do — `0x010C`
+  (163x), `0x4633 EBLN_REPL_NOTIFY` (22x), `0x0951 DBCHANGE_POINT` (11x) and the
+  rest of the `DBCHANGE` family. It is the natural encoding of a parameterless
+  operation: the `u16` opcode is the whole message. An encoder must be willing to
+  emit an ASDU of length zero and a decoder must accept it as complete rather
+  than truncated.
+- **The family band is structural, not descriptive.** §9.4 said the opcode's high
+  byte "loosely tracks" the family. The supervisor's command factory selects a
+  subclass by switching on `opcode & 0xFF00`, so the band is a real
+  classification in the implementation.
+- Decode confirmed as the mirror of encode: the decoder is handed `buf+2` and
+  `total-2`, so the two reserved opcode bytes of v2.8.1 are established from the
+  receive direction too.
+
 ## v2.8.1 — the segmentation ceiling
 
 - **A segment is 16,384 bytes; the encoder may fill 16,382.** The two bytes held
