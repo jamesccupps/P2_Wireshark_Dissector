@@ -298,14 +298,18 @@ Some installations run a supervisor that **also** listens on TCP/5034 as a secon
 
 The decisive evidence that 5034 is not a protocol feature: a supervisor's identity string commonly carries a `|5034` suffix (e.g. `DCC-SVR|5034`), and that exact suffixed identity appears in thousands of frames captured on a **5033-only** connection, while the literal text `5033` appears in zero frames anywhere. The supervisor stamps its `HOST|PORT` identity into the routing slot regardless of which TCP port carries the frame — so the `|PORT` suffix is part of the *identity string*, not a live port indicator (§2.1.5, §6.4). [W] A conformant implementation derives all frame semantics from the frame's direction and contents, never from the TCP port that carried it, and defaults to 5033 only (exposing any other port as explicit configuration). [I]
 
-**And the two listeners on a supervisor need not behave alike.** At one observed
-supervisor, panel-initiated sessions succeed on `5034` — a panel connects, pushes
-COV reports and point commands, and every one is answered — while the same
-supervisor's `5033` accepts the connection, reads the request and then closes
-with no application reply at all: 984 such connections in 25 minutes, nine
-panels retrying every 14 seconds, zero payload bytes returned (§5.1). A client
-MUST NOT infer from an open port that the peer will serve it, and MUST treat a
-silently closed session as a policy outcome rather than a fault. [W]
+**And the two listeners on one host need not be the same service.** At an
+observed supervisor, panel-initiated sessions succeed on `5034` — a panel
+connects, pushes COV reports and point commands, and every one is answered —
+while `5033` on that same host accepts the connection, reads the request and
+closes with no application reply: 984 such connections in 25 minutes, nine panels
+retrying every 14 seconds, zero payload bytes returned (§5.1). The reason is a
+deployment one and it generalises: **the canonical port was already taken by
+another product on that machine**, so the supervisor's P2 peer service was
+configured onto a second port. Whoever binds `5033` there answers the TCP
+handshake and then drops the session. A client MUST NOT infer from an open port
+that the peer speaks P2, and MUST treat a silently closed session as a
+configuration outcome rather than a fault. [W]
 
 #### 2.1.3 The serial BLN (legacy datalink, context only)
 
@@ -1921,15 +1925,27 @@ Most addressable requests open with a **scope tag**: a scope-name string TLV (§
                         scope_byte=0x23, then wildcard mask 3F FF FF FF
 ```
 
-The trailing `3F FF FF FF` is a wildcard mask, and it is all but invariant:
-**19,066 of the 19,067 scope tags in the corpus carry exactly those four bytes.**
-The exception is a single `AP2_TEC_DEFINITION` request that carries
-`BF FF FF FF` — the same mask with the top bit set — so a parser should read the
-four bytes rather than assert them. The scope names seen at this position are
-`NONE` (13,557), `SYST` (5,448), `CC` (59, on alarm print and acknowledge) and
-`HIGH` (the one `BF` frame); two further four-character names appear once each in
-the same position on operations that also carry named objects, so whether they
-are scope names or object names is not settled. [W] The leading `scope_byte` **is the command priority** at which the operation acts — it is not a separate flag. The same byte both sets the priority a write commands the target at, and (through the read-vs-write handler split) selects the body grammar that follows. [W][S]
+**This block is a `User_profile`, and reading it as one explains every field.**
+The structure catalog defines `User_profile` as `user_logon : TEXT_`,
+`point_priority : Point_priority`, `access_class : BITSTRING32` — a name, a
+priority and a 32-bit rights mask — which is exactly the TLV + byte + four bytes
+seen here. [S][W]
+
+| Field | Observed |
+|---|---|
+| `user_logon` | `NONE` (13,557), `SYST` (5,448), `CC` (59, on alarm print and acknowledge), and an **operator's login name** where the operation came from an interactive session |
+| `point_priority` | `0x00` none (17,650), `0x23` **oper** (35, 1,061), `0x01` **tec_ovrd** (356) — the §7 command-priority enum |
+| `access_class` | `0x3FFFFFFF` on 19,066 of 19,067 requests; `0xBFFFFFFF` on one |
+
+So the "scope names" are **logon identities**: `SYST` and `NONE` are what the
+stack presents for system-originated work, and a human login appears in the same
+field when a person drives the operation. The single `0xBFFFFFFF` came from a
+panel operation issued while an operator was logged into that panel's Telnet CLI
+— same mask as the system contexts plus the top bit, i.e. a different
+access-rights set for a privileged session, not a different mask format. A
+parser should therefore **read all three fields** rather than matching a fixed
+prologue: an unfamiliar name in the first TLV is an operator, not a parse
+failure. [W] The leading `scope_byte` **is the command priority** at which the operation acts — it is not a separate flag. The same byte both sets the priority a write commands the target at, and (through the read-vs-write handler split) selects the body grammar that follows. [W][S]
 
 Defined scope-name TLVs observed on the wire: [W]
 
@@ -4035,6 +4051,38 @@ zone enters mode M*; the command table says *in mode M, command these points to
 these values* — typically the day/night point; and a point's **mode point** then
 selects which alarm levels are in force (§10.8, alarm-mode record). Scheduling,
 commanding and alarming are one chain, and the mode point is the joint. [W][D]
+
+**`AP2_EMS_PRINT` (0x0368) — the panel announcing an operator session.** When
+someone logs into a panel's Telnet console, the panel reports it to the
+supervisor, unsolicited, on the second channel. [W]
+
+```
+u8 event code | 01 00 00 | TLV(node name) | TLV(account) | TLV(account description)
+```
+
+| Code | Meaning | Account field carries |
+|---:|---|---|
+| `0x07` | **logon** | the name **as typed** at the prompt |
+| `0x08` | **logoff** | the account's **canonical** name |
+| `0x09` | an attempt that resolved to no account | the name as typed, and no description |
+
+The reading comes from a capture in which an operator logged into one panel
+twice: `0x09` with a typed name and no description, then `0x07`/`0x08` pairs
+bracketing each session — 127 seconds for the first, 301 for the second, with
+that operator's own request (a TEC definition read) falling inside the second
+pair and carrying the same account name in its `User_profile` prologue (§8.2).
+Two older captures carry codes `0x03` and `0x04` with the node name only, so the
+code space is wider than these three. [W]
+
+Three consequences worth stating plainly. The **account name and the account's
+own description travel in clear** on an ordinary data connection, so anyone who
+can see the traffic learns which named accounts exist on a panel and when they
+are used. A **failed or unresolved login is distinguishable on the wire** from a
+successful one by the event code, which makes login activity observable to a
+passive monitor — useful defensively, and equally useful to an attacker who is
+already on the segment. And because the same account name reappears in the
+`User_profile` of every request that session issues, **operator actions are
+attributable on the wire** to the account that made them.
 
 ### 10.9 The full structure set is enumerable
 

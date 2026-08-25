@@ -96,10 +96,12 @@ ad hoc: `tshark -X lua_script:p2.lua -r capture.pcapng`.
 - **TCP/5034** is, in some deployments, a second supervisor-side listener carrying the
   panel→supervisor push/announce (reverse) channel. It is optional and
   deployment-specific; the protocol on it is identical to 5033.
-- **A supervisor's two listeners may not behave alike.** One observed supervisor
-  serves panel-initiated sessions on 5034 and, on 5033, accepts the connection,
-  reads the request and closes without replying — 984 times in 25 minutes, nine
-  panels retrying every 14 s. An open port is not a promise of service.
+- **Two listeners on one host may not be the same service.** At one observed
+  supervisor the canonical 5033 was already taken by another product, so the P2
+  peer service was configured onto 5034. Panel-initiated sessions succeed on
+  5034; on 5033 the connection is accepted, the request read, and the session
+  closed with no reply — 984 times in 25 minutes, nine panels retrying every
+  14 s. An open port is not a promise that the peer speaks P2.
 
 The dissector binds both. For any other port, use **Analyze → Decode As…** to map it to
 `P2`. Frame semantics derive from the frame's contents and direction, never from the TCP

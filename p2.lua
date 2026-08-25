@@ -2954,7 +2954,12 @@ f.eqs_val   = ProtoField.float ("p2.eqs_value","Commanded Value")
 f.eqs_time  = ProtoField.string("p2.eqs_time","Scheduled Time")
 f.rec_index = ProtoField.uint32("p2.record_index","Record Index (resume key)",base.DEC)
 f.tlv       = ProtoField.string("p2.tlv","TLV String")
-f.scope     = ProtoField.string("p2.scope","Scope Tag")
+f.scope     = ProtoField.string("p2.scope","User Logon (User_profile)")
+f.access    = ProtoField.uint32("p2.access_class","Access Class (BITSTRING32)",base.HEX)
+f.ems_code  = ProtoField.uint8 ("p2.ems_code","Session Event",base.HEX,
+                { [0x07]="logon", [0x08]="logoff", [0x09]="attempt (no account resolved)" })
+f.ems_user  = ProtoField.string("p2.ems_user","Operator Account")
+f.ems_desc  = ProtoField.string("p2.ems_desc","Account Description")
 f.priority  = ProtoField.uint8 ("p2.priority","Command Priority",base.HEX,PRIORITY)
 f.value     = ProtoField.float ("p2.value","Value (f32 BE)")
 f.cov_count = ProtoField.uint16("p2.cov.count","COV point count",base.DEC)
@@ -3004,7 +3009,7 @@ f.body      = ProtoField.bytes ("p2.body","Body")
 p2.fields = {
   f.total_len,f.msg_type,f.msg_class,f.seq,f.dir,f.bln1,f.dst,f.bln2,f.src,
   f.opcode,f.err,f.schema,f.operand,f.tlv,f.scope,f.priority,f.value,
-  f.date,f.modept,f.setpoint,f.lvl_off,f.lvl_pri,f.lvl_cat,f.lvl_msg,
+  f.access,f.ems_code,f.ems_user,f.ems_desc,f.date,f.modept,f.setpoint,f.lvl_off,f.lvl_pri,f.lvl_cat,f.lvl_msg,
   f.eqs_mode,f.eqs_val,f.eqs_time,f.rec_index,
   f.cov_count,f.cov_point,f.cov_cond,
   f.cov_pri,f.cov_ctrl,f.cov_oos,f.cov_fail,f.cov_proof,f.cov_opdis,f.cov_pgmdis,f.cov_cmdal,f.cov_astate,f.cov_apri,
@@ -3021,7 +3026,26 @@ local function cstr(tvb, off)
   for i = off, n-1 do if tvb(i,1):uint()==0 then return tvb(off,i-off):string(),(i-off+1) end end
   return nil
 end
-local SCOPE = { SYST=true, NONE=true, CC=true }
+-- The prologue on most addressable requests is a User_profile:
+--   TLV(user_logon) | u8 point_priority | BITSTRING32 access_class
+-- SYST/NONE/CC are the logons the stack presents for system-originated work;
+-- an operator driving a panel session puts their own login here instead, so
+-- an unknown name in this position is a person, not a parse failure.
+-- The system logons the stack presents for its own work.  A *person* driving a
+-- session puts their own account name here instead, so this table is a label
+-- hint only -- recognition is by shape (see profile_at), never by name list:
+-- hardcoding site account names would neither generalise nor be ours to ship.
+local SYSTEM_LOGON = { SYST=true, NONE=true, CC=true }
+-- A User_profile prologue: TLV(user_logon) + u8 point_priority +
+-- BITSTRING32 access_class, whose low three bytes are all ones in every
+-- observed frame.  Returns the logon and the offset past the block, or nil.
+local function profile_at(tvb, off, last)
+  local s, l, no = read_tlv(tvb, off, last)
+  if not s or l < 2 or l > 8 or no + 5 > last then return nil end
+  if not s:match("^[%w%-%._]+$") then return nil end
+  if tvb(no+2,3):uint() ~= 0xFFFFFF then return nil end
+  return s, l, no
+end
 local function tlv_walk(tvb, off, last, tree)
   local i = off
   while i + 3 <= last do
@@ -3029,7 +3053,7 @@ local function tlv_walk(tvb, off, last, tree)
       local l = tvb(i+2,1):uint()
       if l > 0 and i+3+l <= last then
         local s = tvb(i+3,l):string()
-        if SCOPE[s] then
+        if SYSTEM_LOGON[s] then
           tree:add(f.scope, tvb(i,3+l), s)
           if i+3+l < last then tree:add(f.priority, tvb(i+3+l,1)) end
         else tree:add(f.tlv, tvb(i,3+l), s) end
@@ -3137,11 +3161,12 @@ local function date4(tvb, off, last)
 end
 -- consume an optional scope tag: 01 00 <len> <SCOPE> <command-priority:1> <3F FF FF FF>; returns next_off
 local function scope_tag(tvb, off, last, tree)
-  local s, l, no = read_tlv(tvb, off, last)
-  if s and SCOPE[s] and no + 5 <= last and tvb(no+1,4):uint() == 0x3FFFFFFF then
-    local sc = tree:add(p2, tvb(off, (no+5)-off), "Scope: "..s)
+  local s, l, no = profile_at(tvb, off, last)
+  if s then
+    local sc = tree:add(p2, tvb(off, (no+5)-off), "User_profile: "..s)
     sc:add(f.scope, tvb(off,3+l), s)
-    sc:add(f.priority, tvb(no,1))     -- command priority byte (wire-confirmed: 0x23 OPER on commands)
+    sc:add(f.priority, tvb(no,1))     -- point_priority (wire-confirmed: 0x23 oper on commands)
+    if no + 5 <= last then sc:add(f.access, tvb(no+1,4)) end   -- access_class bit string
     return no + 5
   end
   return off
@@ -3198,6 +3223,21 @@ local function dissect_alarm(tvb, off, last, tree)
       else off = off + 1 end
     end
   end
+end
+-- EMS_PRINT 0x0368: the panel announcing an operator session on its own console.
+-- Body: u8 event code | 01 00 00 | TLV(node) | TLV(account) | TLV(description).
+-- The account name arrives as typed on logon and in its canonical case on logoff,
+-- and the description is the account's own text -- all in clear.
+local function dissect_ems(tvb, off, last, tree)
+  if off >= last then return end
+  tree:add(f.ems_code, tvb(off,1)); off = off + 4        -- code + 01 00 00
+  local labels = { f.pt_name, f.ems_user, f.ems_desc }
+  for i = 1, 3 do
+    local v, l, no = read_tlv(tvb, off, last); if not v then break end
+    if l > 0 then tree:add(labels[i], tvb(off+3,l)) end
+    off = no
+  end
+  if off < last then tlv_walk(tvb, off, last, tree) end
 end
 -- opcodes whose request body is scope?+Name_search (point reads, trend read, bulk uploads)
 local ADDR_OPS = {
@@ -3379,6 +3419,7 @@ local function dissect_one(tvb, pinfo, tree)
           elseif op==0x4634 or op==0x4636 then dissect_roster(tvb,off,total,bt)
           elseif op==0x4640 then dissect_identity(tvb,off,total,bt)
           elseif op==0x0508 then dissect_alarm(tvb,off,total,bt)
+          elseif op==0x0368 then dissect_ems(tvb,off,total,bt)
           elseif op==0x0271 or op==0x0272 or op==0x0273 then dissect_addr(tvb,off,total,bt,false,"cov")
           elseif op==0x0240 then dissect_addr(tvb,off,total,bt,true,"value")
           elseif op==0x0241 then dissect_addr(tvb,off,total,bt,true,"none")
