@@ -735,7 +735,7 @@ A panel may alternatively host a BACnet MS/TP field bus in place of P1 (`Fln_typ
 
 > **[OPEN] FLN/P1 frame bytes.** The P1 fieldbus discovery transaction (P1WhoAreYou), addressing (drop + application number), physical layer (RS-485 2-wire), and baud are documented, but the P1 frame byte layout itself is unobserved. The on-wire P1 frame structure, the WhoAreYou request/response bytes, and the per-poll cadence/retry behavior require a P1-bus capture or a route-through capture from the BLN. **The route-through opcode is now named: `0x0313 AP2_P1_ROUTE`, with `0x0314` alongside it** (§9.1.1). Sixteen distinct field-device operations tunnel through `0x0313`, so a capture containing it carries P1 payloads inside a P2 frame — which is the cheapest route to these bytes, and needs no access to the RS-485 segment itself. Neither opcode occurs in any capture in the present corpus.
 
-> **[OPEN] P2 segmentation thresholds and reassembly rules.** The ~256-byte figure from vendor connection-test material is a *connection-test ping* size, **not** a maximum P2 data-packet cap — single P2 frames are observed with `total_len` up to ≈1,587 bytes (a ~1,530-byte body of packed records plus header+slots) in one response, so a single frame's `total_len` is bounded only by the u32 length field (§6.7) [W]. The P2 application layer still carries an explicit more-follows segmentation flag and segment-mapping at the ASDU layer for results large enough to exceed an implementation ceiling [S], but the exact segmentation threshold and the more-follows flag offset/reassembly rules are not pinned on the wire. Needs a multi-segment upload capture for confirmation.
+> **[OPEN, LARGELY ANSWERED] P2 segmentation thresholds and reassembly rules.** The ~256-byte figure from vendor connection-test material is a *connection-test ping* size, **not** a maximum P2 data-packet cap — single P2 frames are observed with `total_len` up to ≈1,587 bytes (a ~1,530-byte body of packed records plus header+slots) in one response [W]. **The ceiling and the reassembly rule are now recovered from the supervisor's AP2 codec.** A segment buffer is **16,384 bytes**, of which the encoder is handed `buf+2` with a capacity of **16,382 bytes**; the two reserved bytes at `buf[0]` are the `u16` function code, which is why the wire carries the opcode immediately before the body and why `total_length` includes it. Reassembly is a cursor against a declared total: each mapped segment copies `n` bytes and advances the cursor, except the last, whose length is `total - cursor`; the sender therefore knows the total before it begins. The command object carries an explicit **more-follows** field, set on the segmenting path and cleared on the direct one. [S] **What is still open is the wire behaviour at the threshold.** No body in the corpus exceeds 16,382 B — the largest complete body is 1,570 B and the largest *declared* is 12,073 B — so the corpus is consistent with the ceiling without exercising it. Whether a result larger than one segment appears as two P2 frames, and what marks the continuation on the wire, needs a capture of an upload large enough to segment. [W][OPEN]
 
 ### 4.6 The serial trunk is token-passing, and its parameters are named
 
@@ -1547,6 +1547,26 @@ in the corpus has `total_len` ≈ **1,587 bytes** — roughly a **1,530-byte bod
 `TLV(name)+value` records plus the 13-byte header and the NUL-terminated routing slots. (A raw census
 maximum of 65,536 B is a stream-desynchronization artifact, not a real frame.) Large multi-record
 read/trend responses arrive as one large frame, not as a 256-byte-segmented exchange. [W]
+
+**The sender's ceiling, and the two reserved bytes.** The supervisor's AP2 codec
+allocates a **16,384-byte** segment buffer and hands its encoder `buf+2` with a
+capacity of **16,382 bytes**. The two bytes it holds back at `buf[0]` are the
+`u16` function code, written after the body is encoded — which is exactly why the
+wire carries the opcode immediately before the body, and why `total_length`
+counts it. An implementer reading a body is reading the encoder's `buf+2`. [S]
+
+**Reassembly is a cursor against a declared total**, not a negotiation. Each
+mapped segment copies `n` bytes into the buffer and advances the cursor; the
+final segment's length is `total - cursor`. The sender knows `total` before it
+begins, and the command object carries an explicit more-follows field, set on the
+segmenting path and cleared on the direct one. [S]
+
+**The ceiling is not exercised by anything we have captured.** No body in the
+corpus exceeds 16,382 B: the largest complete body is 1,570 B and the largest
+*declared* body is the 12,073-byte replication data store of §9.5. So a client
+may size a receive buffer at 16 KB with confidence for this implementation, but
+the on-wire form of a **multi-segment** exchange — whether it appears as two P2
+frames and what marks the continuation — remains unobserved (§4.5). [W][S]
 
 **The observed continuation mechanism for `UPL_ALL_*` is application-layer cursoring, not a
 frame-level more-follows flag.** Bulk enumerations (`UPL_ALL_POINT 0x0981`, `UPL_ALL_TEC 0x0986`,

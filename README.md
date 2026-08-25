@@ -13,35 +13,14 @@ equipment. This repository contains three things:
 The dissector is built and validated from wire captures; the opcode names are the
 protocol's AP2 function-code vocabulary.
 
-> **v2.8.0 — the two EQS records, decoded in full.** `0x0989` goes from five
-> identified fields to eleven; `0x0987`'s lead `u16` is a count of names; and the
-> trailing `u16` on both is a state-text-table id, after four wrong readings.
+> **v2.8.1 — the segmentation ceiling.** A segment buffer is 16,384 bytes, of
+> which the encoder may fill 16,382; the two reserved bytes at the head are the
+> `u16` function code, which is why the wire carries the opcode immediately
+> before the body and why `total_length` counts it. Reassembly is a cursor
+> against a declared total. The ceiling is not exercised by any capture we hold,
+> so the on-wire form of a multi-segment exchange stays open.
 >
-> **v2.7.1 — the error table, corrected.** 26 of 42 error names were wrong
-> (a one-entry shift against the vendor catalog); `0x0E11` had been treated as a
-> success by the scanner. See the [changelog](CHANGELOG.md).
->
-> **v2.7 — the operand, the paging model, and four decoded records.**
-> Many opcodes turn out to be **one operation with a parameter encoded in the
-> opcode** rather than in the body, so a run of consecutive codes is an
-> enumeration: `0x0220`–`0x022C` is *point log* with thirteen filters,
-> `UPL_DEL_x`/`UPL_ADDED_x`/`UPL_ALL_x` is one upload with three phases. The
-> dissector now names the operand (`p2.operand`) — 55 families, 146 opcodes,
-> about a fifth of the request frames in a real capture — and the scanner prints
-> it too. Bulk reads are documented as one **range-and-resume** idiom with four
-> selectors, and a resume value outside the requested range means "start at the
-> beginning". Four record types are decoded and dissected: the enhanced-alarm
-> definition (mode point, set point, and the alarm-level table) and the three
-> equipment-scheduling records (zone, per-mode command table, and the mode
-> schedule with its effective dates and start time). Dates carry a weekday byte
-> and the dissector **checks it against the date**, reporting a mismatch instead
-> of hiding it. `PROTOCOL.md` had a full accuracy audit: the §9.5 catalog is now
-> generated from the same data the tools ship (names, wire tags and counts agree
-> row for row), every corpus figure is reproducible from one stated census, and
-> the table of contents is complete. See [CHANGELOG.md](CHANGELOG.md) for
-> earlier releases.
-
-## What it does
+> Earlier releases are in the [changelog](CHANGELOG.md).
 
 Click a P2 packet and get:
 

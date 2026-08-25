@@ -7,6 +7,23 @@ The current release is summarised at the top of [README.md](README.md).
 > what was believed then; where a later release corrected one, the correction is
 > in that release's entry and in `PROTOCOL.md`.
 
+## v2.8.1 — the segmentation ceiling
+
+- **A segment is 16,384 bytes; the encoder may fill 16,382.** The two bytes held
+  back at the head are the `u16` function code, written after the body is
+  encoded — which is why the wire carries the opcode immediately before the body
+  and why `total_length` counts it. An implementer reading a body is reading the
+  encoder's `buf+2`.
+- **Reassembly is a cursor against a declared total**, not a negotiation: each
+  mapped segment copies `n` bytes and advances the cursor, and the last segment's
+  length is `total - cursor`. The sender knows the total before it begins.
+- **The ceiling is not exercised by anything captured.** No body in the corpus
+  exceeds 16,382 B — largest complete 1,570 B, largest declared 12,073 B — so a
+  client may size a receive buffer at 16 KB with confidence, while the on-wire
+  form of a *multi-segment* exchange remains unobserved and stays `[OPEN]`.
+- §4's segmentation open item goes from "not pinned" to "pinned in the encoder,
+  unobserved on the wire".
+
 ## v2.8.0 — the two EQS records, decoded in full
 
 - **`0x0989` mode schedule: eleven fields, not five.** `entry_ID`,
