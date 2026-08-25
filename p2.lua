@@ -1,7 +1,17 @@
 -- p2.lua — Siemens APOGEE P2 (Protocol II) Wireshark dissector
--- Version: 2.7  (2026-08-25)  -- error table corrected against the vendor catalog
+-- Version: 2.8  (2026-08-25)  -- the two EQS records decoded in full
 --
 -- Changelog
+--   2.8  The two EQS upload records decoded in full.
+--        * 0x0989 mode schedule: eleven fields, not five. entry_enabled, mode,
+--          occurrence, scheduled_days (a BITMASK, bit0=Sunday), start/end date,
+--          start/stop time, days_spanned, exclusive, state_text_id. The old
+--          reading landed on the dates by accident and mislabelled three fields.
+--        * 0x0987 zone: the lead u16 is a COUNT OF NAMES. What was called a
+--          two-byte separator is the second Team_response's own name_space --
+--          and the pair is system-name + user-name, not a duplicate.
+--        * The trailing u16 on both is the state-text-table id: constant per
+--          zone and identical across both opcodes.
 --   2.7  Error table corrected. Eight names were wrong -- three outright and a
 --        five-code off-by-one -- and are replaced by the full 0x0001..0x0E17 set.
 --        * 0x0E11 was "already_exists"; it is fln_invalid_drop_number. The
@@ -3002,6 +3012,14 @@ f.eqs_mode  = ProtoField.uint16("p2.eqs_mode","EQS Mode Index",base.DEC)
 f.eqs_val   = ProtoField.float ("p2.eqs_value","Commanded Value")
 f.eqs_time  = ProtoField.string("p2.eqs_time","Scheduled Time")
 f.rec_index = ProtoField.uint32("p2.record_index","Record Index (resume key)",base.DEC)
+f.eqs_en    = ProtoField.uint8 ("p2.eqs_enabled","Entry Enabled",base.DEC,{[0]="no",[1]="yes"})
+f.eqs_occ   = ProtoField.uint8 ("p2.eqs_occurrence","Occurrence",base.DEC,
+                { [0]="one_time", [1]="weekly", [2]="replacement" })
+f.eqs_days  = ProtoField.uint32("p2.eqs_days","Scheduled Days (bitmask)",base.HEX)
+f.eqs_dayst = ProtoField.string("p2.eqs_days_text","Scheduled Days")
+f.eqs_span  = ProtoField.uint8 ("p2.eqs_days_spanned","Days Spanned",base.DEC)
+f.eqs_excl  = ProtoField.uint8 ("p2.eqs_exclusive","Exclusive",base.DEC,{[0]="no",[1]="yes"})
+f.eqs_stt   = ProtoField.uint16("p2.eqs_state_text_id","State-Text Table Id",base.HEX)
 f.tlv       = ProtoField.string("p2.tlv","TLV String")
 f.scope     = ProtoField.string("p2.scope","User Logon (User_profile)")
 f.access    = ProtoField.uint32("p2.access_class","Access Class (BITSTRING32)",base.HEX)
@@ -3060,6 +3078,7 @@ p2.fields = {
   f.opcode,f.err,f.schema,f.operand,f.tlv,f.scope,f.priority,f.value,
   f.access,f.ems_code,f.ems_user,f.ems_desc,f.date,f.modept,f.setpoint,f.lvl_off,f.lvl_pri,f.lvl_cat,f.lvl_msg,
   f.eqs_mode,f.eqs_val,f.eqs_time,f.rec_index,
+  f.eqs_en,f.eqs_occ,f.eqs_days,f.eqs_dayst,f.eqs_span,f.eqs_excl,f.eqs_stt,
   f.cov_count,f.cov_point,f.cov_cond,
   f.cov_pri,f.cov_ctrl,f.cov_oos,f.cov_fail,f.cov_proof,f.cov_opdis,f.cov_pgmdis,f.cov_cmdal,f.cov_astate,f.cov_apri,
   f.r_name,f.r_ver,f.r_tabver,f.r_count,
@@ -3382,40 +3401,82 @@ local function dissect_eqs_cmd(tvb, off, last, tree)
 end
 -- UPL_ALL_EQS_MODE_SCHED 0x0989: zone, record index (the resume key), mode,
 -- effective-from / effective-until dates, and the time the mode starts
+-- 0x0989 UPL_ALL_EQS_MODE_SCHED. Eleven fields (PROTOCOL.md 10.8), validated on
+-- every captured record: both dates carry a weekday byte that must match their
+-- own date, both times must be real, the booleans must be 0/1, and the record
+-- must consume the body exactly.
+local DAYNAME = { "Su","Mo","Tu","We","Th","Fr","Sa" }
+local function days_text(mask)
+  if mask == 0 then return "(none)" end
+  local out = {}
+  for b = 0, 6 do
+    if bit.band(bit.rshift(mask, b), 1) == 1 then out[#out+1] = DAYNAME[b+1] end
+  end
+  for b = 7, 13 do
+    if bit.band(bit.rshift(mask, b), 1) == 1 then out[#out+1] = "Repl"..(b-6) end
+  end
+  return #out > 0 and table.concat(out, "+") or string.format("0x%X", mask)
+end
+local function time4(tvb, off, last)
+  if off + 4 > last then return nil end
+  local h, m, s = tvb(off,1):uint(), tvb(off+1,1):uint(), tvb(off+2,1):uint()
+  if h > 23 or m > 59 or s > 59 then return nil end
+  return string.format("%02d:%02d:%02d", h, m, s)
+end
 local function dissect_eqs_sched(tvb, off, last, tree)
   if off + 2 > last then return end
   tree:add(f.ns, tvb(off,2)); off = off + 2
   local z, zl, zo = read_tlv(tvb, off, last); if not z then return end
   tree:add(f.pt_name, tvb(off+3,zl)); off = zo
-  if off + 4 <= last then tree:add(f.rec_index, tvb(off,4)); off = off + 4 end
-  local m, ml, mo = read_tlv(tvb, off, last)
-  if m then if ml > 0 then tree:add(f.eqs_mode, tvb(off+3,ml)) end; off = mo end
-  off = off + 4
-  for _, lab in ipairs({ "Effective from", "Effective until" }) do
-    local d = date4(tvb, off, last)
-    if not d then break end
+  if off + 12 > last then return end
+  tree:add(f.rec_index, tvb(off,4)); off = off + 4
+  tree:add(f.eqs_en,   tvb(off,1)); off = off + 1
+  tree:add(f.eqs_mode, tvb(off,2)); off = off + 2
+  tree:add(f.eqs_occ,  tvb(off,1)); off = off + 1
+  local mask = tvb(off,4):uint()
+  tree:add(f.eqs_days,  tvb(off,4))
+  tree:add(f.eqs_dayst, tvb(off,4), days_text(mask)); off = off + 4
+  for _, lab in ipairs({ "Start date", "End date" }) do
+    local d = date4(tvb, off, last); if not d then return end
     tree:add(f.date, tvb(off,4), lab..": "..d); off = off + 4
   end
-  if off + 6 <= last then
-    local hh, mm = tvb(off+4,1):uint(), tvb(off+5,1):uint()
-    if hh < 24 and mm < 60 then
-      tree:add(f.eqs_time, tvb(off+4,2), string.format("%02d:%02d", hh, mm))
-    end
+  for _, lab in ipairs({ "Start time", "Stop time" }) do
+    local v = time4(tvb, off, last); if not v then return end
+    tree:add(f.eqs_time, tvb(off,4), lab..": "..v); off = off + 4
   end
+  if off + 2 > last then return end
+  tree:add(f.eqs_span, tvb(off,1)); off = off + 1
+  tree:add(f.eqs_excl, tvb(off,1)); off = off + 1
+  if off + 2 <= last then tree:add(f.eqs_stt, tvb(off,2)) end
 end
 -- UPL_ALL_EQS_ZONE 0x0987: zone name, its schedule point, and a descriptor
+-- 0x0987 UPL_ALL_EQS_ZONE. The lead u16 is a COUNT OF NAMES, not a marker: it
+-- predicts exactly that many Team_response entries (u16 name_space + TLV), and
+-- the second entry's own name_space is what an earlier reading called a
+-- "two-byte separator". Then Eqs_zone_data. PROTOCOL.md 10.8.
 local function dissect_eqs_zone(tvb, off, last, tree)
-  off = off + 2                                     -- lead u16
   if off + 2 > last then return end
-  tree:add(f.ns, tvb(off,2)); off = off + 2
-  local n = 0
-  while off < last and n < 3 do
-    local v, l, no = read_tlv(tvb, off, last); if not v then break end
-    n = n + 1
-    if l > 0 then tree:add(n == 3 and f.tlv or f.pt_name, tvb(off+3,l)) end
+  local n = tvb(off,2):uint()
+  tree:add(f.r_count, tvb(off,2)); off = off + 2
+  if n < 1 or n > 8 then return end            -- not the shape we know
+  for _ = 1, n do
+    if off + 2 > last then return end
+    tree:add(f.ns, tvb(off,2)); off = off + 2
+    local s, sl, no = read_tlv(tvb, off, last); if not s then return end
+    if sl > 0 then tree:add(f.pt_name, tvb(off+3,sl)) end
     off = no
-    if n < 3 then off = off + ((n == 1) and 2 or 1) end   -- separators
   end
+  if off >= last then return end
+  tree:add(f.eqs_en, tvb(off,1)); off = off + 1        -- zone_enabled
+  local d, dl, dno = read_tlv(tvb, off, last); if not d then return end
+  if dl > 0 then tree:add(f.tlv, tvb(off+3,dl)) end
+  off = dno
+  if off + 11 > last then return end
+  tree:add(f.access, tvb(off,4)); off = off + 4        -- access_class
+  off = off + 2                                        -- min_off_time
+  off = off + 1                                        -- recmd_after_warmstart
+  off = off + 2                                        -- warmstart_delay
+  tree:add(f.eqs_stt, tvb(off,2))                      -- state_text_table
 end
 -- opcodes whose response carries a value/Point_base-style body
 local VALUE_RESP = {

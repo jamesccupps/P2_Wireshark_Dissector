@@ -7,6 +7,29 @@ The current release is summarised at the top of [README.md](README.md).
 > what was believed then; where a later release corrected one, the correction is
 > in that release's entry and in `PROTOCOL.md`.
 
+## v2.8.0 — the two EQS records, decoded in full
+
+- **`0x0989` mode schedule: eleven fields, not five.** `entry_ID`,
+  `entry_enabled`, `mode`, `occurrence`, `scheduled_days`, `start_date`,
+  `end_date`, `start_time`, `stop_time`, `days_spanned`, `exclusive`, and a
+  trailing `state_text_id`. Validated on every captured record: both dates carry
+  a weekday byte that must match their own date, both times must be real, the
+  booleans must be 0/1, and the record must consume the body exactly.
+- **`scheduled_days` is a bitmask**, bit 0 = Sunday. `0x3E` is Mon–Fri, `0x41` is
+  Sun+Sat, `0x7E` is Mon–Sat.
+- **`0x0987` zone: the lead `u16` is a count of names.** What an earlier edition
+  called "the name again after a two-byte separator" is the second
+  `Team_response` entry, whose own `name_space` supplies those two bytes — and
+  the pair is the zone's **system name and user name**, not a duplicate.
+- **The trailing `u16` on both records is a state-text-table id.** It had been
+  an unexplained two-valued field through four wrong readings. It is constant
+  per zone and identical across both opcodes.
+- **A third point-type numbering**, and the most dangerous: a current supervisor
+  product ships a dense 1..16 renumbering of the L-type mnemonics beside the
+  sparse wire codes, spelled identically. Six of fifteen disagree.
+- **How the `0x09xx` bank is organised** — section × transfer direction × record
+  state — and why an opcode cannot be computed from a section index.
+
 ## v2.7.1 — the error table, corrected
 
 - **26 of the 42 error names were wrong, and it was one defect.** The table was

@@ -2428,6 +2428,23 @@ A subset of opcodes mutate panel firmware state, node-table membership, point va
 - **LANGUAGE** (0x0900–0x0902) — localized string/prompt get and report-data (the multilingual UI string service).
 - **UPL** (0x0950–0x09C3, 0x4131–0x4133) — the bulk upload engine: `DOWNLOAD_ME`, and per-object-class `UPL_DEL_*` / `UPL_ADDED_*` / `UPL_ALL_*` triplets for point, alarm-setup, alarm-mode, trend, PPCL, TEC, EQS (zone/cmd-table/mode-sched/override), loop, alarm-message, SSTO (general/start/stop/night), port, partner, UC, TOD point/cmd, LON, command/miscdata report, MSTP-device, and program. This is how a supervisor pulls a panel's whole configured database.
 - **DBCHANGE** (0x0951–0x09C0, 0x4130, 0x5356) — the panel→supervisor change-notification mirror of the upload classes (point, alarm, trend, PPCL, controller, EQS, SSTO, port, partner, UC, TOD, LON, reports, MSTP-device, program, HOA-map).
+
+**How the `0x09xx` bank is organised, and why the opcode is not a simple sum.**
+The bank is one object-class list crossed with a small set of transfer
+operations, and a supervisor selects an opcode from a **triple**: the database
+*section* (point, alarm-setup, alarm-mode, trend, PPCL, TEC, EQS zone / cmd /
+mode / override, SSTO general / start / stop / night, TOD point / cmd, LON,
+program, terminal-def, reports, MSTP-device, BACnet schedule / change, …), the
+transfer *direction and scope* (download-all, download-changes, upload-all,
+upload-changes), and the record *state* (added, deleted, modified). The last of
+those maps straight onto the wire families — added ↔ `UPL_ADDED_*`, deleted ↔
+`UPL_DEL_*`, modified ↔ `DBCHANGE_*` — over the section list. [S][D]
+
+That is worth stating because the obvious shortcut does not work: **the section
+list and the opcode bank are independently ordered**, so an opcode cannot be
+computed as a base plus a section index. The correspondence holds for the first
+few classes and then breaks. Dispatch on the opcode, never on an arithmetic
+relationship to a section number. [S]
 - **RACS** (0x2824, 0x3800–0x382A) — Remote Access / Communication System partner, port, and system add/copy/delete/disable/display/enable/log/look/modify/statlog (dial-up / WAN inter-site connectivity management).
 - **TEAM** (0x4000–0x4018) — point-team / application descriptor and member operations: team-desc and member-desc add (analog/digital/enum/LPACI/L2SL), team/member/report log/list, descriptor uploads and db-changes. A "point team" is a logical point whose default member is the logical point value (see §11 point model).
 - **TEC** (0x4200–0x4225) — Terminal Equipment Controller (FLN device) operations: controller/TEC log/add/copy/modify/remove/look/query/definition, member/report log, and the local/remote init-value log/set/restore/initialize/update family (TEC application init values).
@@ -4045,28 +4062,81 @@ value is `1.0` or `0.0` and nothing else, so these are digital commands. The
 suffix is overwhelmingly the **day/night** subpoint. One row reads: *in mode 0
 drive this point to 1; in mode 1 drive it to 0.*
 
-**`AP2_UPL_ALL_EQS_MODE_SCHED` (0x0989)** — when a mode starts:
+**`AP2_UPL_ALL_EQS_MODE_SCHED` (0x0989)** — when a mode starts. Eleven fields,
+and the record consumes its body exactly:
 
 ```
-u16 name space | TLV zone | u32 record index | TLV mode | u32
-4 B effective-from | 4 B effective-until | u8 | u16 | u8 hour | u8 minute | …
+u16 name_space | TLV zone name              -- Team_response
+u32 entry_ID
+u8  entry_enabled        (0/1)
+u16 mode
+u8  occurrence           0 one_time | 1 weekly | 2 replacement
+u32 scheduled_days       bitmask, bit0 = Sunday .. bit6 = Saturday,
+                         bits 7..13 = Replacement1..Replacement7
+4 B start_date | 4 B end_date               -- y-1900, month, day, ISO weekday
+4 B start_time | 4 B stop_time              -- hour, minute, second, centiseconds
+u8  days_spanned
+u8  exclusive            (0/1)
+u16 state_text_id                           -- see below
 ```
 
-The 4-byte date group is **`year-1900, month, day, weekday`, weekday numbered
-ISO-style (Monday = 1 … Sunday = 7)**. That is worth relying on: every valid
-date in the corpus carries a weekday byte matching the real weekday of that
-date, so a decoder can use the agreement as a self-check on its alignment. A
-month/day of zero is the "no date" sentinel. Times decode as `hour, minute`
-(07:00, 18:00, 20:30 …), and effective-until dates sit far in the future when a
-schedule has no end.
+**The layout is self-checking, and it was checked.** Both `DATE_` groups carry a
+weekday byte that must equal the weekday their own year/month/day actually falls
+on; both `TIME_` groups must be a real time of day; the booleans must be 0 or 1;
+`occurrence` must be in 0–2; and the eleven fields must consume the body with
+nothing left over. **All thirty captured records hold.** A month/day of zero is
+the "no date" sentinel, and effective-until dates sit far in the future when a
+schedule has no end. [W]
 
-The `u32` after the zone name is the record's own index and is the resume key of
-§10.2.3: the request's ten-byte tail is `u32 0 | u32 last index | u16 0`. Indexes
-are **sparse**, so the walk must echo the key rather than count.
+Two fields are worth calling out because a byte pattern alone would not reveal
+them:
 
-**`AP2_UPL_ALL_EQS_ZONE` (0x0987)** — the zone: a lead `u16`, the zone name, the
-name again after a two-byte separator, a human-readable descriptor, and a
-19-byte fixed tail.
+- **`scheduled_days` is a bitmask, not an ordinal.** The corpus settles it
+  without appeal to anything else: `0x3E` is Mon+Tue+Wed+Thu+Fri, `0x41` is
+  Sun+Sat, `0x7E` is Mon–Sat. A weekday mask and a weekend mask falling out of a
+  bit test is not a coincidence. [W]
+- **`occurrence` reads `weekly` on 28 records and `replacement` on 2** — and the
+  two `replacement` records are exactly the ones whose `scheduled_days` lands in
+  the `Replacement` band and whose start and end dates are the no-date sentinel.
+  Three fields agreeing on the same semantics is the check. [W]
+
+The `u32 entry_ID` after the zone name is the record's own index and is the
+resume key of §10.2.3: the request's ten-byte tail is `u32 0 | u32 last index |
+u16 0`. Indexes are **sparse**, so the walk must echo the key rather than count.
+[W]
+
+**`AP2_UPL_ALL_EQS_ZONE` (0x0987)** — the zone. The lead `u16` is a **count of
+names**, and what an earlier edition of this document called "the name again
+after a two-byte separator" is not a separator at all: it is the second entry of
+a `Team_response[]` array, whose own `name_space` field supplies those two bytes.
+**In all ten captured records the count is 2 and it predicts exactly two
+names.** The pair is not a duplicate: the two entries carry **different name
+spaces** — `system` (0) then `user` (1), in that order in every record — so a
+zone is named once in each space. At this site both strings happen to be
+equal, which is what made the second look like a repetition; a decoder must
+read the `name_space` of each entry rather than assume. [W]
+
+```
+u16 nrOfnames | { u16 name_space | TLV name } x nrOfnames
+u8  zone_enabled | TLV descriptor
+4 B access_class | u16 min_off_time | u8 recmd_after_warmstart
+u16 warmstart_delay | u16 state_text_table | u16 default_mode
+u8  english_units | u8 optimization_osv | u16 nrOfrecharacterization_values | ...
+```
+
+`warmstart_delay` takes the values 0, 7 and 10 across the corpus — minutes. [W]
+
+**The trailing `u16` on both records is a state-text-table id.** Earlier editions
+listed it as an unexplained two-valued field, and four readings of it were wrong
+— an object id, the answering panel, a checksum, and a correlation with some
+other decoded field. What settles it is position and behaviour together: in the
+zone record it sits at the offset the type system calls `state_text_table`, the
+sibling `UPL_*_EQS_MODE_SCHED` request carries an explicit `state_text_ID`, and
+**the value is constant per zone and identical across both opcodes** — six zones,
+forty records, `0x0987` and `0x0989`, no exceptions, with several zones sharing a
+value. That is a reference to the text group naming the zone's modes. What is
+still unknown is the numbering itself: two distinct values from one site is not a
+range. [W][S]
 
 **How they compose.** A mode schedule says *at this time on this weekday, the
 zone enters mode M*; the command table says *in mode M, command these points to
@@ -4152,6 +4222,18 @@ Type code `0` is `point_type_undef` (no point). The codes are the `Point_type` e
 **A point type's default enumeration is the negation of its type code.** The enum library that supplies state text (§11.5) keys its per-type defaults as `-1` LDI, `-2` LDO, `-6` L2SL, `-7` LOOAP, `-12` L2SP, `-13` LOOAL, `-14` LFSSL, `-15` LFSSP, `-19` LCTLR, `-21` LENUM — every one the negation of the code above. Nine of the ten negate a code this table already carried; the tenth is why `19` is listed as LCTLR rather than unused. [S/I] The analog types (LAI, LAO, LPACI) have no default entry, which is consistent: an analog point has no enumerated states. A decoder can therefore derive a point's default state-text set from its type code alone, and only needs an explicit enum reference when the point overrides the default with a named group.
 
 > Implementation caution, a second one. The vendor's commissioning-report definition carries a table of the same mnemonics numbered `LDO`=2, `LDI`=3, `LAO`=4, `LAI`=5, `L2SL`=6, `L2SP`=7, `LOOAL`=8, `LOOAP`=9, `LFSSL`=10, `LFSSP`=11, `LPACI`=12, `LCTLR`=13, `LENUM`=14. Its own comment identifies these as **procedure numbers matching a help file**, not point types — a third numbering of the same taxonomy, alongside the `PTYPE` field noted above. It is a document index. Do not cross-map it either. [D]
+
+> Implementation caution, a third one, and the most dangerous of the three. A
+> current supervisor product carries **two point-type enumerations side by side**
+> in the same install. One reproduces the wire codes of §11.2 exactly — sparse,
+> with 5, 8, 9, 10 and 16–19 unused. The other renumbers the identical mnemonics
+> **densely, 1..16**, so `L2SL` is 5 rather than 6, `L2SP` is 8 rather than 12,
+> `LDAO` is 12 rather than 20, `LENUM` is 13 rather than 21, and `LFMSSL` /
+> `LFMSSP` are 14 / 15 rather than 22 / 23. Six of the fifteen shared members
+> disagree. Unlike the `PTYPE` field and the commissioning-report index above,
+> this one spells its members exactly as the wire does — `LDI`, `LDO`, `LAI`,
+> `LAO`, `L2SL` … — so a value lifted from it will look correct and decode six
+> point types wrongly. **The sparse numbering of §11.2 is the wire one.** [S]
 
 The on/off/auto and fast/slow/stop families (LOOAL, LOOAP, LFSSL, LFSSP, LFMSSL, LFMSSP) are **digital-only**: their commandable outputs are digital outputs, and they are not interchangeable with analog types. [D] The "latched" (`...L`) variants drive maintained digital outputs; the "pulsed" (`...P`) variants drive momentary outputs and require one additional subpoint to express the auto/stop state — so a pulsed variant always carries one more physical subpoint than its latched counterpart. [D]
 
