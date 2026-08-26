@@ -96,6 +96,7 @@
   - [11.5 Analog scaling, sensor types, and enumerations](#115-analog-scaling-sensor-types-and-enumerations)
 - [12. Change-of-Value (COV)](#12-change-of-value-cov)
   - [12.1 The subscription opcode set](#121-the-subscription-opcode-set)
+  - [12.1.1 When subscriptions are registered — once, at session establishment](#1211-when-subscriptions-are-registered--once-at-session-establishment)
   - [12.2 The COV class mask and subscription type](#122-the-cov-class-mask-and-subscription-type)
   - [12.3 The annunciate / value payload](#123-the-annunciate--value-payload)
   - [12.4 Command priority (carried in the COV payload)](#124-command-priority-carried-in-the-cov-payload)
@@ -118,6 +119,7 @@
   - [15.2 TOD opcodes (per-point time-of-day scheduling)](#152-tod-opcodes-per-point-time-of-day-scheduling)
   - [15.3 EQS — equipment scheduling](#153-eqs--equipment-scheduling)
   - [15.3.1 SSTO — start-stop time optimization](#1531-ssto--start-stop-time-optimization)
+  - [15.3.2 An EQS zone being created, on the wire](#1532-an-eqs-zone-being-created-on-the-wire)
 - [16. Database, Bulk Transfer, On-Disk (.P2) Format, Application Catalog & Firmware](#16-database-bulk-transfer-on-disk-p2-format-application-catalog--firmware)
   - [16.1 Bulk database transfer](#161-bulk-database-transfer)
   - [16.2 On-disk (.P2) panel-database format](#162-on-disk-p2-panel-database-format)
@@ -831,7 +833,7 @@ body_length = 25 + len(node_name) + len(site_name) + len(bln_name)
   25 = 3 TLV headers (3 bytes each) + the 16-byte fixed tail
 ```
 
-All three name lengths are site and node configuration; only the 25 is a protocol constant. Checked against every distinct body size observed: `25+5+3+7 = 40`, `25+6+3+7 = 41`, `25+15+3+7 = 50` — the last being a supervisor identity of 15 characters. Substituting this site's `site_name` (3) and `bln_name` (7) collapses it to the old `35 + node-name length`, which is how the site-specific terms went unnoticed across 349,632 single-site frames. [W] **Whether a ping is answered depends on which side opened the session.** Every
+All three name lengths are site and node configuration; only the 25 is a protocol constant. Checked against every distinct body size observed: `25+5+3+7 = 40`, `25+6+3+7 = 41`, `25+15+3+7 = 50` — the last being a supervisor identity of 15 characters. Substituting this site's `site_name` (3) and `bln_name` (7) collapses it to the old `35 + node-name length`, which is how the site-specific terms went unnoticed across 621,268 single-site frames. [W] **Whether a ping is answered depends on which side opened the session.** Every
 *supervisor-initiated* `0x4640` in the corpus drew a reply. Panel-initiated pings
 into a supervisor's `5033` may not: in a 25-minute capture at one supervisor, nine
 panels each opened a fresh TCP connection to its `5033` every **14.0 seconds**,
@@ -1248,7 +1250,7 @@ not a P2 message class. [W]
 | `0x2E` | second channel, legacy | Announce / reverse / DB-sync carrier for **legacy-firmware** panels (pairs with `0x33` data). Carries identity (`0x4640`), DB-change/replication records, and alarm prints; may also carry an entire transaction in "single-type carrier" mode. | [W] |
 | `0x2F` | second channel, modern | The **modern-firmware** counterpart of `0x2E` (pairs with `0x34` data) — same role, selected by panel generation, **not** by direction. | [W] |
 | `0x29` | session carrier | Lowest-volume session carrier; appears only at the very start of a connection at low sequence numbers, accompanying session establishment. | [W] |
-| `0x2A` | peer-session carrier | The modern-dialect counterpart of `0x29`, carrying the `EBLN_PING` (`0x4640`) identity exchange in peer-to-peer (panel↔panel) sessions. **Wire-observed in panel-side captures** — 96 and 130 frames in two taps on a panel's own switch port — carrying `0x4640`, `0x0271` and `0x4634`. It is absent from the supervisor-side census only because that vantage point cannot see panel↔panel sessions. | [W] |
+| `0x2A` | peer-session carrier | The modern-dialect counterpart of `0x29`, carrying the `EBLN_PING` (`0x4640`) identity exchange in peer-to-peer (panel↔panel) sessions. **Wire-observed in panel-side captures** — 12,556 frames across five taps on two different panels — carrying `0x4640`, `0x0271` and `0x4634`. It is absent from the supervisor-side census only because that vantage point cannot see panel↔panel sessions. Which of `0x29`/`0x2A` a peer uses is a property of that peer, not of the link: see §9.7. | [W] |
 
 Class-frequency profile (shape, reproducible per-capture; absolute totals are deployment-dependent):
 `0x33` (legacy data) dominates, then the legacy second-channel `0x2E`, then the modern data dialect
@@ -1294,9 +1296,9 @@ the `0x4640` identity exchange it carries database-change and replication record
 `UPL_ADDED_*`, `UPL_DEL_*`) and alarm prints (`ALARM_PRINT 0x0508`) flowing panel→supervisor. The
 peer (panel↔panel) carriers `0x29` and `0x2A` are visible only from a panel-side mirror, never from
 the supervisor's own vantage. Measured there, **both are dominated by the `0x4640` identity/keepalive
-exchange**, not by COV: across two panel-side captures `0x29` carries `0x4640`, then `0x4634`, then
-`0x0271`, with `0x4633`/`0x4636` in single figures, and `0x2A` carries `0x4640` in roughly nine frames
-out of ten with `0x0271` and `0x4634` making up the rest. An earlier edition described `0x2A` as the
+exchange**, not by COV: across five panel-side captures on two panels `0x29` carries `0x4640` (43,610), then `0x4634` (6,223),
+then `0x0271` (245), with `0x4633`/`0x4636` in single figures, and `0x2A` carries `0x4640` in roughly
+ninety-nine frames out of a hundred (6,228) with `0x0271` (46) and `0x4634` (4) making up the rest. An earlier edition described `0x2A` as the
 panel↔panel COV-subscription carrier; COV management rides it, but calling it that mistakes a minority
 of its traffic for its purpose. [W]
 
@@ -1346,9 +1348,9 @@ Exactly three values are defined. [W]
 |---|---|---|---|
 | `0x00` | request / unsolicited push | a 2-byte opcode followed by the request body | [W] |
 | `0x01` | success response | a result body (may be empty); **no opcode** | [W] |
-| `0x05` | error response | exactly 2 bytes — a u16 BE error code (§7.2); **no opcode**. Validated across the corpus: all **4,311** error responses have a 2-byte body, with no exceptions. | [W] |
+| `0x05` | error response | exactly 2 bytes — a u16 BE error code (§7.2); **no opcode**. Validated across the corpus: all **6,006** error responses have a 2-byte body, with no exceptions. | [W] |
 
-Observed corpus distribution: `0x00` 178,266; `0x01` 167,055; `0x05` 4,311 (summing to 349,632). [W]
+Observed corpus distribution: `0x00` 314,273; `0x01` 300,989; `0x05` 6,006 (summing to 621,268). [W]
 
 The governing rule is: **the opcode field is present if and only if `dir == 0x00`.** A response of
 either kind carries no opcode. An unsolicited push — for example a change-of-value report (opcode
@@ -1388,7 +1390,7 @@ with the trunk it lives on. The duplication is then not redundancy at all; it is
 and both pairs happen to name the same trunk on a single-BLN network.
 
 That is a **falsifiable prediction**: on a frame that crosses between two BLNs, slots 0 and 2 should
-carry **different** trunk names. The present corpus cannot test it — across **349,632** trusted
+carry **different** trunk names. The present corpus cannot test it — across **621,268** trusted
 four-slot frames, slots 0 and 2 are identical in **206,045**, and every one of the five exceptions
 is a deliberately malformed research probe rather than production traffic. Every capture to hand is
 single-BLN, so the pair reading is **untested, not confirmed**. A capture taken where two BLNs
@@ -1732,22 +1734,24 @@ opcode (§6.4).
   log returns `dir == 0x05` with the 2-byte tail `0x0003` ("not found", §7.2.2) — the same
   not-found code returned for any named object that does not exist. [W]
 
-  *The whole error vocabulary the corpus exercises.* Pairing all **4,311** error responses back to
+  *The whole error vocabulary the corpus exercises.* Pairing all **6,006** error responses back to
   their request by sequence gives seven codes and no unknowns — every one is already named in the
   error table of §7.2.2, which is the first time that table has been checked against traffic rather
   than against the type system: [W]
 
-  | Code | Name | Count | Chiefly answering |
-  |---|---|---:|---|
-  | `0x0003` | `not_found` | 3,996 | `0x0220`, `0x0271`, `0x0273`, `0x0986` |
-  | `0x00AC` | `not_supported` | 49 | `0x400F`, `0x4133`, `0x4010`, `0x4011` |
-  | `0x0E15` | `physical_point_not_commandable` | 28 | `0x0240` |
-  | `0x0002` | `invalid_command` | 4 | `0x0244`, `0x0564`, `0x0565` |
-  | `0x0E12` | `fln_device_failed` | 3 | `0x4225`, `0x4224` |
-  | `0x0E11` | `fln_invalid_drop_number` | 2 | `0x0204` |
-  | `0x0009` | `already_exists` | 1 | `0x0540` |
+  | Code | Name | Count | % | Chiefly answering |
+  |---|---|---:|---:|---|
+  | `0x0003` | `not_found` | 5,805 | 96.7% | `0x0220`, `0x0271`, `0x0273`, `0x0295`, `0x0272`, `0x0986` |
+  | `0x00AC` | `not_supported` | 127 | 2.1% | `0x400F`, `0x4133`, `0x4010`, `0x4011`, `0x09BB`, `0x4500` |
+  | `0x0E15` | `physical_point_not_commandable` | 38 | 0.6% | `0x0240` |
+  | `0x0002` | `invalid_command` | 28 | 0.5% | `0x0244`, `0x0247`, `0x0564`, `0x0565` |
+  | `0x0E11` | `fln_invalid_drop_number` | 4 | 0.1% | `0x0204` |
+  | `0x0E12` | `fln_device_failed` | 3 | 0.0% | `0x4225`, `0x4224` |
+  | `0x0009` | `already_exists` | 1 | 0.0% | `0x0540` |
 
-  98% of all errors are `not_found`. Three operations in the corpus **never** succeed —
+  These sum to 6,006, the whole `dir == 0x05` population. **97% of all errors are
+  `not_found`**, and exactly one error response in the corpus cannot be paired
+  back to its request. Three operations in the corpus **never** succeed —
   `0x0272 COV_DELETE_STUB` (0 ok / 46 err), `0x400F TEAM_DESC_UPLOAD` (0/12) and
   `0x5354 HOA_MAP_LOOK` (0/6) — and `0x0220 POINT_LOG_VALUE` fails more often than it succeeds
   (1,910 ok / 2,415 err), which reflects how a supervisor walks point space rather than anything
@@ -1799,14 +1803,14 @@ carries a numeric code (§7.2.2) that maps onto them. [S]
 #### 7.2.2 Observed wire error codes
 
 These 2-byte codes appear as the `dir == 0x05` error tail in the corpus. Distribution across the
-349,632 trusted P2 frames, of which 4,311 are error responses: `0x0003` 4,224; `0x00AC` 49;
-`0x0E15` 28; `0x0002` 4; `0x0E12` 3; `0x0E11` 2; `0x0009` 1 - summing exactly to 4,311. **`not_found` is 98% of all errors.** [W]
+621,268 trusted P2 frames, of which 6,006 are error responses: `0x0003` 5,805; `0x00AC` 127;
+`0x0E15` 38; `0x0002` 28; `0x0E11` 4; `0x0E12` 3; `0x0009` 1 - summing exactly to 6,006. **`not_found` is 97% of all errors.** [W]
 
 | Wire code | Meaning | How established | Tag |
 |---|---|---|---|
 | `0x0003` | **not found** — the named object does not exist on the panel (also returned for an unrecognized-opcode probe) | wire behaviour and the vendor error catalog agree | [W][D] |
 | `0x00AC` | **not supported** — the function code is unused on this panel, **or is specific to a different firmware revision** | wire behaviour and the vendor catalog agree; the revision case is documentary only | [W][D] |
-| `0x0002` | **invalid command** — the command is not valid for the addressed object (seen on `POINT_CMD_ALARM 0x0244` / `CMD_ALARM_DISABLE 0x0247` against a point lacking alarm capability; the documented example is commanding a non-virtual LDI or LAI point) | wire behaviour and the vendor catalog agree | [W][D] |
+| `0x0002` | **invalid command** — the command is not valid for the addressed object (seen on `POINT_CMD_ALARM 0x0244` and on `CMD_ALARM_DISABLE 0x0247` addressed to a point name that does not exist; the documented example is commanding a non-virtual LDI or LAI point) | wire behaviour and the vendor catalog agree | [W][D] |
 | `0x0009` | **already exists** — a define collided with a record already present | vendor catalog; the single wire observation answers `0x0540` | [D][W] |
 | `0x0E11` | **FLN: invalid drop number** — the addressed FLN device's drop number is invalid (seen answering `POINT_ADD_LAI 0x0204`) | vendor catalog | [D][W] |
 | `0x0E12` | **FLN: device failed** | vendor catalog | [D][W] |
@@ -2201,11 +2205,11 @@ The AP2 function code is a 16-bit big-endian value that sits on the wire immedia
 
 The complete command vocabulary of the protocol is defined by the vendor's `AP2_Function_Code` enumeration: **641 named members across 630 distinct opcode values** (a handful of values carry two names — historical aliases such as `AP2_DUMMY_CMD`/`AP2_REV_STRING` at 0x0100, or the `CONTROLLER`/`TEC` doublets). The enum's numeric values **are** the wire opcodes: cross-checking every opcode seen on the wire against the enum, all matched exactly. [S]
 
-Of the 630 defined values, **125 are observed in the capture corpus** (349,632 trusted P2 frames across the 89 captures that carry P2; see §9.5 for the counting criteria and for why an earlier figure of 135 was withdrawn); the remaining 505 are defined-but-unobserved (overwhelmingly configuration, database-management, upload, and BACnet/LON-integration operations that a passive supervisor↔panel capture does not exercise). Every defined opcode is enumerable from the catalog below; "not observed" means absent from this corpus, not undefined. The corpus combines passive supervisor↔panel and panel↔panel site captures with a smaller set of active read/enumeration test captures; opcode counts are corpus frequencies, not a claim about steady-state operation. [W][S]
+Of the 630 defined values, **135 are observed in the capture corpus** (621,268 trusted P2 frames across the 121 captures that carry P2; see §9.5 for the counting criteria and for why an earlier figure of 135 was withdrawn); the remaining 495 are defined-but-unobserved (overwhelmingly configuration, database-management, upload, and BACnet/LON-integration operations that a passive supervisor↔panel capture does not exercise). A further **15 opcode values appear on the wire without an enum definition at all** and therefore have no catalog row; thirteen of them are real panel operations and two are artifacts of a deliberately malformed test frame (§9.5). Counting those, **148 distinct operations** have been observed. Every defined opcode is enumerable from the catalog below; "not observed" means absent from this corpus, not undefined. The corpus combines passive supervisor↔panel and panel↔panel site captures with a smaller set of active read/enumeration test captures; opcode counts are corpus frequencies, not a claim about steady-state operation. [W][S]
 
 Rows that were seen on the wire are tagged **[W]** and carry their frame count; defined-but-unobserved rows are tagged **[S]** (struct/metadata-derived from the vendor enum — definitional truth). Wire counts in the catalog come from the corpus census; per-opcode response shapes, error tails, and message-class distributions are in §9.7.
 
-> **Vantage point bounds every count in this section.** Almost all of the corpus was captured at the supervisor, and a supervisor-side tap structurally cannot see a session between two panels — P2 is unicast TCP, so the switch shows that tap only the conversations the supervisor is in. Taps placed on a single panel's own switch port show it holding P2 sessions with **nine peers**, of which the supervisor is one. Read the counts here as frequencies in *supervisor-facing* P2, and read a zero as "the supervisor does not invoke this," never as "panels do not exchange this." The message-class figures in §9.7 make the difference concrete: class `0x2A` is absent from the supervisor-side census and plainly present from a panel-side one. [W]
+> **Vantage point bounds every count in this section.** Almost all of the corpus was captured at the supervisor, and a supervisor-side tap structurally cannot see a session between two panels — P2 is unicast TCP, so the switch shows that tap only the conversations the supervisor is in. Taps placed on a panel's own switch port — five of them, on two different panels — each show it holding P2 sessions with **nine peers**, of which the supervisor is one. Read the counts here as frequencies in *supervisor-facing* P2, and read a zero as "the supervisor does not invoke this," never as "panels do not exchange this." The message-class figures in §9.7 make the difference concrete: class `0x2A` is absent from the supervisor-side census and plainly present from a panel-side one. [W]
 
 ### 9.1.1 The wire opcode is the bottom of a three-tier model
 
@@ -2553,9 +2557,9 @@ against 315 control**. The real mapping scored worse than its own control.
 Whatever the panel writes the number into, **it is not a P2 frame**. [W]
 
 *Coverage, since a negative is only as good as its denominator.* The corpus holds
-726 capture files, 233 distinct by content, of which **85 carry P2 and hold
-349,632 trusted frames between them** — and all 85 were in scope, 100% of frames.
-Both ports are represented: 126,832 frames on 5033 and 79,229 on 5034, so the
+764 capture files, 271 distinct by content, of which **121 carry P2 and hold
+621,268 trusted frames between them** — and all 121 were in scope, 100% of frames.
+Both ports are represented: 432,368 frames on 5033 and 188,900 on 5034, so the
 result is not an artifact of testing only the supervisor-facing channel. [W]
 
 **It is a two-stage internal operation number.** The default table maps an
@@ -2704,7 +2708,7 @@ the block's age rather than of its non-existence.
 
 ### 9.5 The catalog
 
-The catalog below is generated by joining the vendor `AP2_Function_Code` enum (the 630 distinct opcode values) with the corpus census. A recount under stated criteria — trusted frames only, `dir == 0x00` only, content-deduplicated captures — gives **127 distinct wire-observed function codes across 178,266 request/push frames**, of which 112 now carry a name. (Three further values appear only in frames the parser marked untrusted after a resynchronisation: `0x0631`, `0x1826`, `0x2226`. `0x1826` is precisely the fictitious opcode a mid-record resync manufactures — a TLV length `0x18` followed by ASCII `&` — and is the reason the trusted flag exists. An earlier edition cited 135 wire-observed values; that figure is not reproducible from the current evidence base under any definition tried, and 125 replaced it; the corpus has since grown and the current figure is 127.) Columns: hex opcode, name(s), observed wire count (or `-`), notes (destructive flag where applicable), and evidence tag ([W] wire-observed, [S] enum-defined). Within each family, rows are sorted by opcode value. Sixteen wire values do **not** appear in the catalog, and they fall into three groups rather than one. `0x0000`/`0x0002` are below the enum's first defined value and `0x0C44`/`0x4443` are slot-walk misalignments of `0x4640` — those four are genuinely parser artifacts. [W] `0x0453` and `0x0510` drew `not_found`, so the panel does not implement them. [W] **The remaining ten — `0x4641`, `0x4642`, `0x4643`, `0x4647`, `0x464A`, `0x464B`, `0x464D`, `0x464E`, `0x464F`, `0x4650` — are real panel operations, and an earlier reading of this document that dismissed them as noise is withdrawn.** Absence from `AP2_Function_Code` proves nothing: that enum is the **supervisor-side** vocabulary and does not describe what a panel implements. Classify by what the panel did. `0x464A`–`0x4650` each answered `dir=0x01` **success with distinct structured bodies** (0 B, 22 B, 125 B, a 12,073-byte declared node table, 117 B, 26 B, 217 B respectively), and `0x4641` answered success, while `0x0510` — equally absent from the enum — answered `not_found` from the same panel in the same campaign. The `0x464D` reply is the sharpest case and needs stating precisely: the panel answered, and its response header **declared** 12,073 bytes of node table, of which **4,380 arrived** before the client reset the connection. No complete frame exists, so a strict framer reports the exchange as unanswered — it was not. A panel that begins streaming 12 KB of structured node table for one value and answers `not_found` to another is not treating them alike. `0x4642`/`0x4643` answered `not_supported`, i.e. a handler was reached and refused; `0x4647` returned nothing at all and remains **[OPEN]**. Low frame count is not evidence of unreality — it measures how often the *supervisor* uses an operation, and a panel-side operation the supervisor never invokes is expected to appear exactly once, when probed. [W]
+The catalog below is generated by joining the vendor `AP2_Function_Code` enum (the 630 distinct opcode values) with the corpus census. A recount under stated criteria — trusted frames only, `dir == 0x00` only, content-deduplicated captures — gives **150 distinct opcode values across 314,273 request/push frames**, of which 135 carry a name from the enum. Two of the 150 are not operations at all (below), so **148 distinct operations** have been observed. (Three further values appear only in frames the parser marked untrusted after a resynchronisation: `0x0631`, `0x1826`, `0x2226`. `0x1826` is precisely the fictitious opcode a mid-record resync manufactures — a TLV length `0x18` followed by ASCII `&` — and is the reason the trusted flag exists. Editions of this document have cited 135, then 125, then 127; each was the honest count over the corpus held at the time, and the corpus has twice grown. The current figure is reproducible from the stated criteria by re-running the census.) Columns: hex opcode, name(s), observed wire count (or `-`), notes (destructive flag where applicable), and evidence tag ([W] wire-observed, [S] enum-defined). Within each family, rows are sorted by opcode value. Fifteen wire values do **not** appear in the catalog, because the enum does not define them, and they fall into three groups rather than one. **Four are artifacts.** `0x0C44` and `0x4443` are slot-walk misalignments of `0x4640`; `0x0000` and `0xFFFF` are the opcode field of a *deliberately malformed* test frame whose routing slots read `GARBAGEBLN` / `garbagenode` / `GARBAGE15CHARSXX`, sent once each to probe the handshake gate and never answered. Neither is an operation, and a reader reproducing the census should expect to see them and discard them. [W] **One is unimplemented:** `0x0510` drew `not_found`. [W] **The remaining ten — `0x4641`, `0x4642`, `0x4643`, `0x4647`, `0x464A`, `0x464B`, `0x464D`, `0x464E`, `0x464F`, `0x4650` — are real panel operations, and an earlier reading of this document that dismissed them as noise is withdrawn.** Absence from `AP2_Function_Code` proves nothing: that enum is the **supervisor-side** vocabulary and does not describe what a panel implements. Classify by what the panel did. `0x464A`–`0x4650` each answered `dir=0x01` **success with distinct structured bodies** (0 B, 22 B, 125 B, a 12,073-byte declared node table, 117 B, 26 B, 217 B respectively), and `0x4641` answered success, while `0x0510` — equally absent from the enum — answered `not_found` from the same panel in the same campaign. The `0x464D` reply is the sharpest case and needs stating precisely: the panel answered, and its response header **declared** 12,073 bytes of node table, of which **4,380 arrived** before the client reset the connection. No complete frame exists, so a strict framer reports the exchange as unanswered — it was not. A panel that begins streaming 12 KB of structured node table for one value and answers `not_found` to another is not treating them alike. `0x4642`/`0x4643` answered `not_supported`, i.e. a handler was reached and refused; `0x4647` returned nothing at all and remains **[OPEN]**. Low frame count is not evidence of unreality — it measures how often the *supervisor* uses an operation, and a panel-side operation the supervisor never invokes is expected to appear exactly once, when probed. [W]
 
 <!-- BEGIN GENERATED CATALOG (do not hand-edit; regenerate with working/sweep/s91_gencatalog.py, which joins p2_data.py with the census of working/sweep/s90_census.py) -->
 
@@ -2734,7 +2738,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0044 | AP2_CABINET_MAKE_READY | - || [F] |
 | 0x0046 | AP2_CABINET_ONLINE | - |**DESTRUCTIVE** (force cabinet online)| [F] |
 | 0x0047 | AP2_CABINET_OFFLINE | - |**DESTRUCTIVE** (force cabinet offline)| [F] |
-| 0x0050 | AP2_DISK_LOG | 140 || [W] |
+| 0x0050 | AP2_DISK_LOG | 166 || [W] |
 | 0x0051 | AP2_DISK_ADD | - || [S] |
 | 0x0058 | AP2_REPORT_PRINTER_LOG | - || [F] |
 | 0x0059 | AP2_REPORT_PRINTER_ADD | - || [S] |
@@ -2742,7 +2746,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0108 | AP2_CABINET_BOOT_MONITOR | - |**DESTRUCTIVE** (reboot to boot monitor)| [S] |
 | 0x010A | AP2_CABINET_COLDSTART | 1 |**DESTRUCTIVE** (panel cold start (reboot))| [W] |
 | 0x010B | AP2_CABINET_WARMSTART | - |**DESTRUCTIVE** (panel warm start (reboot))| [S] |
-| 0x010C | AP2_CABINET_DISPLAY | 185 || [W] |
+| 0x010C | AP2_CABINET_DISPLAY | 250 || [W] |
 | 0x010D | AP2_SERVICES_RENDERED | - || [S] |
 | 0x010E | AP2_SERVICES_RENDERED_CHANGED | - || [S] |
 | 0x0120 | AP2_CABINET_SET_MMI1_BAUDRATE | - || [F] |
@@ -2760,7 +2764,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0130 | AP2_CABINET_MEMORY_DISPLAY | - || [F] |
 | 0x0131 | AP2_CABINET_MEMORY_AVAILABLE | - || [F] |
 | 0x400E | AP2_REPORT_DESC_ADD | - || [S] |
-| 0x4011 | AP2_REPORT_DESC_UPLOAD | 6 || [W] |
+| 0x4011 | AP2_REPORT_DESC_UPLOAD | 19 || [W] |
 
 #### Family: BLN/DIAG
 
@@ -2805,7 +2809,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0201 | AP2_POINT_ADD_LDO | - || [S] |
 | 0x0202 | AP2_POINT_ADD_LDI | - || [S] |
 | 0x0203 | AP2_POINT_ADD_LAO | 2 || [W] |
-| 0x0204 | AP2_POINT_ADD_LAI | 4 || [W] |
+| 0x0204 | AP2_POINT_ADD_LAI | 8 || [W] |
 | 0x0205 | AP2_POINT_ADD_L2SL | - || [S] |
 | 0x0206 | AP2_POINT_ADD_L2SP | - || [S] |
 | 0x0207 | AP2_POINT_ADD_LFSSL | - || [S] |
@@ -2817,7 +2821,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x020D | AP2_POINT_ADD_LFMSSL | - || [S] |
 | 0x020E | AP2_POINT_ADD_LFMSSP | - || [S] |
 | 0x020F | AP2_POINT_ADD_LENUM | - || [S] |
-| 0x0220 | AP2_POINT_LOG_VALUE | 4382 || [W] |
+| 0x0220 | AP2_POINT_LOG_VALUE | 6942 || [W] |
 | 0x0221 | AP2_POINT_LOG_ALARM | - || [F] |
 | 0x0222 | AP2_POINT_LOG_CTRL_STAT | - || [F] |
 | 0x0223 | AP2_POINT_LOG_FAILED | - || [F] |
@@ -2830,14 +2834,14 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x022A | AP2_POINT_LOG_ODSB | - || [S] |
 | 0x022B | AP2_POINT_LOG_PDSB | - || [S] |
 | 0x022C | AP2_POINT_LOG_ALARM_CMD | - || [S] |
-| 0x0240 | AP2_POINT_CMD_VALUE | 13597 |**DESTRUCTIVE** (point command (write value))| [W] |
-| 0x0241 | AP2_POINT_CMD_PRIORITY | 31 |**DESTRUCTIVE** (point command (write priority))| [W] |
+| 0x0240 | AP2_POINT_CMD_VALUE | 32521 |**DESTRUCTIVE** (point command (write value))| [W] |
+| 0x0241 | AP2_POINT_CMD_PRIORITY | 60 |**DESTRUCTIVE** (point command (write priority))| [W] |
 | 0x0242 | AP2_POINT_CMD_ENABLE | - || [F] |
 | 0x0243 | AP2_POINT_CMD_DISABLE | - || [F] |
-| 0x0244 | AP2_POINT_CMD_ALARM | 2 || [W] |
-| 0x0245 | AP2_POINT_CMD_NORMAL | 2 || [W] |
-| 0x0246 | AP2_POINT_CMD_ALARM_ENABLE | - || [F] |
-| 0x0247 | AP2_POINT_CMD_ALARM_DISABLE | - || [F] |
+| 0x0244 | AP2_POINT_CMD_ALARM | 27 || [W] |
+| 0x0245 | AP2_POINT_CMD_NORMAL | 5 || [W] |
+| 0x0246 | AP2_POINT_CMD_ALARM_ENABLE | 3 || [W] |
+| 0x0247 | AP2_POINT_CMD_ALARM_DISABLE | 5 || [W] |
 | 0x0248 | AP2_POINT_CMD_INIT_LPACI | - || [F] |
 | 0x0249 | AP2_POINT_CMD_LOWLIMIT | - || [F] |
 | 0x024A | AP2_POINT_CMD_HIGHLIMIT | - || [F] |
@@ -2848,7 +2852,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0260 | AP2_POINT_MODIFY | 2 || [W] |
 | 0x0261 | AP2_POINT_LOOK | - || [S] |
 | 0x0262 | AP2_POINT_DEFINITION_DISPLAY | - || [S] |
-| 0x0263 | AP2_POINT_REMOVE | 4 || [W] |
+| 0x0263 | AP2_POINT_REMOVE | 6 || [W] |
 | 0x0264 | AP2_POINT_DEFINITION_BYADDR_DISPLAY | - || [F] |
 | 0x0265 | AP2_POINT_QUERY_NAME | - || [S] |
 | 0x02E0 | AP2_POINT_TOTAL_ENABLE | - || [F] |
@@ -2861,10 +2865,10 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0271 | AP2_COV_ENABLE | 5321 || [W] |
-| 0x0272 | AP2_COV_DELETE_STUB | 46 || [W] |
-| 0x0273 | AP2_COV_DISABLE | 3696 || [W] |
-| 0x0274 | AP2_COV_ANNUNCIATE | 53101 || [W] |
+| 0x0271 | AP2_COV_ENABLE | 7359 || [W] |
+| 0x0272 | AP2_COV_DELETE_STUB | 222 || [W] |
+| 0x0273 | AP2_COV_DISABLE | 6043 || [W] |
+| 0x0274 | AP2_COV_ANNUNCIATE | 120764 || [W] |
 | 0x0275 | AP2_XREF_COV_DISPLAY | - || [F] |
 
 #### Family: MONITOR
@@ -2880,11 +2884,11 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
 | 0x0290 | AP2_TREND_SETUP_ADD | - || [S] |
-| 0x0291 | AP2_TREND_SETUP_DELETE | 4 || [W] |
+| 0x0291 | AP2_TREND_SETUP_DELETE | 14 || [W] |
 | 0x0292 | AP2_TREND_ENABLE | - || [S] |
 | 0x0293 | AP2_TREND_DISABLE | - || [S] |
-| 0x0294 | AP2_TREND_SETUP_LOG | 9 || [W] |
-| 0x0295 | AP2_TREND_DATA_DISPLAY | 291 || [W] |
+| 0x0294 | AP2_TREND_SETUP_LOG | 59 || [W] |
+| 0x0295 | AP2_TREND_DATA_DISPLAY | 750 || [W] |
 | 0x0296 | AP2_TREND_DEFINITION_DISPLAY | - || [S] |
 | 0x0297 | AP2_TREND_MULTIPOINT_DISPLAY | - || [S] |
 | 0x0298 | AP2_TREND_SETUP_MODIFY | - || [S] |
@@ -2901,7 +2905,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x02A5 | AP2_TREND_EVENT_SETUP_ADD | - || [S] |
 | 0x02A6 | AP2_TREND_EVENT_MODIFY | - || [S] |
 | 0x02A7 | AP2_TREND_EVENT_COPY | - || [S] |
-| 0x02A8 | AP2_TREND_EVENT_ARC_SETUP | 4 || [W] |
+| 0x02A8 | AP2_TREND_EVENT_ARC_SETUP | 8 || [W] |
 | 0x02A9 | AP2_TREND_EVENT_ARC_ENABLE | - || [S] |
 
 #### Family: TOD/TIME
@@ -2909,7 +2913,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
 | 0x0301 | AP2_TIME_DISPLAY / AP2_TIME_SOFTWARE | - || [S] |
-| 0x0302 | AP2_TIME_DISPLAY_CLOCK / AP2_TIME_SET | 1 || [W] |
+| 0x0302 | AP2_TIME_DISPLAY_CLOCK / AP2_TIME_SET | 3 || [W] |
 | 0x4500 | AP2_TOD_POINT_ADD | 5 || [W] |
 | 0x4501 | AP2_TOD_POINT_REMOVE | - || [S] |
 | 0x4502 | AP2_TOD_POINT_ENABLE | - || [S] |
@@ -2949,13 +2953,13 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
 | 0x030A | AP2_PPCL_SAVE | - || [S] |
-| 0x4100 | AP2_PPCL_ADD_LINE | 1 || [W] |
+| 0x4100 | AP2_PPCL_ADD_LINE | 3 || [W] |
 | 0x4101 | AP2_PPCL_EDIT_LINE | - || [S] |
-| 0x4103 | AP2_PPCL_REMOVE_LINES | 1 || [W] |
-| 0x4104 | AP2_PPCL_ENABLE_LINES | 1 || [W] |
-| 0x4105 | AP2_PPCL_DISABLE_LINES | - || [F] |
-| 0x4106 | AP2_PPCL_CLEAR_TRACE | 1 || [W] |
-| 0x4107 | AP2_PPCL_PROGRAM_LOG | - || [F] |
+| 0x4103 | AP2_PPCL_REMOVE_LINES | 3 || [W] |
+| 0x4104 | AP2_PPCL_ENABLE_LINES | 7 || [W] |
+| 0x4105 | AP2_PPCL_DISABLE_LINES | 2 || [W] |
+| 0x4106 | AP2_PPCL_CLEAR_TRACE | 5 || [W] |
+| 0x4107 | AP2_PPCL_PROGRAM_LOG | 8 || [W] |
 | 0x4108 | AP2_PPCL_SEARCH_NAME_TYPE | - || [F] |
 | 0x4109 | AP2_PPCL_QUERY_PROGRAM | - || [F] |
 | 0x410A | AP2_PPCL_PROGRAM_DISPLAY | - || [S] |
@@ -3061,7 +3065,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0407 | AP2_ENUM_ELEMENT_ADD | - || [S] |
 | 0x0408 | AP2_ENUM_ELEMENT_DELETE | - || [S] |
 | 0x0409 | AP2_ENUM_ELEMENT_MODIFY | - || [S] |
-| 0x040A | AP2_ENUM_TYPE_DB_GET | 2 || [W] |
+| 0x040A | AP2_ENUM_TYPE_DB_GET | 28 || [W] |
 | 0x040B | AP2_ENUM_TYPE_DB_REPLACE | - || [S] |
 | 0x040E | AP2_ENUM_TYPE_REPLACE | - || [S] |
 
@@ -3077,8 +3081,8 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0505 | AP2_ALARM_POINT_SETUP_QUERY_RECORD | - || [S] |
 | 0x0506 | AP2_ALARM_SETUP_COPY | - || [S] |
 | 0x0507 | AP2_ALARM_SETUP_MODIFY | - || [S] |
-| 0x0508 | AP2_ALARM_PRINT | 55 || [W] |
-| 0x0509 | AP2_ALARM_ACK | 5 || [W] |
+| 0x0508 | AP2_ALARM_PRINT | 71 || [W] |
+| 0x0509 | AP2_ALARM_ACK | 7 || [W] |
 | 0x050A | AP2_ALARM_ACK_PENDING_QUERY_LIST | - || [S] |
 | 0x050B | AP2_ALARM_SETUP_DISPLAY_BY_MODE | - || [S] |
 | 0x050C | AP2_ALARM_SETUP_DISPLAY_BY_CATEGORY | - || [S] |
@@ -3131,7 +3135,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x0603 | AP2_CAL_DB_RESET | - || [F] |
 | 0x0604 | AP2_CAL_DB_DISPLAY | - || [S] |
 | 0x0605 | AP2_CAL_DB_GET_HOL_SPEC | - || [F] |
-| 0x0606 | AP2_CAL_DB_GET_OTHER | 27 || [W] |
+| 0x0606 | AP2_CAL_DB_GET_OTHER | 41 || [W] |
 | 0x0610 | AP2_DST_YEAR_ADD | - || [F] |
 | 0x0611 | AP2_DST_YEAR_DELETE | - || [F] |
 | 0x0612 | AP2_DST_DB_ADD | - || [S] |
@@ -3152,58 +3156,58 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
 | 0x0950 | AP2_DOWNLOAD_ME | - || [S] |
-| 0x0961 | AP2_UPL_DEL_POINT | 15 || [W] |
+| 0x0961 | AP2_UPL_DEL_POINT | 25 || [W] |
 | 0x0962 | AP2_UPL_DEL_ALARM_SETUP | - || [F] |
 | 0x0963 | AP2_UPL_DEL_ALARM_MODE | - || [F] |
-| 0x0964 | AP2_UPL_DEL_TREND | 4 || [W] |
-| 0x0965 | AP2_UPL_DEL_PPCL | 4 || [W] |
-| 0x0966 | AP2_UPL_DEL_TEC | 2 || [W] |
-| 0x0967 | AP2_UPL_DEL_EQS_ZONE | - || [S] |
+| 0x0964 | AP2_UPL_DEL_TREND | 26 || [W] |
+| 0x0965 | AP2_UPL_DEL_PPCL | 16 || [W] |
+| 0x0966 | AP2_UPL_DEL_TEC | 11 || [W] |
+| 0x0967 | AP2_UPL_DEL_EQS_ZONE | 6 || [W] |
 | 0x0968 | AP2_UPL_DEL_EQS_CMD_TABLE | - || [S] |
-| 0x0969 | AP2_UPL_DEL_EQS_MODE_SCHED | 6 || [W] |
+| 0x0969 | AP2_UPL_DEL_EQS_MODE_SCHED | 26 || [W] |
 | 0x096A | AP2_UPL_DEL_LOOP | - || [S] |
 | 0x096B | AP2_UPL_DEL_ALARM_MESSAGE | - || [F] |
-| 0x0971 | AP2_UPL_ADDED_POINT | 18 || [W] |
+| 0x0971 | AP2_UPL_ADDED_POINT | 32 || [W] |
 | 0x0972 | AP2_UPL_ADDED_ALARM_SETUP | - || [F] |
 | 0x0973 | AP2_UPL_ADDED_ALARM_MODE | - || [F] |
-| 0x0974 | AP2_UPL_ADDED_TREND | 5 || [W] |
-| 0x0975 | AP2_UPL_ADDED_PPCL | 5 || [W] |
-| 0x0976 | AP2_UPL_ADDED_TEC | 4 || [W] |
-| 0x0977 | AP2_UPL_ADDED_EQS_ZONE | - || [S] |
+| 0x0974 | AP2_UPL_ADDED_TREND | 21 || [W] |
+| 0x0975 | AP2_UPL_ADDED_PPCL | 23 || [W] |
+| 0x0976 | AP2_UPL_ADDED_TEC | 22 || [W] |
+| 0x0977 | AP2_UPL_ADDED_EQS_ZONE | 6 || [W] |
 | 0x0978 | AP2_UPL_ADDED_EQS_CMD_TABLE | - || [S] |
-| 0x0979 | AP2_UPL_ADDED_EQS_MODE_SCHED | 6 || [W] |
+| 0x0979 | AP2_UPL_ADDED_EQS_MODE_SCHED | 26 || [W] |
 | 0x097A | AP2_UPL_ADDED_LOOP | - || [S] |
 | 0x097B | AP2_UPL_ADDED_ALARM_MESSAGE | - || [F] |
-| 0x097C | AP2_UPL_ADDED_SSTO_GENERAL | - || [S] |
-| 0x097D | AP2_UPL_ADDED_SSTO_START | - || [S] |
-| 0x097E | AP2_UPL_ADDED_SSTO_STOP | - || [S] |
-| 0x097F | AP2_UPL_ADDED_SSTO_NIGHT | - || [S] |
-| 0x0981 | AP2_UPL_ALL_POINT | 6503 || [W] |
-| 0x0982 | AP2_UPL_ALL_ALARM_SETUP | 14 || [W] |
-| 0x0983 | AP2_UPL_ALL_ALARM_MODE | 14 || [W] |
-| 0x0984 | AP2_UPL_ALL_TREND | 179 || [W] |
-| 0x0985 | AP2_UPL_ALL_PPCL | 2511 || [W] |
-| 0x0986 | AP2_UPL_ALL_TEC | 541 || [W] |
-| 0x0987 | AP2_UPL_ALL_EQS_ZONE | 16 || [W] |
-| 0x0988 | AP2_UPL_ALL_EQS_CMD_TABLE | 120 || [W] |
-| 0x0989 | AP2_UPL_ALL_EQS_MODE_SCHED | 36 || [W] |
-| 0x098B | AP2_UPL_ALL_ALARM_MESSAGE | 6 || [W] |
-| 0x098C | AP2_UPL_ALL_SSTO_GENERAL | 16 || [W] |
-| 0x098D | AP2_UPL_ALL_SSTO_START | 16 || [W] |
-| 0x098E | AP2_UPL_ALL_SSTO_STOP | 16 || [W] |
-| 0x098F | AP2_UPL_ALL_SSTO_NIGHT | 16 || [W] |
+| 0x097C | AP2_UPL_ADDED_SSTO_GENERAL | 8 || [W] |
+| 0x097D | AP2_UPL_ADDED_SSTO_START | 8 || [W] |
+| 0x097E | AP2_UPL_ADDED_SSTO_STOP | 8 || [W] |
+| 0x097F | AP2_UPL_ADDED_SSTO_NIGHT | 8 || [W] |
+| 0x0981 | AP2_UPL_ALL_POINT | 12547 || [W] |
+| 0x0982 | AP2_UPL_ALL_ALARM_SETUP | 27 || [W] |
+| 0x0983 | AP2_UPL_ALL_ALARM_MODE | 27 || [W] |
+| 0x0984 | AP2_UPL_ALL_TREND | 288 || [W] |
+| 0x0985 | AP2_UPL_ALL_PPCL | 2672 || [W] |
+| 0x0986 | AP2_UPL_ALL_TEC | 1049 || [W] |
+| 0x0987 | AP2_UPL_ALL_EQS_ZONE | 81 || [W] |
+| 0x0988 | AP2_UPL_ALL_EQS_CMD_TABLE | 601 || [W] |
+| 0x0989 | AP2_UPL_ALL_EQS_MODE_SCHED | 114 || [W] |
+| 0x098B | AP2_UPL_ALL_ALARM_MESSAGE | 19 || [W] |
+| 0x098C | AP2_UPL_ALL_SSTO_GENERAL | 81 || [W] |
+| 0x098D | AP2_UPL_ALL_SSTO_START | 81 || [W] |
+| 0x098E | AP2_UPL_ALL_SSTO_STOP | 81 || [W] |
+| 0x098F | AP2_UPL_ALL_SSTO_NIGHT | 81 || [W] |
 | 0x099D | AP2_UPL_DEL_PORT | - || [F] |
 | 0x099E | AP2_UPL_ADDED_PORT | - || [F] |
-| 0x099F | AP2_UPL_ALL_PORT | 36 || [W] |
+| 0x099F | AP2_UPL_ALL_PORT | 114 || [W] |
 | 0x09A1 | AP2_UPL_DEL_PARTNER | - || [F] |
 | 0x09A2 | AP2_UPL_ADDED_PARTNER | - || [F] |
-| 0x09A3 | AP2_UPL_ALL_PARTNER | 6 || [W] |
+| 0x09A3 | AP2_UPL_ALL_PARTNER | 19 || [W] |
 | 0x09A5 | AP2_UPL_DEL_EQS_OVERRIDE | - || [S] |
 | 0x09A6 | AP2_UPL_ADDED_EQS_OVERRIDE | - || [S] |
-| 0x09A7 | AP2_UPL_ALL_EQS_OVERRIDE | 6 || [W] |
+| 0x09A7 | AP2_UPL_ALL_EQS_OVERRIDE | 19 || [W] |
 | 0x09A9 | AP2_UPL_DEL_UC | - || [F] |
 | 0x09AA | AP2_UPL_ADDED_UC | - || [F] |
-| 0x09AB | AP2_UPL_ALL_UC | 6 || [W] |
+| 0x09AB | AP2_UPL_ALL_UC | 19 || [W] |
 | 0x09B1 | AP2_UPL_DEL_TOD_POINT | - || [S] |
 | 0x09B2 | AP2_UPL_ADDED_TOD_POINT | - || [S] |
 | 0x09B3 | AP2_UPL_ALL_TOD_POINT | - || [S] |
@@ -3212,7 +3216,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x09B7 | AP2_UPL_ALL_TOD_CMD | - || [S] |
 | 0x09B9 | AP2_UPL_DEL_LON | - || [S] |
 | 0x09BA | AP2_UPL_ADDED_LON | - || [S] |
-| 0x09BB | AP2_UPL_ALL_LON | 6 || [W] |
+| 0x09BB | AP2_UPL_ALL_LON | 19 || [W] |
 | 0x09BD | AP2_UPLD_COMND_REPORT | - || [S] |
 | 0x09BF | AP2_UPLD_MISCDATA_REPORT | - || [S] |
 | 0x09C1 | AP2_UPL_DEL_MSTP_DEVICE | - || [S] |
@@ -3220,27 +3224,27 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x09C3 | AP2_UPL_ALL_MSTP_DEVICE | 1 || [W] |
 | 0x4131 | AP2_UPL_DEL_PROGRAM | - || [S] |
 | 0x4132 | AP2_UPL_ADDED_PROGRAM | - || [S] |
-| 0x4133 | AP2_UPL_ALL_PROGRAM | 6 || [W] |
+| 0x4133 | AP2_UPL_ALL_PROGRAM | 19 || [W] |
 
 #### Family: DBCHANGE
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x0951 | AP2_DBCHANGE_POINT | 11 || [W] |
+| 0x0951 | AP2_DBCHANGE_POINT | 19 || [W] |
 | 0x0952 | AP2_DBCHANGE_ALARM_SETUP | - || [S] |
 | 0x0953 | AP2_DBCHANGE_ALARM_MODE | - || [S] |
-| 0x0954 | AP2_DBCHANGE_TREND | 2 || [W] |
-| 0x0955 | AP2_DBCHANGE_PPCL | 3 || [W] |
-| 0x0956 | AP2_DBCHANGE_CONTROLLER | 2 || [W] |
-| 0x0957 | AP2_DBCHANGE_EQS_ZONE | - || [S] |
+| 0x0954 | AP2_DBCHANGE_TREND | 14 || [W] |
+| 0x0955 | AP2_DBCHANGE_PPCL | 13 || [W] |
+| 0x0956 | AP2_DBCHANGE_CONTROLLER | 11 || [W] |
+| 0x0957 | AP2_DBCHANGE_EQS_ZONE | 4 || [W] |
 | 0x0958 | AP2_DBCHANGE_EQS_CMD_TABLE | - || [S] |
-| 0x0959 | AP2_DBCHANGE_EQS_MODE_SCHED | 4 || [W] |
+| 0x0959 | AP2_DBCHANGE_EQS_MODE_SCHED | 16 || [W] |
 | 0x095A | AP2_DBCHANGE_LOOP | - || [S] |
 | 0x095B | AP2_DBCHANGE_ALARM_MESSAGE | - || [S] |
-| 0x095C | AP2_DBCHANGE_SSTO_GENERAL | - || [S] |
-| 0x095D | AP2_DBCHANGE_SSTO_START | - || [S] |
-| 0x095E | AP2_DBCHANGE_SSTO_STOP | - || [S] |
-| 0x095F | AP2_DBCHANGE_SSTO_NIGHT | - || [S] |
+| 0x095C | AP2_DBCHANGE_SSTO_GENERAL | 4 || [W] |
+| 0x095D | AP2_DBCHANGE_SSTO_START | 4 || [W] |
+| 0x095E | AP2_DBCHANGE_SSTO_STOP | 4 || [W] |
+| 0x095F | AP2_DBCHANGE_SSTO_NIGHT | 4 || [W] |
 | 0x099C | AP2_DBCHANGE_PORT | - || [S] |
 | 0x09A0 | AP2_DBCHANGE_PARTNER | - || [S] |
 | 0x09A4 | AP2_DBCHANGE_EQS_OVERRIDE | - || [S] |
@@ -3306,8 +3310,8 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x400B | AP2_TEAM_MEMBER_LOG | - || [S] |
 | 0x400C | AP2_TEAM_REPORT_LOG | - || [S] |
 | 0x400D | AP2_TEAM_REPORT_LIST | - || [S] |
-| 0x400F | AP2_TEAM_DESC_UPLOAD | 12 || [W] |
-| 0x4010 | AP2_MEMBER_DESC_UPLOAD | 6 || [W] |
+| 0x400F | AP2_TEAM_DESC_UPLOAD | 38 || [W] |
+| 0x4010 | AP2_MEMBER_DESC_UPLOAD | 19 || [W] |
 | 0x4015 | AP2_TEAM_DESC_DB_CHANGE | - || [S] |
 | 0x4016 | AP2_TEAM_MEMBER_DB_CHANGE | - || [S] |
 | 0x4017 | AP2_TEAM_DESC_UPLOAD_ADDED | - || [S] |
@@ -3317,7 +3321,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x4200 | AP2_CONTROLLER_LOG / AP2_TEC_LOG | 76 || [W] |
+| 0x4200 | AP2_CONTROLLER_LOG / AP2_TEC_LOG | 248 || [W] |
 | 0x4201 | AP2_TEC_ADD | - || [S] |
 | 0x4202 | AP2_TEC_COPY | - || [S] |
 | 0x4203 | AP2_TEC_MODIFY / AP2_CONTROLLER_MODIFY | - || [S] |
@@ -3330,8 +3334,8 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x4211 | AP2_TEC_REPORT_LOG | - || [F] |
 | 0x4212 | AP2_TEC_REPORT_QUERY_LIST | - || [S] |
 | 0x4220 | AP2_TEC_LOCAL_INIT_VALUE_LOG | 1 || [W] |
-| 0x4221 | AP2_TEC_REMOTE_INIT_VALUE_LOG | 381 || [W] |
-| 0x4222 | AP2_TEC_SET_INIT_VALUE | 29 || [W] |
+| 0x4221 | AP2_TEC_REMOTE_INIT_VALUE_LOG | 1173 || [W] |
+| 0x4222 | AP2_TEC_SET_INIT_VALUE | 38 || [W] |
 | 0x4223 | AP2_TEC_RESTORE_INIT_VALUE | - || [F] |
 | 0x4224 | AP2_TEC_INITIALIZE | 2 || [W] |
 | 0x4225 | AP2_TEC_UPDATE_LOCAL_INIT_VALUES | 4 || [W] |
@@ -3388,7 +3392,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x462E | AP2_EBLN_HOSTTABLE_ENTRY_REMOVE | - |**DESTRUCTIVE** (remove host-table entry)| [S] |
 | 0x462F | AP2_EBLN_HOSTTABLE_DISPLAY | - || [S] |
 | 0x4633 | AP2_EBLN_REPL_NOTIFY | 41 || [W] |
-| 0x4634 | AP2_EBLN_REPL_PULL | 7560 || [W] |
+| 0x4634 | AP2_EBLN_REPL_PULL | 10019 || [W] |
 | 0x4635 | AP2_EBLN_REPL_PULL_MORE | 130 || [W] |
 | 0x4636 | AP2_EBLN_REPL_CHANGES | 180 |corpus-wide count; a single passive capture alone holds 170 requests + 170 replies — see §5.3| [W] |
 | 0x4637 | AP2_EBLN_POINT_LOCATION_GET | - || [S] |
@@ -3399,7 +3403,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x463C | AP2_EBLN_PORTS_DISPLAY | - || [S] |
 | 0x463D | AP2_EBLN_MULTICAST_DISPLAY | - || [S] |
 | 0x463E | AP2_EBLN_MAC_ADDRESS_DISPLAY | - || [S] |
-| 0x4640 | AP2_EBLN_PING | 78623 || [W] |
+| 0x4640 | AP2_EBLN_PING | 108430 || [W] |
 | 0x4644 | AP2_EBLN_TELNET_ENABLE | 1 |**DESTRUCTIVE** (enable telnet)| [W] |
 | 0x4645 | AP2_EBLN_TELNET_DISABLE | - |**DESTRUCTIVE** (disable telnet)| [S] |
 | 0x464C | AP2_EBLN_REPL_DIAG_NODELIST | 1 || [W] |
@@ -3467,19 +3471,19 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
-| 0x5000 | AP2_EQS_ZONE_ADD | - || [S] |
-| 0x5001 | AP2_EQS_ZONE_REMOVE | - || [S] |
+| 0x5000 | AP2_EQS_ZONE_ADD | 2 || [W] |
+| 0x5001 | AP2_EQS_ZONE_REMOVE | 2 || [W] |
 | 0x5002 | AP2_EQS_ZONE_MODIFY | - || [S] |
-| 0x5003 | AP2_EQS_ZONE_LOOK | 27 || [W] |
+| 0x5003 | AP2_EQS_ZONE_LOOK | 39 || [W] |
 | 0x5004 | AP2_EQS_ZONE_ENABLE | - || [S] |
 | 0x5005 | AP2_EQS_ZONE_DISABLE | - || [S] |
 | 0x5018 | AP2_EQS_CMD_TABLE_ENTRY_ADD | - || [S] |
 | 0x5019 | AP2_EQS_CMD_TABLE_ENTRY_MODIFY | - || [S] |
 | 0x501A | AP2_EQS_CMD_TABLE_ENTRY_REMOVE | - || [S] |
 | 0x501B | AP2_EQS_CMD_TABLE_ENTRY_LOOK | - || [S] |
-| 0x5020 | AP2_EQS_MODE_ENTRY_ADD | 2 || [W] |
+| 0x5020 | AP2_EQS_MODE_ENTRY_ADD | 10 || [W] |
 | 0x5021 | AP2_EQS_MODE_ENTRY_MODIFY | - || [S] |
-| 0x5022 | AP2_EQS_MODE_ENTRY_REMOVE | 2 || [W] |
+| 0x5022 | AP2_EQS_MODE_ENTRY_REMOVE | 8 || [W] |
 | 0x5023 | AP2_EQS_MODE_ENTRY_LOOK | - || [S] |
 | 0x5024 | AP2_EQS_MODE_ENTRY_ENABLE | - || [S] |
 | 0x5025 | AP2_EQS_MODE_ENTRY_DISABLE | - || [S] |
@@ -3490,12 +3494,12 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0x5035 | AP2_EQS_DISPLAY_ZONE | - || [S] |
 | 0x5036 | AP2_EQS_DISPLAY_MODE_ENTRY | - || [S] |
 | 0x5037 | AP2_EQS_DISPLAY_CMD_TABLE | - || [S] |
-| 0x5038 | AP2_EQS_ZONE_LOG | 3 || [W] |
+| 0x5038 | AP2_EQS_ZONE_LOG | 25 || [W] |
 | 0x5039 | AP2_EQS_DISPLAY_OVERRIDES | - || [S] |
-| 0x503A | AP2_EQS_SSTO_SETUP_GENERAL | - || [S] |
-| 0x503B | AP2_EQS_SSTO_SETUP_START | - || [S] |
-| 0x503C | AP2_EQS_SSTO_SETUP_STOP | - || [S] |
-| 0x503D | AP2_EQS_SSTO_SETUP_NIGHT | - || [S] |
+| 0x503A | AP2_EQS_SSTO_SETUP_GENERAL | 2 || [W] |
+| 0x503B | AP2_EQS_SSTO_SETUP_START | 2 || [W] |
+| 0x503C | AP2_EQS_SSTO_SETUP_STOP | 2 || [W] |
+| 0x503D | AP2_EQS_SSTO_SETUP_NIGHT | 2 || [W] |
 | 0x503E | AP2_EQS_SSTO_LOOK_GENERAL | - || [S] |
 | 0x503F | AP2_EQS_SSTO_LOOK_START | - || [S] |
 | 0x5040 | AP2_EQS_SSTO_LOOK_STOP | - || [S] |
@@ -3530,7 +3534,7 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 | 0xHEX | Name | Observed (count) | Notes | Tag |
 |---|---|---|---|---|
 | 0x5351 | AP2_HOA_MAP_MODIFY | - || [S] |
-| 0x5354 | AP2_HOA_MAP_LOOK | 13 || [W] |
+| 0x5354 | AP2_HOA_MAP_LOOK | 27 || [W] |
 | 0x5355 | AP2_HOA_MAP_ADD | - || [S] |
 
 
@@ -3556,20 +3560,20 @@ The catalog below is generated by joining the vendor `AP2_Function_Code` enum (t
 
 The corpus distribution grounds the catalog in observed behavior:
 
-- **Message classes (`msg_type` low byte).** Six classes are defined — the legacy/modern pairs of §6.2/§6.6 — and any other low-byte value is parser noise from a desynced stream. Corpus distribution, over **349,632 trusted frames in 89 distinct P2-carrying captures** (content-deduplicated; criteria stated because an earlier edition of this table gave counts that cannot be reproduced from the evidence base, see the note below):
+- **Message classes (`msg_type` low byte).** Six classes are defined — the legacy/modern pairs of §6.2/§6.6 — and any other low-byte value is parser noise from a desynced stream. Corpus distribution, over **621,268 trusted frames in 121 distinct P2-carrying captures** (content-deduplicated; criteria stated because an earlier edition of this table gave counts that cannot be reproduced from the evidence base, see the note below):
 
   | Class | Role | Frames |
   |---|---|---:|
-  | `0x33` | legacy data dialect | 199,241 |
-  | `0x29` | session carrier (panel-to-panel) | 98,060 |
-  | `0x34` | modern data dialect | 23,193 |
-  | `0x2E` | legacy 2nd-channel / announce + DB-sync | 15,008 |
-  | `0x2A` | peer-session carrier (panel-to-panel) | 12,260 |
-  | `0x2F` | modern 2nd-channel | 1,870 |
+  | `0x33` | legacy data dialect | 420,024 |
+  | `0x29` | session carrier (panel-to-panel) | 100,200 |
+  | `0x34` | modern data dialect | 40,962 |
+  | `0x2E` | legacy 2nd-channel / announce + DB-sync | 42,542 |
+  | `0x2A` | peer-session carrier (panel-to-panel) | 12,556 |
+  | `0x2F` | modern 2nd-channel | 4,984 |
 
-  These sum to the 349,632 trusted frames of 9.5. **The peer carriers moved
+  These sum to the 621,268 trusted frames of 9.5. **The peer carriers moved
   by four orders of magnitude when panel-side captures entered the corpus**
-  - `0x29` from 10 frames to 98,060, and `0x2A` from zero to 12,260 -
+  - `0x29` from 10 frames to 100,200, and `0x2A` from zero to 12,556 -
   because a supervisor-side tap structurally cannot observe a
   panel-to-panel session. The earlier figures were not wrong for what they
   measured; they measured one vantage point.
@@ -3578,11 +3582,20 @@ The corpus distribution grounds the catalog in observed behavior:
 
   **The peer carriers behave exactly as described, and the tiny counts above are a property of the vantage point, not of the protocol.** Isolating conversations where neither endpoint is the supervisor or a research host leaves **10 frames in this census** — all class `0x29`, all `EBLN_PING`, all captured during a power cycle as panels re-established sessions with each other. A supervisor-side tap structurally cannot see a panel↔panel session, so the census measures how often the *supervisor* participates, not how much peer traffic exists.
 
-  **Two taps on a panel's own switch port settle it.** Each shows the panel holding sessions with nine peers continuously, and together they contribute 2,317 trusted P2 frames of ordinary peer traffic against the census's 10. Both carriers are wire-observed there: `0x29` at 772/1,020 frames and **`0x2A` at 96/130** — so `0x2A` is now `[W]`, not an inference from the legacy/modern pairing. Neither carrier is single-opcode: alongside `0x4640` they carry the replication family (`0x4634`, `0x4633`, `0x4636`) and `0x0271 COV_ENABLE`. The census figures above are unchanged and remain correct for what they measure; they are counts of *supervisor-facing* P2. [W]
+  **Taps on a panel's own switch port settle it.** The corpus now holds five, on **two different panels**, each showing its panel holding sessions with nine peers continuously. Both carriers are wire-observed there — so `0x2A` is `[W]`, not an inference from the legacy/modern pairing. Neither carrier is single-opcode: alongside `0x4640` they carry the replication family (`0x4634`, `0x4633`, `0x4636`) and `0x0271 COV_ENABLE`. The census figures above are counts of *supervisor-facing* P2 and remain correct for what they measure. [W]
 
-  > **Why the numbers changed.** A previous edition of this list gave 433,425 / 43,668 / 43,780 / 7,322 / 2,200 / 296, totalling 530,691 frames. That total is reproducible from neither the deduplicated corpus (349,632) nor a naive count over all 726 capture files including duplicates (910,968), and both counts put `0x2A` at zero in the supervisor-side set. The figures appear to derive from a capture set that is not the one in the evidence base. They are replaced here with counts that are reproducible from it, under the stated criteria. [W]
-- **Direction byte.** 0x00 request/push (178,266), 0x01 success response (167,055), 0x05 error response (4,311) - summing exactly to the 349,632 trusted frames of 9.5. A success response carries the operation's payload after the routing slots; an error response carries exactly a 2-byte error code and nothing else. [W]
-- **Error tail values (the 2-byte code on a 0x05 response).** `0x0003` not-found / unrecognized-opcode (4,224×), `0x00AC` not-supported (49×), `0x0E15` physical-point-not-commandable (28×), `0x0002` invalid-operation (4×), `0x0E11` FLN-invalid-drop-number (2×), `0x0E12` FLN-device-failed (3×), `0x0009` already-exists (1×). See §7.2.2; `0x0E1x` is the FLN band. An opcode the panel does not implement returns `0x05 ... 00 03`; this is how the defined-but-unimplemented-on-this-firmware opcodes announce themselves on the wire. [W]
+  **Which peer carrier a node uses is a property of the node, not of the link.** Resolving every peer-carrier frame in the corpus to its host pair gives 13 pairs on `0x29` and 2 on `0x2A` — and the two `0x2A` pairs share one endpoint, which appears in **none** of the thirteen `0x29` pairs:
+
+  | Class | Host pairs | Pattern |
+  |---|---:|---|
+  | `0x29` | 13 | every pair among the other nodes |
+  | `0x2A` | 2 | both involve the *same single node*, which never appears on `0x29` |
+
+  Two independent panels each speak `0x29` to every peer they have **and `0x2A` to that one node**. A single vantage could not distinguish this from "one link happens to differ"; two vantages on two devices make it a per-node property. The natural reading is a firmware-generation split — one node on the BLN speaks the other dialect of the pair, and its peers switch carrier to match it. An implementer should therefore select the peer carrier **per peer**, from what that peer presents, and must not assume one carrier BLN-wide. Which of the two is the newer generation is **[OPEN]**: it needs `0x010C CABINET_DISPLAY` read from the odd node. [W]
+
+  > **Why the numbers changed.** A previous edition of this list gave 433,425 / 43,668 / 43,780 / 7,322 / 2,200 / 296, totalling 530,691 frames. That total is reproducible from neither the deduplicated corpus (621,268) nor a naive count over all 764 capture files including duplicates (1,326,186), and both counts put `0x2A` at zero in the supervisor-side set. The likeliest explanation is now a mundane one: the corpus has since been shown to have been **incomplete** — thirty-four captures, 271,636 frames, were recovered into it after this note was first written — so an earlier edition counting a capture set that no longer existed in the evidence tree is exactly what one would expect. The figures here are replaced with counts reproducible from the current corpus under the stated criteria, and a reader who reproduces them should expect them to move again if the corpus grows. [W]
+- **Direction byte.** 0x00 request/push (314,273), 0x01 success response (300,989), 0x05 error response (6,006) - summing exactly to the 621,268 trusted frames of 9.5. A success response carries the operation's payload after the routing slots; an error response carries exactly a 2-byte error code and nothing else. [W]
+- **Error tail values (the 2-byte code on a 0x05 response).** `0x0003` not-found / unrecognized-opcode (5,805×), `0x00AC` not-supported (49×), `0x0E15` physical-point-not-commandable (28×), `0x0002` invalid-operation (4×), `0x0E11` FLN-invalid-drop-number (2×), `0x0E12` FLN-device-failed (3×), `0x0009` already-exists (1×). See §7.2.2; `0x0E1x` is the FLN band. An opcode the panel does not implement returns `0x05 ... 00 03`; this is how the defined-but-unimplemented-on-this-firmware opcodes announce themselves on the wire. [W]
 - **Per-opcode response shapes.** Response lengths vary by opcode and by the addressed object; representative shapes from the census (opcode → success-response sizes): 0x010C → 230/231 B (firmware/identity block, §10.5); 0x0220 (read) → 126/138 B or `err 0003` when the point is absent; 0x0271 (COV enable) → 96/108 B; 0x0274 (annunciate) → 0 B (acknowledged, no payload); 0x4640 → 40/41/45/47 B at this site (three TLVs + a 16-byte tail; the length follows the *sender's* node name, not the addressee's — see §7.1); 0x0981 (enumerate points) → 88/115/118 B. The "0 B success" pattern (direction 0x01, empty body) is a bare acknowledgement used by push/command/replication opcodes. [W] **A request may also carry a zero-length body**, and 220 in the corpus do: `0x010C` (163×), `0x4633 EBLN_REPL_NOTIFY` (22×), `0x0951 DBCHANGE_POINT` (11×), `0x0100` (9×) and the rest of the `DBCHANGE` family. This is the natural encoding of a **parameterless operation** — the `u16` opcode is the whole message. An encoder must be willing to emit an ASDU of length zero, and a decoder must accept it as complete rather than truncated: after the two opcode bytes are taken off, `total - 2` is legitimately 0. [W]
 
 ---
@@ -4988,9 +5001,9 @@ All PPCL operations are AP2 function codes. The enumerate/upload family lives in
 | `0x4101` | `AP2_PPCL_EDIT_LINE` | edit one line | write | [S] |
 | `0x4103` | `AP2_PPCL_REMOVE_LINES` | remove a line range | **destructive** | [S] |
 | `0x4104` | `AP2_PPCL_ENABLE_LINES` | enable a line range | write | [S] |
-| `0x4105` | `AP2_PPCL_DISABLE_LINES` | disable a line range | write | [S] |
+| `0x4105` | `AP2_PPCL_DISABLE_LINES` | disable a line range | write | **[W]** |
 | `0x4106` | `AP2_PPCL_CLEAR_TRACE` | clear all trace bits for a program | state-changing | [S] |
-| `0x4107` | `AP2_PPCL_PROGRAM_LOG` | report program execution log | read | [S] |
+| `0x4107` | `AP2_PPCL_PROGRAM_LOG` | report program execution log | read | **[W]** |
 | `0x4108` | `AP2_PPCL_SEARCH_NAME_TYPE` | find lines by statement type / referenced name | read | [S] |
 | `0x4109` | `AP2_PPCL_QUERY_PROGRAM` | query program metadata/state | read | [S] |
 | `0x410A` | `AP2_PPCL_PROGRAM_DISPLAY` | display (decompiled) program source | read | [S] |
@@ -5102,16 +5115,16 @@ EQS schedules a **zone** (a group of points) into occupancy **modes**, each mode
 
 | Block | Opcodes | Purpose | Tag |
 |---|---|---|---|
-| Zone edit | `0x5000`–`0x5005` (`AP2_EQS_ZONE_ADD/REMOVE/MODIFY/LOOK/ENABLE/DISABLE`) | create/modify/query an EQS zone | [S] |
+| Zone edit | `0x5000`–`0x5005` (`AP2_EQS_ZONE_ADD/REMOVE/MODIFY/LOOK/ENABLE/DISABLE`) | create/modify/query an EQS zone | [W] for `0x5000`/`0x5001`, else [S] |
 | Command-table edit | `0x5018`–`0x501B` (`AP2_EQS_CMD_TABLE_ENTRY_ADD/MODIFY/REMOVE/LOOK`) | per-mode command entries | [S] |
 | Mode edit | `0x5020`–`0x5025` (`AP2_EQS_MODE_ENTRY_ADD/MODIFY/REMOVE/LOOK/ENABLE/DISABLE`) | occupancy-mode entries | [S] |
 | Override edit | `0x5028`–`0x502B` (`AP2_EQS_OVERRIDE_ADD/MODIFY/REMOVE/LOOK`) | timed/manual overrides | [S] |
 | Display / log | `0x5035`–`0x5039` (`AP2_EQS_DISPLAY_ZONE/MODE_ENTRY/CMD_TABLE`, `ZONE_LOG`, `DISPLAY_OVERRIDES`) | read-only reports | [S] |
-| SSTO setup | `0x503A`–`0x503D` (`AP2_EQS_SSTO_SETUP_GENERAL/START/STOP/NIGHT`) | configure optimization | [S] |
+| SSTO setup | `0x503A`–`0x503D` (`AP2_EQS_SSTO_SETUP_GENERAL/START/STOP/NIGHT`) | configure optimization | **[W], all four** |
 | SSTO look/control | `0x503E`–`0x5044` (`AP2_EQS_SSTO_LOOK_*`, `SSTO_RESET/ENABLE/DISABLE`) | query/control optimization | [S] |
 | SSTO display | `0x5050`–`0x5053` (`AP2_EQS_SSTO_DISPLAY_GENERAL/START/STOP/NIGHT`) | display optimization state | [S] |
 | Member log | `0x5054` (`AP2_EQS_MEMBER_LOG`) | per-member status log | [S] |
-| Replication / upload | `0x0957`–`0x0959`, `0x0967`–`0x0969`, `0x0977`–`0x0979`, `0x0987`–`0x0989` (`AP2_{DBCHANGE,UPL_DEL,UPL_ADDED,UPL_ALL}_EQS_{ZONE,CMD_TABLE,MODE_SCHED}`); `0x09A4`–`0x09A7` (EQS_OVERRIDE); `0x095C`–`0x095F`, `0x097C`–`0x097F`, `0x098C`–`0x098F` (SSTO_GENERAL/START/STOP/NIGHT) | DB-change + upload of all EQS sub-objects | [W for `0x0988`] |
+| Replication / upload | `0x0957`–`0x0959`, `0x0967`–`0x0969`, `0x0977`–`0x0979`, `0x0987`–`0x0989` (`AP2_{DBCHANGE,UPL_DEL,UPL_ADDED,UPL_ALL}_EQS_{ZONE,CMD_TABLE,MODE_SCHED}`); `0x09A4`–`0x09A7` (EQS_OVERRIDE); `0x095C`–`0x095F`, `0x097C`–`0x097F`, `0x098C`–`0x098F` (SSTO_GENERAL/START/STOP/NIGHT) | DB-change + upload of all EQS sub-objects | **[W]** for `0x0957`, `0x095C`–`0x095F`, `0x0967`, `0x0977`, `0x097C`–`0x097F`, `0x0988`; else [S] |
 
 **EQS zone definition** (`AP2_EQS_Zone_Add_Request` = `User_profile` + `Eqs_zone_definition`): [S]
 
@@ -5130,6 +5143,59 @@ EQS schedules a **zone** (a group of points) into occupancy **modes**, each mode
 ### 15.3.1 SSTO — start-stop time optimization
 
 SSTO is referenced both by PPCL (`SSTO`, `SSTOCOEF` statements, §14.3) and by the EQS SSTO opcode family above. SSTO computes an optimized equipment start time (and night-setback strategy) from learned coefficients so the zone reaches occupied setpoint by the scheduled occupancy time. The `SSTO_GENERAL/START/STOP/NIGHT` four-way split (visible across the setup/look/display opcode rows) corresponds to the four configuration blocks: general parameters, optimized-start, optimized-stop, and night-cycle. [D/S]
+
+#### 15.3.2 An EQS zone being created, on the wire
+
+A capture taken simultaneously from both a panel and the supervisor contains a
+complete EQS zone-and-SSTO configuration transaction, which pins the opcode
+taxonomy above to observed behaviour. Read in timestamp order (supervisor
+`SUP`, panel `PNL`, times in seconds from the start of the exchange): [W]
+
+```
+200.49  SUP -> PNL   EQS_ZONE_ADD  (0x5000)          User_profile(SYST) + zone name
+200.51  PNL -> SUP   DBCHANGE_EQS_ZONE (0x0957)      body EMPTY        -> SUP answers OK
+200.51  SUP -> PNL   UPL_DEL_EQS_ZONE  (0x0967)      selector '*', resume ""
+200.52  PNL -> SUP   DBCHANGE_SSTO_GENERAL (0x095C)  body EMPTY        -> SUP answers OK
+   ...                 START / STOP / NIGHT likewise, all empty
+200.64  SUP -> PNL   UPL_ADDED_EQS_ZONE (0x0977)     resume ""         -> OK, record returned
+200.81  SUP -> PNL   UPL_ADDED_EQS_ZONE (0x0977)     resume <last name> -> ERR 0x0003
+200.82  SUP -> PNL   UPL_ADDED_SSTO_GENERAL (0x097C) resume ""         -> OK, record returned
+   ...                 START / STOP / NIGHT likewise
+202.67  SUP -> PNL   EQS_SSTO_SETUP_GENERAL (0x503A) -> OK, zone name echoed
+202.69  SUP -> PNL   EQS_SSTO_SETUP_START/STOP/NIGHT (0x503B/C/D) -> OK each
+```
+
+Three things an implementer needs, each counted rather than read off one
+exchange:
+
+**1. The four-way `{GENERAL, START, STOP, NIGHT}` split is real on the wire, and
+it repeats across all three tiers** — setup (`0x503A`–`0x503D`), database-change
+(`0x095C`–`0x095F`), and upload-added (`0x097C`–`0x097F`). This is the operand
+model of §9.1.1 in its clearest form: one operation with a four-valued
+record-type parameter folded into the opcode, three times over. [W]
+
+**2. A `DBCHANGE_*` notification carries no data.** Every `DBCHANGE_*` frame
+observed — **20 of 20** — has a **zero-length body**, and **20 of 20** travel
+**panel → supervisor**, each answered by the supervisor with a bare success. The
+panel does not push what changed; it pushes *that* its `<section>` changed, and
+the supervisor then reads the content back with the matching
+`UPL_ADDED_<section>`. This is why the `DBCHANGE`/`UPL_ADDED` opcode pairs exist
+at all, and it means a client that wants change notification must implement a
+**server** role for these opcodes, not merely a reader. [W]
+
+**3. Enumeration terminates with `0x0003`.** The `UPL_*` body is the paging idiom
+of §10.2.3 — a `'*'` wildcard selector and a resume key. Feeding back the name
+just returned ends the walk:
+
+| resume key | outcome | observed |
+|---|---|---:|
+| empty TLV (`01 00 00`) | success, record returned | 20 |
+| the name just returned | **error `0x0003`** | 20 |
+
+Twenty for twenty across five distinct opcodes, without exception. Note that
+`0x0003` is the *object-not-found* code of §7.2.2 doing double duty as normal
+control flow: **a client that treats `0x0003` as a fault will log an error at the
+end of every successful enumeration.** [W]
 
 ---
 
