@@ -3688,14 +3688,36 @@ field with nothing left over — `User_profile` + `Team_search` +
 
 Two cautions an implementer should carry from this:
 
-- **`0x4200` is one opcode with two operations.** The function-code enumeration
-  gives it two names, and the wire shows two distinct request shapes — a ~30-byte
-  form matching the TEC definition, and a 220-byte form whose tail is a long zero
-  run. The second has no ASDU definition and is **[OPEN]**. Eleven opcode values
-  in the enumeration carry two names; this is the one where both are observable.
-- **Sibling opcodes do not share a search type.** `0x4221` uses `Name_search`
-  inside a larger `Def_TEC_app` wrapper, not `Team_search`, and a parser that
-  assumes the shorter type mis-frames the remainder of the body (§10.2.3).
+- **`0x4200` carries two distinct request forms, and the discriminator is not
+  length.** The function-code enumeration gives this opcode two names — one of
+  eleven aliased values, and the only one where both are observable. Both forms
+  parse cleanly as `User_profile` + `Team_search` + a 2-byte field; what
+  separates them is *what is in that field and how the buffer is sized*: [W]
+
+  | Form | Frames | Length | 2 bytes after the search |
+  |---|---:|---|---|
+  | A | 70 | variable, 28–38 B, no padding | `FFFF` — the wildcard, 70 of 70 |
+  | B | 178 | **fixed 220 B**, zero-padded | `0000`, 178 of 178 |
+
+  Form A is `TEC_LOG` as its ASDU defines it. Form B is a different caller
+  supplying an explicit `0x0000` in place of the wildcard and writing into a
+  fixed-size buffer. Which enum name belongs to which form is **[OPEN]** — the
+  wire distinguishes the forms, not the names.
+
+- **Some TEC requests use a fixed 220-byte zero-padded buffer.** Form B above and
+  every one of `0x4221`'s 1,173 requests are exactly 220 bytes with the remainder
+  zero-filled — `0x4221` consumes 44 and pads 176. The padding is not opaque
+  content: the fields end and zeros follow. A parser must therefore **stop at the
+  end of the declared structure and not treat trailing zeros as data**, and must
+  not infer the operation from the frame length. [W]
+
+- **Sibling opcodes do not share a search type.** `0x4221`'s request is
+  `Def_TEC_app` = `user_profile` + `application_family` + `team_type` +
+  **`Name_search`** + `all_init_values`, not `Team_search`. Decoded on the wire:
+  `application_family = tec_na`, `team_type = 0xFFFF`, and a `Name_search` whose
+  `suffix_pattern` is `*` and whose `last_suffix` advances one subpoint per
+  request — the suffix walk of §10.2.3, in use. A parser that assumes the shorter
+  search type mis-frames everything after it. [W][S]
 
 ### 9.6 The session/keepalive opcode 0x4640 (EBLN_PING)
 
