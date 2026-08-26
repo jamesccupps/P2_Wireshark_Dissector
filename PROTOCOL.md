@@ -3856,6 +3856,24 @@ Field types in the structure tables map to wire encodings as follows. These are 
 | `<Name>[]` | repeating array | preceded by a `nrOf<name>` u16 BE count field. [S] |
 | `<Enum>` | integer, **width per enum** — see below | value space per the enum tables (priorities, point types, cov masks, node states, etc.). The structure library does **not** state the wire width of any enum; each must be pinned separately. [S] |
 
+**Enum values are sparse. Never index an enum positionally.** Of the 66 value
+enums in the protocol's type system, **18 have gaps** — the value space is not
+`0..n-1` and a value is not an ordinal. `Point_type` skips 5 and 8–10 and 16–19;
+`Point_priority` uses 0, 1, 5, 10, 15, 20, 25, 30, 32, 34, 35 and then a
+BACnet band at 101–116; `Node_complete_state` runs 2–15 with 4–6 missing. Any
+code that treats an enum value as an index into a list of names — or into the
+arm list of a CHOICE — is correct only up to the first gap and wrong
+thereafter, **silently**, because the wrong name is still a valid name. This is
+not hypothetical: an earlier edition of §10.4.1 read the `All_points` tag as an
+ordinal and mislabelled seven of eleven point types. [S]
+
+A related hazard follows from the same sparseness. **Four values are legal in
+both `Point_priority` and `Point_type`** — `0`, `1`, `15` and `20` — so a
+decoder that is off by one field between a priority byte and a type byte
+produces a plausible value rather than an error. Where both appear in one
+structure, validate against the field's own enum, not against "is this a
+sensible small integer". [S]
+
 **Enum field widths are not in the structure library, and they have to be.** The
 library gives an ordered field list for all 1,144 structures, but for an enum
 field it gives only a type name — so **field order is fully specified and field
