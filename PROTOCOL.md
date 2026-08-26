@@ -2025,11 +2025,41 @@ The universal container for a string, name, or scope-name field is a tag-length-
 
 | Offset | Field | Type | Value/Notes | [tag] |
 |---|---|---|---|---|
-| 0 | tag | 2 bytes | Fixed 2-byte prefix `0x01 0x00` | [W] |
-| 2 | length | u8 | Number of content bytes that follow (0–255) | [W] |
-| 3 | content | `length` bytes | Usually ASCII text; occasionally binary | [W] |
+| 0 | `textType` | u8 | Always `0x01` in the corpus | [W] |
+| 1 | `textLen` | **u16 BE** | Number of content bytes that follow | [S][W] |
+| 3 | content | `textLen` bytes | Usually ASCII text; occasionally binary | [W] |
 
-The tag is the literal prefix `0x01 0x00`. The third byte is a one-byte length, and exactly that many content bytes follow. Worked examples (verbatim wire bytes): [W]
+**The length is two bytes, not one.** An earlier edition of this section
+described the primitive as a fixed 2-byte prefix `01 00` followed by a
+*one-byte* length. Every observed TLV is consistent with that reading, because
+the protocol's own type system defines the field as
+
+```
+TEXT_ :  textType : UNSIGNED_8      textLen : UNSIGNED_16      text : Byte[]
+```
+
+so the `00` that looked like the second half of a constant tag is the **high
+byte of a 16-bit length**. The two readings coincide for every string shorter
+than 256 bytes, and no string in the corpus is longer: **1,223,162 TLVs, every
+one with a zero high byte.** The longest content observed from vendor traffic is
+183 bytes; the only 255-byte TLV in the corpus is a deliberately maximal test
+name of our own.
+
+An implementer must use the 16-bit reading anyway, because the one-byte reading
+is only accidentally correct here and fails destructively where it is not: the
+codec's own string caps put message text, license strings, point descriptions
+and **PPCL program-line text in a band around 248–257 bytes** (§8.4), straddling
+the boundary. A decoder that reads one byte will take a 256-byte line's length
+as `0x00`, emit an empty string, and then resynchronise in the middle of the
+text — silently, on the most variable-length field in the protocol.
+
+**[OPEN]** — no observed frame settles it from the wire alone. The falsifying
+test is cheap and safe, and is the same shape as the name-length probes already
+run: present a name TLV of 256 or more bytes and observe whether the panel reads
+the length as 16-bit. Until then this is `[S]` from the type system with `[W]`
+consistency, not a wire-proven width.
+
+Worked examples (verbatim wire bytes): [W]
 
 ```
 01 00 04 53 59 53 54         ->  "SYST"   (length 4)
@@ -2040,7 +2070,11 @@ The tag is the literal prefix `0x01 0x00`. The third byte is a one-byte length, 
 Properties an implementer must honor:
 
 - **Content is NOT NUL-terminated.** The length byte alone bounds the content. This is the inverse of the four routing slots in the header (see §6), which are NUL-terminated and carry no length prefix. The two MUST NOT be conflated. [W]
-- **A single TLV caps at 255 content bytes** because the length is one byte. A payload longer than 255 bytes is carried as multiple consecutive TLVs. Standard P2 name fields (point names, node names, BLN names, descriptors) are all well under this cap; only free-text and table dumps approach it. [W]
+- **A single TLV's content is bounded by `textLen`, a 16-bit field**, so the
+  structural cap is 65,535 bytes rather than 255. What actually bounds a field
+  is the *codec's* per-field maximum (§8.4) — 31 bytes for object and point
+  names, ~13 for a short descriptor, ~248–257 for free text — not the length
+  field. Standard P2 name fields are far under either. [S][W]
 - **The empty TLV `01 00 00` (length 0) is common** and serves as a positional placeholder inside request bodies — reserving or separating a field that carries no value in a given request (for example a device-name slot left empty to address a BLN-virtual point). [W]
 
 Notation used throughout §9: `S<n>` abbreviates a string TLV `01 00 <n> <n content bytes>`, and `S()` abbreviates the empty placeholder TLV `01 00 00`. [I]
@@ -3809,7 +3843,7 @@ Field types in the structure tables map to wire encodings as follows. These are 
 
 | ASDU type | Wire encoding | Notes |
 |---|---|---|
-| `TEXT_` | string TLV `01 00 <len> <bytes>` | 1-byte length, ASCII content, not NUL-terminated inside the TLV; empty = `01 00 00`. [W] |
+| `TEXT_` | string TLV: `textType` u8 (`0x01`) + `textLen` **u16 BE** + content | See §8.1 — the length is **two** bytes; ASCII content, not NUL-terminated inside the TLV; empty = `01 00 00`. [S][W] |
 | `UNSIGNED8` / `UNSIGNED_8` | 1 byte | [S] |
 | `UNSIGNED16` / `UNSIGNED_16` | 2 bytes, big-endian | counts/markers/error codes are u16 BE. [W] |
 | `UNSIGNED32` | 4 bytes, big-endian | sequence numbers, identifiers. [W] |
@@ -3820,7 +3854,36 @@ Field types in the structure tables map to wire encodings as follows. These are 
 | `DATE_TIME` / `DATE_` / `TIME_` | packed date/time block | [S] |
 | `<Name>` (capitalized) | nested sub-structure | expanded inline; shared sub-types defined once in §10.2. [S] |
 | `<Name>[]` | repeating array | preceded by a `nrOf<name>` u16 BE count field. [S] |
-| `<Enum>` | 1–4 byte integer | value space per the enum tables (priorities, point types, cov masks, node states, etc.). [S] |
+| `<Enum>` | integer, **width per enum** — see below | value space per the enum tables (priorities, point types, cov masks, node states, etc.). The structure library does **not** state the wire width of any enum; each must be pinned separately. [S] |
+
+**Enum field widths are not in the structure library, and they have to be.** The
+library gives an ordered field list for all 1,144 structures, but for an enum
+field it gives only a type name — so **field order is fully specified and field
+width is not**, and a decoder cannot be built from the library alone. Fifty-one
+distinct enum types appear as fields. The widths pinned so far: [W][S]
+
+| Enum | Width | How it is pinned |
+|---|---:|---|
+| `Name_space` | 2 | §8.5; `0`/`1`/`0xFFFF` = system/user/any |
+| `Point_priority` | 1 | the command-priority ladder, §8.2 |
+| `Access_class` | 4 | `BITSTRING32` inside `User_profile` |
+| `Application_family` | 2 | inside `Def_TEC_app`; `tec_na` = 16 |
+| `Cov_mask` | 2 | `COV_ENABLE` = `Name_response` + 2 bytes |
+| `Control_status`, `Alarm_state`, `Alarm_priority`, `Out_of_service`, `Failed`, `Proof_on` | 1 each | §12.3.3's ten-byte COV status block, one byte per field |
+| **`Point_value`** | **4** | solved from the wire: 40 of 40 bodies parse with zero remainder at 4 bytes, **0 of 40** at 1 or 2 |
+
+The remainder are **[OPEN]**, and the honest scoping matters: a large share of
+them are BACnet-side object types (`analog_input_`, `binary_output_`,
+`multi_value_` and their siblings) belonging to the `BAC_*` structures, which
+this document places out of scope (§3.2.4) and which cannot appear in P2 traffic
+at all.
+
+**A naming convention separates the two kinds of undefined type.** Types written
+lowercase with a trailing underscore — `ldi_`, `lao_`, `time_`, `trend_cov_`,
+`point_choice_` — are **not scalars**: they are the arms of a CHOICE, and 62 of
+their 87 field uses sit inside a structure whose first field is `tag_`. Asking
+for their "width" is a category error; they are decoded like `All_points`
+(§10.4.1). Types in ordinary capitalised form are the genuine scalars. [S]
 
 Two structural conventions recur. **CHOICE / tagged union:** several structures begin with a `tag_ : UNSIGNED_8` followed by one alternative per possible type (e.g. `All_points`, `Alarm_object`, `Physical_address_Lenum`); the tag selects which one alternative is actually present on the wire. **Counted array:** a `nrOf<x> : UNSIGNED_16` immediately precedes its `<x> : <T>[]` array. [S]
 
@@ -4123,7 +4186,58 @@ The boolean run (fields 5–10) is the wire source of the point operating-state 
 
 The point types are the L-type vocabulary: ldi=Digital Input, ldo=Digital Output, lai=Analog Input, lao=Analog Output, l2sl/l2sp=2-State Latched/Pulsed, looal/looap=On/Off/Auto Latched/Pulsed, lfssl/lfssp=Fast-Slow-Speed Latched/Pulsed, lpaci=Pulse-Accumulator/Counter Input, ldao=Dual Analog Output, lenum=Enumerated, lfmssl/lfmssp=Fast-Multi-Speed variants, ppcl_lai=PPCL-resident analog. Analog points carry per-point Slope + Intercept for engineering-unit conversion, applied by the client from the point table — not carried on each value frame. [S][I]
 
-#### 10.4.1 Do not read the supervisor's point object as the wire model
+#### 10.4.1 `All_points` — the point CHOICE, and how to read its tag
+
+Most point-bearing bodies do not carry a point *structure* directly; they carry
+`All_points`, a tagged union whose arms are the eleven logical point types:
+
+```
+All_points :  tag_ : UNSIGNED_8
+              ldi_  ldo_  lai_  lao_  l2sl_  looap_  lpaci_  l2sp_  looal_  lfssl_  lfssp_
+```
+
+**`tag_` selects the arm by 1-based position in that list**, so `1 = ldi`,
+`3 = lai`, `6 = looap`, and so on. That is confirmed by an authority independent
+of the structure definition — the **point descriptors**, free text written by
+whoever commissioned the site. Across all 71 `0x0508 ALARM_PRINT` request
+bodies: [W]
+
+| `tag_` | Arm | Frames | What the descriptors describe |
+|---|---|---:|---|
+| `0x01` | `ldi` — logical digital input | 14 | boiler and fire-panel **alarm and status** inputs, without exception |
+| `0x03` | `lai` — logical analog input | 47 | supply, return and zone **temperatures**, without exception |
+| `0x06` | `looap` — on/off/auto, pulsed | 10 | supply and exhaust **fan command** points, without exception |
+
+Alarms and statuses under the digital-input arm, temperatures under the
+analog-input arm, fans under the on/off/auto arm, across all 71 frames. The
+descriptors are free text typed into a panel database by a commissioning
+engineer; they cannot have been fitted to a structure ordering they know nothing
+about, which is what makes them an independent check rather than a restatement.
+
+**Every arm opens with the same prologue**, and it is the same shape as the team
+bodies of §16.3: [W]
+
+| Field | Type | Notes |
+|---|---|---|
+| `tag_` | u8 | arm selector, 1-based |
+| `nrOfnames` | u16 BE | **2** in all 71 observed bodies |
+| `names[0]` | `Name_response` | `name_space = 0` (system) |
+| `names[1]` | `Name_response` | `name_space = 1` (user) |
+| `descriptor` | `TEXT_` | free text |
+| … | | arm-specific fields follow |
+
+The two names are the system and user views of one point. A decoder can
+therefore read the **point type and identity out of any point-bearing body**
+without knowing the arm's type-specific tail.
+
+**What is still open.** The fields *after* the descriptor differ per arm, and
+the eleven arm types are referenced 75 times in the structure library and
+defined nowhere in it — so the tails are **[OPEN]**. And only three of the
+eleven arms are exercised at this site: the tag values for `ldo`, `lao`, `l2sl`,
+`lpaci`, `l2sp`, `looal`, `lfssl` and `lfssp` follow from the declared order by
+the same rule but are **inferred, not measured**. [I]
+
+#### 10.4.2 Do not read the supervisor's point object as the wire model
 
 The supervisor keeps its own logical-point class, and it is much larger than
 `Point_base` — on the order of 200 accessors against the twelve fields above.
