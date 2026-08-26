@@ -4241,9 +4241,23 @@ distinction is not cosmetic: the enum **skips 5 and jumps from 7 to 11**, so
 counting arms and reading the enum agree for the first four values and diverge
 for every one after. [S][W]
 
-| `tag_` | 1 | 2 | 3 | 4 | 6 | 7 | 11 | 12 | 13 | 14 | 15 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| arm | `ldi` | `ldo` | `lai` | `lao` | `l2sl` | `looap` | `lpaci` | `l2sp` | `looal` | `lfssl` | `lfssp` |
+| `tag_` | arm | | `tag_` | arm |
+|---:|---|---|---:|---|
+| 1 | `ldi` — digital input | | 13 | `looal` |
+| 2 | `ldo` — digital output | | 14 | `lfssl` |
+| 3 | `lai` — analog input | | 15 | `lfssp` |
+| 4 | `lao` — analog output | | 20 | `ldao` |
+| 6 | `l2sl` — two-state latched | | 21 | `lenum` — enumerated |
+| 7 | `looap` — on/off/auto pulsed | | 22 | `lfmssl` |
+| 11 | `lpaci` | | 23 | `lfmssp` |
+| 12 | `l2sp` | | 24 | `ppcl_lai` |
+
+Sixteen arms, not eleven — the enum runs to 24, and the values above 15 are as
+real as the rest: **`lenum` (21) is wire-observed**, in COV responses. The
+`All_points` arm list and `Point_type_enum` agree name-for-name at every value,
+with one caveat: the arm list spells arms 22 and 23 `lfmsl`/`lfmsp` while the
+enum spells them `lfmssl`/`lfmssp`. One of the two dumps has a typo; the values
+are not in doubt. [S]
 
 A decoder that indexes the declared arm list positionally will read the first
 four point types correctly and **mislabel the other seven** — silently, because
@@ -4336,9 +4350,18 @@ than it looks: `Physical_address_*` is a CHOICE whose **`virtual_addr` arm is
 `NULL_`**, so a software point costs one byte for its address and only
 physically-addressed points need `real_addr_`. **[OPEN]** [S]
 
-Six of the thirteen arms are wire-observed (`ldi`, `ldo`, `lai`, `lao`, `l2sl`,
-`lenum`); the remaining tag values are definitional from the enum, but their
-bodies have not been seen here. [S]
+Six of the sixteen arms are wire-observed here — `ldi`, `ldo`, `lai`, `lao`,
+`l2sl` and `lenum`. The remaining tag values are definitional from the enum, but
+their bodies have not been seen at this site. [S]
+
+**The same rule, checked on a second CHOICE.** `Alarm_object`'s nine arms —
+`no_alarming`, `std_digital`, `std_single_analog`, `std_analog`,
+`enhanced_digital`, `enhanced_analog`, `enhanced_lenum`, `bacnet_alarm_analog`,
+`bacnet_alarm_digital` — match `Alarm_object_type_enum` name-for-name at every
+value, **9 of 9**. That enum happens to be contiguous from 0, so there the tag
+*does* coincide with arm position. The lesson is that the coincidence is a
+property of the enum, not of the protocol: read the enum, and only then note
+whether it happens to be dense. [S]
 
 #### 10.4.2 Do not read the supervisor's point object as the wire model
 
