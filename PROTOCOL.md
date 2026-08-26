@@ -3856,6 +3856,28 @@ Field types in the structure tables map to wire encodings as follows. These are 
 | `<Name>[]` | repeating array | preceded by a `nrOf<name>` u16 BE count field. [S] |
 | `<Enum>` | integer, **width per enum** — see below | value space per the enum tables (priorities, point types, cov masks, node states, etc.). The structure library does **not** state the wire width of any enum; each must be pinned separately. [S] |
 
+**A caution that governs this whole section: a generated lookup fails
+plausibly, not loudly.** Three independent properties of the protocol's type
+system each produce, in a mechanically generated decoder, a *valid wrong answer*
+rather than an error — which is the hardest kind of defect to notice, because
+the output looks like a successful decode:
+
+| Property | What a generated lookup does |
+|---|---|
+| **Enum values are sparse** (below) — 18 of 66 have gaps | an array-index lookup returns a different, valid name past the first gap |
+| **A CHOICE `tag_` is an enum value, not an ordinal** (§10.4.1) | positional arm selection is right for the first few values and wrong after |
+| **`Name_space_enum` is defined twice, with incompatible values** — `0 system / 1 user / 65535 any`, and separately `1 LAO_actuator / 2 HOA` | whichever definition the generator loads last silently wins for every `Name_space` field |
+
+The first two have each already produced a wrong claim in an earlier edition of
+this document. The third has not, because §8.5 documents the first definition
+and every observed value (`0000`, `FFFF`) belongs to it — but a decoder built by
+scraping the enum dump has a one-in-two chance of the other.
+
+**The defensive rule:** resolve every enum value through a lookup keyed by
+*value* within a namespace named by the *field*, never by position and never by
+enum name alone. Where a value is not in the table, fail — do not fall through
+to a neighbour. [I]
+
 **Enum values are sparse. Never index an enum positionally.** Of the 66 value
 enums in the protocol's type system, **18 have gaps** — the value space is not
 `0..n-1` and a value is not an ordinal. `Point_type` skips 5 and 8–10 and 16–19;
