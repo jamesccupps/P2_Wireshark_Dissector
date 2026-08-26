@@ -4246,21 +4246,56 @@ descriptors are free text typed into a panel database by a commissioning
 engineer; they cannot have been fitted to a structure ordering they know nothing
 about, which is what makes them an independent check rather than a restatement.
 
-**Every arm opens with the same prologue**, and it is the same shape as the team
-bodies of §16.3: [W]
+**The arms are named, and the "prologue" is `Point_base`.** The structure
+library types each arm *field* in lowercase with a trailing underscore — `ldi_`,
+`lao_` — and names the *structure* in upper case with a `_type` suffix:
 
-| Field | Type | Notes |
+```
+ldi_ -> LDI_type    lai_ -> LAI_type    l2sl_ -> L2SL_type    lenum_ -> LENUM_type   …
+```
+
+A resolver matching the field type literally will not find them and will report
+the point arms as undefined. They are not. And what precedes the arm is
+`Point_base`, common to every point: [S][W]
+
+| Field | Type | Wire |
 |---|---|---|
-| `tag_` | u8 | arm selector, 1-based |
-| `nrOfnames` | u16 BE | **2** in all 71 observed bodies |
-| `names[0]` | `Name_response` | `name_space = 0` (system) |
-| `names[1]` | `Name_response` | `name_space = 1` (user) |
-| `descriptor` | `TEXT_` | free text |
-| … | | arm-specific fields follow |
+| `point_type` | `Point_type` | 1 byte — the tag above |
+| `nrOfnames` | u16 BE | 2 in every observed body |
+| `names[]` | `Name_response` × n | system view, then user view |
+| `point_descriptor` | `TEXT_` | free text (declared empty in the library; a TLV on the wire) |
+| `access_class` | `BITSTRING32` | 4 |
+| `out_of_service`, `failed` | `BOOLEAN_` | 1 each |
+| `control_status` | enum | 1 |
+| **`point_value`** | `Point_value` | **4 — IEEE-754 f32** |
+| `point_priority` | `Point_priority` | 1 — the §8.2 ladder |
+| `point_totalizer` | CHOICE | tag `0` = `disabled`, 0-byte arm |
+| `alarm_object` | CHOICE | tag `0` = `no_alarming`, 0-byte arm |
 
-The two names are the system and user views of one point. A decoder can
-therefore read the **point type and identity out of any point-bearing body**
-without knowing the arm's type-specific tail.
+then the arm's own fields, then `Physical_address_Lenum` and
+`Point_extension2` where the enclosing response carries them.
+
+**Worked example — an enumerated point, every byte accounted for.** `LENUM_type`
+is a single `state_text_table`, so this is the whole tail after the descriptor,
+fixed at 20 bytes across 139 responses: [W]
+
+```
+00 00 00 00   access_class
+00 00 00      out_of_service, failed, control_status
+3F 80 00 00   point_value  = 1.0            <- f32
+23            point_priority = 0x23 = OPER  <- the ladder of 8.2
+00            point_totalizer  tag 0 = disabled
+00            alarm_object     tag 0 = no_alarming
+FC 13         state_text_table              <- LENUM_type
+01            Physical_address_Lenum tag 1 = present
+01 00 00      present_
+              Point_extension2 = 0 bytes
+```
+
+An enumerated point's value arrives as an f32 of `0.0`/`1.0`/`2.0`; the priority
+byte reads off the command ladder; and the two bytes before the address are the
+state-text-table id. A decoder can therefore read **point type, identity, value,
+priority, alarm state and text-table** out of any point-bearing body.
 
 **The rule generalises, and it is the safe way to read any CHOICE here.** A
 `tag_` is an enum value drawn from that structure's own enum type — not an
@@ -4270,11 +4305,18 @@ which *is* positional, because that particular enum happens to start at zero and
 skip nothing. Reading either structure by position alone gets one of them wrong.
 [S][W]
 
-**What is still open.** The fields *after* the descriptor differ per arm, and
-the eleven arm types are referenced 75 times in the structure library and
-defined nowhere in it — so the tails are **[OPEN]**. Only three arms are
-exercised at this site; the other eight tag values are read from the enum, which
-is definitional, but their *bodies* have never been observed. [S]
+**What is still open.** Four leaf types inside the *analog* arms remain
+unpinned, and they are what stops a point read from decoding end to end:
+`Representation` (an enum — `float_repr`, `integer_repr`, `time_of_day_repr`,
+`date_repr`, `date_time_repr` — of unstated width), `cov_limit_` inside
+`Analog_units`, `Proof_status`, and `real_addr_`. The last of those matters less
+than it looks: `Physical_address_*` is a CHOICE whose **`virtual_addr` arm is
+`NULL_`**, so a software point costs one byte for its address and only
+physically-addressed points need `real_addr_`. **[OPEN]** [S]
+
+Six of the thirteen arms are wire-observed (`ldi`, `ldo`, `lai`, `lao`, `l2sl`,
+`lenum`); the remaining tag values are definitional from the enum, but their
+bodies have not been seen here. [S]
 
 #### 10.4.2 Do not read the supervisor's point object as the wire model
 
