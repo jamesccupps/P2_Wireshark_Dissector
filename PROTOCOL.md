@@ -298,7 +298,7 @@ The port is configurable but must be set identically across all panels and the s
 
 Some installations run a supervisor that **also** listens on TCP/5034 as a second listener distinct from the canonical 5033. A client MUST NOT assume it exists and MUST default to 5033. [W]
 
-**Why a second port exists at all.** The supervisor's listening port is a configurable setting, documented as defaulting to 5033, which an integrator is directed to change only when a *second* P2 application shares the same management station — the two must not collide on one host. A non-5033 supervisor port is therefore a **deployment artifact of co-hosted P2 applications**, not a protocol feature and not a Siemens-standard second channel. This is the operational reason behind the `<host>|<port>` identity form of §3.3.1: one host can present more than one P2 endpoint, so the port disambiguates the identity. Expect the common case to be a supervisor on 5033 with no suffixed identity at all. [D] Where it appears, only the supervisor host listens on 5034; field panels never do — the listener set on 5033 is the full mesh, while 5034 is a star into one supervisor box. On the wire, 5034 carries the **panel→supervisor push/announce (reverse) channel**: panels open a connection to the supervisor's 5034 listener and push COV/value frames there, while the supervisor reaches panels on their 5033 listeners (§7.3). Whether 5034 is a distinct co-installed supervisor product or simply the same supervisor's second listener for that reverse channel is **not determinable from traffic alone** — either way it is deployment-specific configuration, not a protocol-standard port. [W] The protocol carried on 5034 is identical to that on 5033 — the same frames, opcodes, and semantics — and unsolicited pushes (COV, alarms) are **port-agnostic**: a push rides whichever connection/port the receiving supervisor is listening on, and the port number does not change the meaning of any frame. [W]
+**Why a second port exists at all.** The supervisor's listening port is a configurable setting, documented as defaulting to 5033, which an integrator is directed to change only when a *second* P2 application shares the same management station — the two must not collide on one host. A non-5033 supervisor port is therefore a **deployment artifact of co-hosted P2 applications**, not a protocol feature and not a Siemens-standard second channel. This is the operational reason behind the `<host>|<port>` identity form of §3.3.1: one host can present more than one P2 endpoint, so the port disambiguates the identity. Expect the common case to be a supervisor on 5033 with no suffixed identity at all. [D] Where it appears, only the supervisor host listens on 5034; field panels never do — the listener set on 5033 is the full mesh, while 5034 is a star into one supervisor box. On the wire, 5034 carries the **panel→supervisor push/announce (reverse) channel**: panels open a connection to the supervisor's 5034 listener and push COV/value frames there, while the supervisor reaches panels on their 5033 listeners (§7.3). What that endpoint *is* was previously recorded here as undeterminable from traffic. It is largely determinable, and the answer matters to an implementer: **the second port is a P2 node with its own points, not a listener.** See §2.1.8. [W] The protocol carried on 5034 is identical to that on 5033 — the same frames, opcodes, and semantics — and unsolicited pushes (COV, alarms) are **port-agnostic**: a push rides whichever connection/port the receiving supervisor is listening on, and the port number does not change the meaning of any frame. [W]
 
 The decisive evidence that 5034 is not a protocol feature: a supervisor's identity string commonly carries a `|5034` suffix (e.g. `DCC-SVR|5034`), and that exact suffixed identity appears in thousands of frames captured on a **5033-only** connection, while the literal text `5033` appears in zero frames anywhere. The supervisor stamps its `HOST|PORT` identity into the routing slot regardless of which TCP port carries the frame — so the `|PORT` suffix is part of the *identity string*, not a live port indicator (§2.1.5, §6.4). [W] A conformant implementation derives all frame semantics from the frame's direction and contents, never from the TCP port that carried it, and defaults to 5033 only (exposing any other port as explicit configuration). [I]
 
@@ -336,6 +336,63 @@ P2 has **no multicast presence or discovery beacon that a client can listen for 
 #### 2.1.7 Surrounding network services
 
 A P2/IP node typically depends on several platform services around the P2 port itself: name resolution (DNS) to resolve node names to addresses, address assignment (BootP/DHCP) where dynamic addressing is used, file transfer (FTP) and a console (Telnet and/or a serial CLI) for firmware administration, and management (SNMP) for monitoring. [D] These are platform services around the P2 node and are **outside** the P2 wire protocol; only TCP/5033 (and, where present, the site-specific 5034) carries P2 itself. [I]
+
+#### 2.1.8 What is on the second port: a node, not a listener
+
+An earlier edition recorded the second supervisor-side port as a "reverse
+channel" whose nature could not be settled from traffic. It can be, once
+requests are resolved by **who is treated as what** rather than by which port
+carried them.
+
+Every operation the supervisor drives goes outward to a panel on `5033` — reads,
+COV subscriptions, uploads, priority commands. The point-**write** opcode runs
+the other way: **96.7% of `0x0240 POINT_CMD_VALUE` in the corpus is a panel
+sending into the second port.** [W]
+
+The full request mix addressed to that port, across the corpus: [W]
+
+| Opcode | Requests |
+|---|---:|
+| `0x0274 COV_ANNUNCIATE` | 59,458 |
+| `0x0240 POINT_CMD_VALUE` | 32,453 |
+| `0x4634` (node-table replication) | 1,391 |
+| `0x0271 COV_ENABLE` | 690 |
+| `0x0272 COV_DELETE_STUB` | 199 |
+| `0x4635` / `0x4636` | 147 |
+| `0x0508 ALARM_PRINT` | 63 |
+
+Peers **write its points**, **subscribe to COV on it**, **replicate node tables
+with it**, and **send it alarms**. That is the behaviour of a field panel. A
+node that other nodes subscribe to and command is a peer in the BLN, whatever
+else runs on the same machine.
+
+The point names confirm it. Every write addressed to that port names one of only
+**nine distinct points**, and 97% of those writes carry the **`.BN` / `.BAC`
+name-twin suffixes** — the BACnet-twin convention of §11. The endpoint is
+publishing BACnet-side values into the P2 name space. [W]
+
+Two identifications fit, and the wire does not separate them:
+
+- **A software field panel.** Vendor documentation describes field-panel
+  firmware run as a service on a workstation — a virtual panel that behaves on
+  the network like a physical one — and identifies it by exactly the observed
+  form: **host name, a pipe, and a TCP port that must differ from the transport
+  server port**. A second host in the corpus presents the same `HOST|PORT` form,
+  so it is a naming rule rather than a local accident. [D][W]
+- **A BACnet-side trunk.** The vendor's BACnet integration presents a BACnet
+  network to the supervisor *as though it were a P2 trunk*; an endpoint on the
+  supervisor host whose points are overwhelmingly BACnet twins is what that
+  looks like from the wire. [D][I]
+
+They are not exclusive — a BACnet trunk realised as a software panel satisfies
+both readings.
+
+**What an implementer should take from this.** Do not model a non-canonical P2
+port as "the supervisor's other socket". Model it as **another node**, resolve
+it by the node identity in the routing slots rather than by its port, and expect
+it to behave as a full peer: it holds points, it answers COV subscriptions, and
+it participates in replication. The port number remains site configuration and
+must never be used to infer a frame's meaning (§2.1.2). [I]
 
 ### 2.2 Node roles and the object hierarchy
 
