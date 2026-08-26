@@ -510,7 +510,7 @@ Every point on a P2 network has a canonical numeric coordinate, the **LAN / Drop
 | **Drop** | `PointDrop` | The panel / node number within the BLN (the "drop" on the trunk) | 0–99 panel range; 100 = supervisor (§3.4.4) | [D][S] |
 | **Address** | `PointAddress` | The point / subpoint index within that panel's database | point index | [D] |
 
-The 3-tuple is the *conceptual* identity of a point and the form in which point databases store it. It is **not** the wire routing key — P2/IP routes frames by NUL-terminated node **name** strings in the four routing slots (§6), and reads/writes a point by its **logical point name** carried in the request body, not by the numeric tuple (see §11 for the point model). An implementer uses LAN/Drop/Address to reason about and index topology, and uses names on the wire. [W][S][I]
+The 3-tuple is the identity a point database stores, and it **does** appear on the wire — as the physical-address field of any point that has a physical location (§10.4.2). What it is **not** is the wire routing key — P2/IP routes frames by NUL-terminated node **name** strings in the four routing slots (§6), and reads/writes a point by its **logical point name** carried in the request body, not by the numeric tuple (see §11 for the point model). An implementer uses LAN/Drop/Address to reason about and index topology, and uses names on the wire. [W][S][I]
 
 The vendor's database tags the tuple's network types explicitly: a BLN is `BLN_PII` (Protocol II backbone) and an FLN is `FLN_P1` (Protocol 1 fieldbus), confirming the two-protocol stack the tuple spans. [D]
 
@@ -4363,7 +4363,52 @@ value, **9 of 9**. That enum happens to be contiguous from 0, so there the tag
 property of the enum, not of the protocol: read the enum, and only then note
 whether it happens to be dense. [S]
 
-#### 10.4.2 Do not read the supervisor's point object as the wire model
+#### 10.4.2 The physical address, and how a TEC subpoint differs from a panel point
+
+Every point arm ends with a `Physical_address_*` field, and it is a CHOICE with
+two arms that answer a question an implementer has to get right: [S][W]
+
+```
+Physical_address_AI / _AO / _DI / _DO / _PA
+    tag_ : UNSIGNED_8
+    real_addr    : real_addr_     <- the point has a physical location
+    virtual_addr : NULL_          <- it does not; zero further bytes
+```
+
+A **panel-resident software point** — a calculated value, a PPCL variable, a
+schedule mode — takes `virtual_addr` and costs one byte. A point belonging to a
+**terminal device on the panel's FLN** takes `real_addr_`, which is **8 bytes**:
+[W]
+
+| Offset | Field | Observed |
+|---:|---|---|
+| 0 | **trunk / LAN** | `0`–`3` — the documented trunk range of §3.3 |
+| 1 | **drop** — the device on that trunk | constant per device; 19 distinct in the corpus |
+| 2–3 | **point number within the device** (u16 BE) | the only part that differs between subpoints of one device |
+| 4–7 | zero in every observed sample | reserved |
+
+The field roles are not asserted from the layout — they are measured against the
+point names. Across 34 devices, bytes 0 and 1 are **constant within a device in
+34 of 34 cases**, while byte 3 is constant in only 5; and three subpoints of one
+device read `02 08 00 19`, `02 08 00 18`, `02 08 00 13` while the same subpoints
+on a second device read `02 0b 00 …` — the same trunk, a different drop, the
+same point numbers. Byte 0 independently taking exactly the values `0`–`3` is
+the trunk range §3.3 documents from vendor sources. [W]
+
+**The point number is per application, not per name.** On one device point 24 is
+the fourth digital input; on another it is the second. Which name a number maps
+to is a property of the TEC's loaded application — the same application the
+`0x42xx` family selects with `application_number` (§9.5.1). A client must not
+assume a point number means the same thing on two devices.
+
+> **This refines §3.3.** That section says the LAN/Drop/Address 3-tuple "is not
+> the wire routing key", which is true and stays true — you address a point by
+> **name**, never by tuple. But the tuple is not merely a database concept: it
+> **is** on the wire, as the physical-address field of every point that has one.
+> The distinction is that the tuple is how a panel *reports where a point lives*,
+> not how a client *asks for it*.
+
+#### 10.4.3 Do not read the supervisor's point object as the wire model
 
 The supervisor keeps its own logical-point class, and it is much larger than
 `Point_base` — on the order of 200 accessors against the twelve fields above.
