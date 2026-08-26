@@ -4196,9 +4196,22 @@ All_points :  tag_ : UNSIGNED_8
               ldi_  ldo_  lai_  lao_  l2sl_  looap_  lpaci_  l2sp_  looal_  lfssl_  lfssp_
 ```
 
-**`tag_` selects the arm by 1-based position in that list**, so `1 = ldi`,
-`3 = lai`, `6 = looap`, and so on. That is confirmed by an authority independent
-of the structure definition — the **point descriptors**, free text written by
+**`tag_` is a `Point_type` enum value, not a positional index.** This
+distinction is not cosmetic: the enum **skips 5 and jumps from 7 to 11**, so
+counting arms and reading the enum agree for the first four values and diverge
+for every one after. [S][W]
+
+| `tag_` | 1 | 2 | 3 | 4 | 6 | 7 | 11 | 12 | 13 | 14 | 15 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| arm | `ldi` | `ldo` | `lai` | `lao` | `l2sl` | `looap` | `lpaci` | `l2sp` | `looal` | `lfssl` | `lfssp` |
+
+A decoder that indexes the declared arm list positionally will read the first
+four point types correctly and **mislabel the other seven** — silently, because
+each arm still parses, just as the wrong type. The arm list is written in enum
+order, which is exactly what makes the mistake easy.
+
+The mapping is corroborated by an authority independent of both the structure
+definition and the enum — the **point descriptors**, free text written by
 whoever commissioned the site. Across all 71 `0x0508 ALARM_PRINT` request
 bodies: [W]
 
@@ -4206,10 +4219,11 @@ bodies: [W]
 |---|---|---:|---|
 | `0x01` | `ldi` — logical digital input | 14 | boiler and fire-panel **alarm and status** inputs, without exception |
 | `0x03` | `lai` — logical analog input | 47 | supply, return and zone **temperatures**, without exception |
-| `0x06` | `looap` — on/off/auto, pulsed | 10 | supply and exhaust **fan command** points, without exception |
+| `0x06` | `l2sl` — logical two-state, latched | 10 | supply and exhaust **fan start/stop** points, without exception |
 
 Alarms and statuses under the digital-input arm, temperatures under the
-analog-input arm, fans under the on/off/auto arm, across all 71 frames. The
+analog-input arm, fan start/stop under the two-state latched arm, across all 71
+frames. The
 descriptors are free text typed into a panel database by a commissioning
 engineer; they cannot have been fitted to a structure ordering they know nothing
 about, which is what makes them an independent check rather than a restatement.
@@ -4230,12 +4244,19 @@ The two names are the system and user views of one point. A decoder can
 therefore read the **point type and identity out of any point-bearing body**
 without knowing the arm's type-specific tail.
 
+**The rule generalises, and it is the safe way to read any CHOICE here.** A
+`tag_` is an enum value drawn from that structure's own enum type — not an
+ordinal. `Eqs_start_where` makes the same point from the other direction: its
+tag `0` selects `beginning : NULL_` and tag `1` selects `last_mode : SHORT_`,
+which *is* positional, because that particular enum happens to start at zero and
+skip nothing. Reading either structure by position alone gets one of them wrong.
+[S][W]
+
 **What is still open.** The fields *after* the descriptor differ per arm, and
 the eleven arm types are referenced 75 times in the structure library and
-defined nowhere in it — so the tails are **[OPEN]**. And only three of the
-eleven arms are exercised at this site: the tag values for `ldo`, `lao`, `l2sl`,
-`lpaci`, `l2sp`, `looal`, `lfssl` and `lfssp` follow from the declared order by
-the same rule but are **inferred, not measured**. [I]
+defined nowhere in it — so the tails are **[OPEN]**. Only three arms are
+exercised at this site; the other eight tag values are read from the enum, which
+is definitional, but their *bodies* have never been observed. [S]
 
 #### 10.4.2 Do not read the supervisor's point object as the wire model
 
