@@ -2025,9 +2025,36 @@ The universal container for a string, name, or scope-name field is a tag-length-
 
 | Offset | Field | Type | Value/Notes | [tag] |
 |---|---|---|---|---|
-| 0 | `textType` | u8 | Always `0x01` in the corpus | [W] |
+| 0 | `textType` | u8 | `0x01` for text; **`0x00` also occurs** — see below | [W] |
 | 1 | `textLen` | **u16 BE** | Number of content bytes that follow | [S][W] |
 | 3 | content | `textLen` bytes | Usually ASCII text; occasionally binary | [W] |
+
+**`textType` is not always `0x01`, and the earlier claim that it was could not
+have detected otherwise.** A previous edition of this table read "always `0x01`
+in the corpus" on the strength of a scan that located TLVs *by looking for the
+byte `0x01`* — so a TLV with any other type could not appear in its output, and
+the 1,223,162 figure it produced is a count of `0x01` bytes, not a census. Re-run
+by **structural position** instead — reading whatever byte sits at each place a
+structure requires a `TEXT_` — the corpus gives: [W]
+
+| Field role | TLVs | `0x01` | `0x00` |
+|---|---:|---:|---:|
+| point name | 39,450 | 39,446 | 4 |
+| name suffix | 39,450 | 39,446 | 4 |
+| point descriptor | 19,727 | 19,723 | 4 |
+| engineering units | 14,896 | 14,884 | 12 |
+| **total** | **113,523** | **113,499** | **24** |
+
+Every one of the 24 has `textLen` = 0 and no content, so `00 00 00` and
+`01 00 00` are **two encodings of the empty string** and no non-empty value of
+another type has been seen. The practical rule: a decoder must take the TLV from
+its position in the structure and must **never** test `textType == 0x01` to
+decide whether one is present — a parser that does will desynchronise on an
+empty field, which is exactly how twelve point bodies in this corpus fail to
+decode. `textType` is a **[OPEN]** discriminator: the firmware's own string
+handling distinguishes RAD-50 from ASCII (§8.4), which is the obvious candidate
+for what it selects, but no non-`0x01` value with content exists here to
+confirm it.
 
 **The length is two bytes, not one.** An earlier edition of this section
 described the primitive as a fixed 2-byte prefix `01 00` followed by a
@@ -2041,9 +2068,12 @@ TEXT_ :  textType : UNSIGNED_8      textLen : UNSIGNED_16      text : Byte[]
 so the `00` that looked like the second half of a constant tag is the **high
 byte of a 16-bit length**. The two readings coincide for every string shorter
 than 256 bytes, and no string in the corpus is longer: **1,223,162 TLVs, every
-one with a zero high byte.** The longest content observed from vendor traffic is
-183 bytes; the only 255-byte TLV in the corpus is a deliberately maximal test
-name of our own.
+one with a zero high byte.** (That scan located TLVs by their `0x01` type byte,
+which invalidates it as a census of `textType` above but not as a test of the
+length, which is what it was built for — and the 24 TLVs it could not see are
+all zero-length.) The longest content observed from vendor traffic is 183 bytes;
+the only 255-byte TLV in the corpus is a deliberately maximal test name of our
+own.
 
 An implementer must use the 16-bit reading anyway, because the one-byte reading
 is only accidentally correct here and fails destructively where it is not: the
@@ -3899,8 +3929,9 @@ sensible small integer". [S]
 **Enum field widths are not in the structure library, and they have to be.** The
 library gives an ordered field list for all 1,144 structures, but for an enum
 field it gives only a type name — so **field order is fully specified and field
-width is not**, and a decoder cannot be built from the library alone. Fifty-one
-distinct enum types appear as fields. The widths pinned so far: [W][S]
+width is not**, and a decoder cannot be built from the library alone.
+**Fifty-three** distinct enum types appear as fields. The widths pinned so
+far: [W][S]
 
 | Enum | Width | How it is pinned |
 |---|---:|---|
@@ -3920,10 +3951,21 @@ at all.
 
 **A naming convention separates the two kinds of undefined type.** Types written
 lowercase with a trailing underscore — `ldi_`, `lao_`, `time_`, `trend_cov_`,
-`point_choice_` — are **not scalars**: they are the arms of a CHOICE, and 62 of
-their 87 field uses sit inside a structure whose first field is `tag_`. Asking
+`point_choice_` — are **not scalars**: they are the arms of a CHOICE, and **70
+of their 98** field uses sit inside a structure whose first field is `tag_`. Asking
 for their "width" is a category error; they are decoded like `All_points`
 (§10.4.1). Types in ordinary capitalised form are the genuine scalars. [S]
+
+**How much of the type system is undeclared, exactly.** The 1,144 structures
+between them make **4,432 field uses** naming **439 distinct field types**. Of
+those types, **224 are declared or primitive and 215 are neither** — 83 are the
+lowercase CHOICE arms just described, and **132 are capitalised types used as
+fields but never defined anywhere in the library**. So the library is complete
+in field *order* and materially incomplete in field *type*, and the gap is not
+a long tail of exotica: the single most-used undeclared type,
+`Point_extension2`, appears in **89** structures. Widths for the ones that
+matter are pinned from the wire in §10.4.2. Regenerate every count in this
+section with `s164_typecensus.py`. [S]
 
 Two structural conventions recur. **CHOICE / tagged union:** several structures begin with a `tag_ : UNSIGNED_8` followed by one alternative per possible type (e.g. `All_points`, `Alarm_object`, `Physical_address_Lenum`); the tag selects which one alternative is actually present on the wire. **Counted array:** a `nrOf<x> : UNSIGNED_16` immediately precedes its `<x> : <T>[]` array. [S]
 
@@ -4224,16 +4266,17 @@ The boolean run (fields 5–10) is the wire source of the point operating-state 
 | 11 | point_totalizer | Point_totalizer | accumulator (LPACI) |
 | 12 | alarm_object | Alarm_object | alarm configuration (CHOICE by alarm-object type) |
 
-The point types are the L-type vocabulary: ldi=Digital Input, ldo=Digital Output, lai=Analog Input, lao=Analog Output, l2sl/l2sp=2-State Latched/Pulsed, looal/looap=On/Off/Auto Latched/Pulsed, lfssl/lfssp=Fast-Slow-Speed Latched/Pulsed, lpaci=Pulse-Accumulator/Counter Input, ldao=Dual Analog Output, lenum=Enumerated, lfmssl/lfmssp=Fast-Multi-Speed variants, ppcl_lai=PPCL-resident analog. Analog points carry per-point Slope + Intercept for engineering-unit conversion, applied by the client from the point table — not carried on each value frame. [S][I]
+The point types are the L-type vocabulary: ldi=Digital Input, ldo=Digital Output, lai=Analog Input, lao=Analog Output, l2sl/l2sp=2-State Latched/Pulsed, looal/looap=On/Off/Auto Latched/Pulsed, lfssl/lfssp=Fast-Slow-Speed Latched/Pulsed, lpaci=Pulse-Accumulator/Counter Input, ldao=Dual Analog Output, lenum=Enumerated, lfmssl/lfmssp=Fast-Multi-Speed variants, ppcl_lai=PPCL-resident analog. Analog points carry per-point Slope + Intercept for engineering-unit conversion, applied by the client from the point table — not carried on each value frame. Both are **on the wire**, inside the analog form of `real_addr_` (§10.4.2), so a client reading a point definition has the scaling without a separate lookup. [S][W]
 
 #### 10.4.1 `All_points` — the point CHOICE, and how to read its tag
 
 Most point-bearing bodies do not carry a point *structure* directly; they carry
-`All_points`, a tagged union whose arms are the eleven logical point types:
+`All_points`, a tagged union whose arms are the sixteen logical point types:
 
 ```
 All_points :  tag_ : UNSIGNED_8
-              ldi_  ldo_  lai_  lao_  l2sl_  looap_  lpaci_  l2sp_  looal_  lfssl_  lfssp_
+              ldi_  ldo_  lai_  lao_  l2sl_  looap_  lpaci_  l2sp_
+              looal_  lfssl_  lfssp_  ldao_  lenum_  lfmsl_  lfmsp_  ppcl_lai_
 ```
 
 **`tag_` is a `Point_type` enum value, not a positional index.** This
@@ -4255,12 +4298,13 @@ for every one after. [S][W]
 Sixteen arms, not eleven — the enum runs to 24, and the values above 15 are as
 real as the rest: **`lenum` (21) is wire-observed**, in COV responses. The
 `All_points` arm list and `Point_type_enum` agree name-for-name at every value,
-with one caveat: the arm list spells arms 22 and 23 `lfmsl`/`lfmsp` while the
-enum spells them `lfmssl`/`lfmssp`. One of the two dumps has a typo; the values
-are not in doubt. [S]
+with one caveat that matters to an implementer: the arm list spells arms 22
+and 23 `lfmsl`/`lfmsp` while the enum spells them `lfmssl`/`lfmssp`. The values
+are not in doubt, and this is not a transcription slip to be shrugged off — it
+is what breaks the arm-resolution rule below for those two arms. [S]
 
 A decoder that indexes the declared arm list positionally will read the first
-four point types correctly and **mislabel the other seven** — silently, because
+four point types correctly and **mislabel the other twelve** — silently, because
 each arm still parses, just as the wrong type. The arm list is written in enum
 order, which is exactly what makes the mistake easy.
 
@@ -4291,8 +4335,22 @@ ldi_ -> LDI_type    lai_ -> LAI_type    l2sl_ -> L2SL_type    lenum_ -> LENUM_ty
 ```
 
 A resolver matching the field type literally will not find them and will report
-the point arms as undefined. They are not. And what precedes the arm is
-`Point_base`, common to every point: [S][W]
+the point arms as undefined. They are not.
+
+**The rule resolves twelve of the sixteen. Four have no structure to find:** [S]
+
+| arm field | expected structure | status |
+|---|---|---|
+| `lfmsl_`, `lfmsp_` | `LFMSL_type`, `LFMSP_type` | the structures are spelled **`LFMSSL_type`, `LFMSSP_type`** — double S |
+| `ldao_` | `LDAO_type` | **referenced** by `AP2_Point_Add_LDAO_Request`, never declared |
+| `ppcl_lai_` | `PPCL_LAI_type` | absent entirely |
+
+A generator that trusts the rule silently drops four point types; one that
+trusts it *and* falls through to a neighbour mislabels them. Neither of the four
+is wire-observed here, so the failure would not show up in testing against this
+corpus either.
+
+And what precedes the arm is `Point_base`, common to every point: [S][W]
 
 | Field | Type | Wire |
 |---|---|---|
@@ -4322,11 +4380,17 @@ fixed at 20 bytes across 139 responses: [W]
 23            point_priority = 0x23 = OPER  <- the ladder of 8.2
 00            point_totalizer  tag 0 = disabled
 00            alarm_object     tag 0 = no_alarming
-FC 13         state_text_table              <- LENUM_type
-01            Physical_address_Lenum tag 1 = present
-01 00 00      present_
-              Point_extension2 = 0 bytes
+FC 13         state_text_table = -1005      <- LENUM_type, SIGNED (the arm ends here)
+01            lenum_address tag 1 = present  <- the ENCLOSING structure
+01            present_
+00 00         point_extension2, length 0
 ```
+
+Note where the point stops. `state_text_table` is the last byte of the arm; the
+three fields after it belong to the **enclosing response**, which declares
+`lenum_address : Physical_address_Lenum` and then `point_extension2` after
+`All_points`. Reading them as part of the point is how an earlier edition of
+§10.4.2 came to describe `real_addr_` as eight bytes.
 
 An enumerated point's value arrives as an f32 of `0.0`/`1.0`/`2.0`; the priority
 byte reads off the command ladder; and the two bytes before the address are the
@@ -4341,14 +4405,23 @@ which *is* positional, because that particular enum happens to start at zero and
 skip nothing. Reading either structure by position alone gets one of them wrong.
 [S][W]
 
-**What is still open.** Four leaf types inside the *analog* arms remain
-unpinned, and they are what stops a point read from decoding end to end:
-`Representation` (an enum — `float_repr`, `integer_repr`, `time_of_day_repr`,
-`date_repr`, `date_time_repr` — of unstated width), `cov_limit_` inside
-`Analog_units`, `Proof_status`, and `real_addr_`. The last of those matters less
-than it looks: `Physical_address_*` is a CHOICE whose **`virtual_addr` arm is
-`NULL_`**, so a software point costs one byte for its address and only
-physically-addressed points need `real_addr_`. **[OPEN]** [S]
+**Where this now stands.** Every width in the point body is measured, and the
+model consumes **5,795 of 5,807 walked points (99.8%) with zero remainder**: [W]
+
+| leaf | width | how it is pinned |
+|---|---|---|
+| `State_text_table` | 2, **signed** | §11.5 — every observed value is negative; unsigned it is nonsense |
+| `Representation` | 1 | constant across analog points; `Analog_format` = repr + `decimal_places` u8 |
+| `cov_limit_` | 5 | CHOICE tag + f32 deadband; the f32 reads `1.0` on points with a deadband and `0.0` without |
+| `present_` | 1 | forced jointly with `Point_extension2` by the LENUM tail |
+| `Point_extension2` | **u16 length + payload** | §10.4.2 |
+| `real_addr_` | **5 / 17 / 12** | §10.4.2 — it is *not* one width, see there |
+| `Alarm_object` arms | 38 / 47 / 55 | §10.4.4 |
+| `Proof_status` | — | **[OPEN]**; inside `Point_proof_delay`, reached only through the `l2sl`/`l2sp`/`looa*`/`lfss*` arms |
+
+The twelve bodies that do not close are all points named `test*`, and they fail
+for one reason: a `TEXT_` whose `textType` is `0x00` rather than `0x01`
+(§8.1). [W]
 
 Six of the sixteen arms are wire-observed here — `ldi`, `ldo`, `lai`, `lao`,
 `l2sl` and `lenum`. The remaining tag values are definitional from the enum, but
@@ -4376,24 +4449,71 @@ Physical_address_AI / _AO / _DI / _DO / _PA
 ```
 
 A **panel-resident software point** — a calculated value, a PPCL variable, a
-schedule mode — takes `virtual_addr` and costs one byte. A point belonging to a
-**terminal device on the panel's FLN** takes `real_addr_`, which is **8 bytes**:
-[W]
+schedule mode — takes `virtual_addr` and costs one byte. A point on a **terminal
+device on the panel's FLN** takes `real_addr_`.
 
-| Offset | Field | Observed |
-|---:|---|---|
-| 0 | **trunk / LAN** | `0`–`3` — the documented trunk range of §3.3 |
-| 1 | **drop** — the device on that trunk | constant per device; 19 distinct in the corpus |
-| 2–3 | **point number within the device** (u16 BE) | the only part that differs between subpoints of one device |
-| 4–7 | zero in every observed sample | reserved |
+**`real_addr_` is not one structure.** The library names the arm identically in
+all five `Physical_address_*` CHOICEs, but that name is the flattened form of an
+**anonymous inline type**: the arm of `Physical_address_AI` and the arm of
+`Physical_address_DO` are given the same name and carry different content. Three
+distinct layouts are wire-measured: [W]
 
-The field roles are not asserted from the layout — they are measured against the
-point names. Across 34 devices, bytes 0 and 1 are **constant within a device in
-34 of 34 cases**, while byte 3 is constant in only 5; and three subpoints of one
-device read `02 08 00 19`, `02 08 00 18`, `02 08 00 13` while the same subpoints
-on a second device read `02 0b 00 …` — the same trunk, a different drop, the
-same point numbers. Byte 0 independently taking exactly the values `0`–`3` is
-the trunk range §3.3 documents from vendor sources. [W]
+| CHOICE | `real_addr_` | layout |
+|---|---:|---|
+| `_DI` / `_DO` | **5 B** | FLN, drop, point u16 BE, inverted flag |
+| `_AI` | **17 B** | FLN, drop, point u16 BE, **slope f32, intercept f32**, 5 B |
+| `_AO` | **12 B** | FLN, drop, point u16 BE, **slope f32, intercept f32** |
+
+```
+a digital output      03 01 00 07 01
+                      FLN3 Drop1 Pt7  inverted
+
+one terminal device, two of its analog inputs:
+  units " CFM"        02 08 00 23 │ 40 80 00 00 │ 00 00 00 00 │ 06 00 00 00 00
+                      FLN2 Drop8 Pt35  slope 4.0    intercept 0.0
+  units "DEG F"       02 08 00 04 │ 3e 80 00 00 │ 42 40 00 00 │ 06 00 00 00 00
+                      FLN2 Drop8 Pt4   slope 0.25   intercept 48.0
+```
+
+This is where an analog point's **slope and intercept** live — §10.4's statement
+that analog points carry per-point scaling is a wire fact, not an inference, and
+this is the field. A `0.25 / 48.0` pair on a DEG F point is a 0–10 V or 4–20 mA
+temperature scaling; `4.0 / 0.0` on a CFM point is a plain gain.
+
+**How the widths are established, and why the obvious method fails.** A width
+cannot be settled by whether a body parses: choose any three widths that sum
+correctly and every body "parses". The measurement that works is a **difference
+between two populations that share every other field** — the same point type
+with a real address and with a virtual one:
+
+| LDO tail | composition | length |
+|---|---|---:|
+| real | `stt 2 │ tag 0 │ real_addr_ │ lenum tag │ ext2` | 11 |
+| virtual | `stt 2 │ tag 1 = NULL_ │ lenum tag │ ext2` | 6 |
+
+The difference **is** the address: 5 bytes, independent of what follows it. A
+competing split — a 4-byte address with the fifth byte read as the
+`Physical_address_Lenum` tag — fits the same totals and is refuted by the tag
+being a **value**, not a width: it reads `0x00` (= `not_present`, no `present_`
+byte) in 1,084 of 1,095 real-addressed bodies, which under that split makes them
+10 bytes long. Every one is 11. [W]
+
+**The field roles are measured against the point names, not asserted from the
+layout.** Bytes 0 and 1 are constant within a device in 34 of 34 devices while
+byte 3 is constant in only 5; three subpoints of one device read `02 08 00 19`,
+`02 08 00 18`, `02 08 00 13` while the same subpoints on a second read
+`02 0b 00 …` — same trunk, different drop, same point numbers. Byte 0
+independently takes exactly `0`–`3`, the trunk range §3.3 documents from vendor
+sources. Three sibling digital outputs on one drop read point numbers 5, 6 and
+7 — and a supervisor, queried independently, reports the third of them as
+**FLN 3, drop 1, point 7**, which is an authority outside the corpus, the
+structure library and the enum alike. [W][D]
+
+The fifth byte of the digital form is a per-point flag, not padding: it is set
+on 4 distinct points of 51, never on any of 184 digital *input* frames, and the
+supervisor marks those points **inverted**. **[OPEN]** — the same points are
+also configured with an initial value of ON, so *inverted* and *initial value*
+are not yet separated. [W][D]
 
 **The point number is per application, not per name.** On one device point 24 is
 the fourth digital input; on another it is the second. Which name a number maps
@@ -4407,6 +4527,38 @@ assume a point number means the same thing on two devices.
 > **is** on the wire, as the physical-address field of every point that has one.
 > The distinction is that the tuple is how a panel *reports where a point lives*,
 > not how a client *asks for it*.
+
+**What comes after the point is not part of the point.** Almost every structure
+that carries `All_points` declares two more fields immediately after it, and
+mistaking them for the point's own tail is the specific error that produced the
+"eight-byte address" above: [S][W]
+
+```
+<structure> :  … | point : All_points | lenum_address : Physical_address_Lenum
+                                      | point_extension2 : Point_extension2
+```
+
+`Physical_address_Lenum` inverts the arm order of the others — **tag 0 =
+`not_present : NULL_`, tag 1 = `present : present_`**, one byte — so a decoder
+that assumes tag 0 means "has an address" is wrong for exactly this one CHOICE.
+
+`Point_extension2` is **not a fixed-width field**. It is a counted block: [W]
+
+```
+Point_extension2 :  u16 BE length │ <length> bytes
+```
+
+| reading | walked points consumed with zero remainder |
+|---|---:|
+| fixed 2 bytes | 1,959 of 5,734 (34.2%) |
+| **u16 length + payload** | **5,722 of 5,734 (99.8%)** |
+
+At this site every point type carries length `0` — so the two bytes *are* the
+count, and the fixed reading is accidentally right — **except `lao`, which
+carries a 1- or 2-byte payload and is what exposes the difference**. This is
+also why the structure library declares the type with no fields: there are none
+to declare. **89 structures carry one**, so a decoder that hard-codes two bytes
+desynchronises on any body whose extension is non-empty. [S][W]
 
 #### 10.4.3 Do not read the supervisor's point object as the wire model
 
@@ -4441,6 +4593,68 @@ Two method names on the same class are worth noting for a different reason:
 `FormatDefinePointRequest` and `FormatReadTotalizedVal` are request *builders*.
 The supervisor's encoder layer names its operations after the operation, not
 after the opcode — which is the CPI tier of §9.1.1 seen from above. [S]
+
+#### 10.4.4 The `Alarm_object` arms
+
+`Point_base`'s last field is `alarm_object : Alarm_object`, a CHOICE over nine
+arms (§10.4.1). The zero arm `no_alarming` is `NULL_`, which is why bodies from
+a lightly-alarmed site decode without it; **every point that actually has an
+alarm configured takes one of the other eight**, and none of them is declared.
+
+Three are wire-measured, and the measurement is anchored rather than fitted. The
+`0x0508 ALARM_PRINT` request is the one structure that carries alarmed points
+*and* pins their end without an assumed width:
+
+```
+user_profile : User_profile │ point : All_points │ alarm_message_node u8
+│ alarm_message_number u16 │ alarm_message TEXT_ │ lenum_address
+│ nrOfalarm_buffer u16 │ alarm_buffer[] │ point_extension2
+```
+
+A `TEXT_` declares its own length, so the message pins the end of the point
+three bytes before it and everything after must consume the body exactly.
+Searching for the arm width that satisfies both: **54 of 54 bodies admit exactly
+one width — none admits two, none admits none.** [W]
+
+| arm | width | observed on | how confirmed |
+|---|---:|---|---|
+| `no_alarming` | 0 | all types | `NULL_` |
+| `std_digital_` | **38 B** | `ldi`, `l2sl` | anchor; and independently `ldo` alarmed tail 44 − unalarmed 6 |
+| `std_analog_` | **47 B** | `lai` | anchor, 44 bodies |
+| `enhanced_analog_` | **55 B** | `lai` | anchor, 3 bodies |
+| the other five | — | not observed here | **[OPEN]** |
+
+**Inside an arm.** The first 24 bytes of all three are three `DATE_TIME` (§8.3.4)
+— `time_of_current_state`, `time_of_first_alarm`, `time_of_acknowledgment` — and
+each carries the weekday its own date falls on, which is a free alignment check
+(§10.8). Bytes 24–36 are `Alarm_object_data` exactly as the library declares it:
+`state_changes` u16 then eleven `BOOLEAN_` (`ack_pending`,
+`return_to_normal_acks`, `inalarm`, `introuble`, `inalarm_by_command`,
+`operator_disabled`, `program_disabled`, `proofing`, `is_enhanced`,
+`print_alarms`, `enable_almcnt2`).
+
+The alignment is confirmed by a field no byte count could have forced — the
+library names the ninth boolean `is_enhanced`, and it reads:
+
+| byte 34 | `std_digital` | `std_analog` | `enhanced_analog` |
+|---|---|---|---|
+| observed | CONST `00` | CONST `00` | CONST `01` |
+
+```
+std_digital_      38 = Alarm_object_data 37 + 1
+std_analog_       47 = Alarm_object_data 37 + 1 + f32 high limit + f32 low limit + 1
+enhanced_analog_  55 = Alarm_object_data 37 + 18
+```
+
+The analog pair reads as the alarm band §13.3 describes: a chilled-water
+temperature at 150 / 35, a discharge-air point at 120 / 35, mixed-air at 75 / 45,
+supply-air sensors at 85 / 40 and 85 / 50. The enhanced arm's extra 18 bytes
+begin with two `u16` delays and contain two `f32`, consistent with the
+`level_delay` / `mode_delay` / `differential` set §10.8 names for the alarm-mode
+record, but with three samples the field boundaries there are **[OPEN]**. [W]
+
+**Taken together with §10.4.1–§10.4.3 the point body is closed: 5,795 of 5,807
+walked points (99.8%) consume with zero remainder.** [W]
 
 ### 10.5 CABINET_DISPLAY — firmware / identity block (0x010C)
 
@@ -4737,7 +4951,7 @@ u8  english_units | u8 optimization_osv | u16 nrOfrecharacterization_values | ..
 
 `warmstart_delay` takes the values 0, 7 and 10 across the corpus — minutes. [W]
 
-**The trailing `u16` on both records is a state-text-table id.** Earlier editions
+**The trailing `u16` on both records is a state-text-table id** — and, per §11.5, a **signed** one. Earlier editions
 listed it as an unexplained two-valued field, and four readings of it were wrong
 — an object id, the answering panel, a checksum, and a correlation with some
 other decoded field. What settles it is position and behaviour together: in the
@@ -4830,7 +5044,7 @@ P2 defines a fixed taxonomy of logical point types. Each type has a numeric type
 
 Type code `0` is `point_type_undef` (no point). The codes are the `Point_type` enumeration values that travel as a `Point_type` tag wherever a typed point body appears in an ASDU. [S] The decimal codes are not contiguous (5, 8, 9, 10 and 16–18 are unused), so an implementer must dispatch on the explicit code, never on ordinal position. [S]
 
-**A point type's default enumeration is the negation of its type code.** The enum library that supplies state text (§11.5) keys its per-type defaults as `-1` LDI, `-2` LDO, `-6` L2SL, `-7` LOOAP, `-12` L2SP, `-13` LOOAL, `-14` LFSSL, `-15` LFSSP, `-19` LCTLR, `-21` LENUM — every one the negation of the code above. Nine of the ten negate a code this table already carried; the tenth is why `19` is listed as LCTLR rather than unused. [S/I] The analog types (LAI, LAO, LPACI) have no default entry, which is consistent: an analog point has no enumerated states. A decoder can therefore derive a point's default state-text set from its type code alone, and only needs an explicit enum reference when the point overrides the default with a named group.
+**A point type's default enumeration is the negation of its type code.** The enum library that supplies state text (§11.5) keys its per-type defaults as `-1` LDI, `-2` LDO, `-6` L2SL, `-7` LOOAP, `-12` L2SP, `-13` LOOAL, `-14` LFSSL, `-15` LFSSP, `-19` LCTLR, `-21` LENUM — every one the negation of the code above. Nine of the ten negate a code this table already carried; the tenth is why `19` is listed as LCTLR rather than unused. **This is now wire-confirmed, and it confirms the field's signedness at the same time:** every point in the corpus whose `state_text_table` reads a small negative number is the matching type — `-1` on LDI points and nothing else, `-2` on LDO points and nothing else — and a supervisor queried independently labels one of those points' text group as the default for its type, with the same signed id in the group's own name. Read unsigned the two values are 65535 and 65534 and bear no relation to the point type. [S][W][D] The analog types (LAI, LAO, LPACI) have no default entry, which is consistent: an analog point has no enumerated states. A decoder can therefore derive a point's default state-text set from its type code alone, and only needs an explicit enum reference when the point overrides the default with a named group.
 
 > Implementation caution, a second one. The vendor's commissioning-report definition carries a table of the same mnemonics numbered `LDO`=2, `LDI`=3, `LAO`=4, `LAI`=5, `L2SL`=6, `L2SP`=7, `LOOAL`=8, `LOOAP`=9, `LFSSL`=10, `LFSSP`=11, `LPACI`=12, `LCTLR`=13, `LENUM`=14. Its own comment identifies these as **procedure numbers matching a help file**, not point types — a third numbering of the same taxonomy, alongside the `PTYPE` field noted above. It is a document index. Do not cross-map it either. [D]
 
@@ -4992,7 +5206,7 @@ An `intercept_adjustment` (f32) accompanies the sensor type for field trim of th
 
 #### 11.5.3 Enumerated and digital state decoding
 
-For digital and enumerated points the wire/value field carries a small integer **state index**, not a string. The index is resolved for display against a named **text group / state-text set** (the `State_text_table`), stored once per panel as a shared catalog and referenced by name from the point or team member. [S/D] Example sets: 2000 = {Off, On}; 2001 = {Normal, Alarm}; generic sets like {Clean, Dirty}. [D] A digital point's present value is encoded as the float `0.0` (OFF) or `1.0` (ON) in the value field (§12.3); an enumerated point's present value is the integer state index carried in that same float field. [D] An implementer renders the value by taking the index and looking it up in the referenced state-text group; the wire never carries the display string for a value. [D]
+For digital and enumerated points the wire/value field carries a small integer **state index**, not a string. The index is resolved for display against a named **text group / state-text set** (the `State_text_table`), stored once per panel as a shared catalog and referenced by name from the point or team member. [S/D] Example sets: 2000 = {Off, On}; 2001 = {Normal, Alarm}; generic sets like {Clean, Dirty}. [D] **On the wire the id is a *signed* 16-bit integer and every observed value is negative** — the per-type defaults `-1`/`-2` of §11.2, then two bands of named groups at `-1002`…`-1018` and `-2003`…`-2018`. A decoder that reads the field unsigned turns every one of them into a meaningless number in the 63,500s. The distribution is not a clean split by point type: LDI points draw exclusively from the `-20xx` band, LDO points predominantly from `-10xx` but from both, and enumerated points from both — so the bands are not "digital versus enumerated" and what separates them is **[OPEN]**. [W] The signedness is corroborated from a second direction: this id is the `enum_type_id` the **ENUM family (0x0401–0x040E)** creates and edits (§9.4), and every one of those bodies types it `i16` — `enum_type : { type_id:i16, type_name, nrOfelements:u16, elements:{ value:i16, value_text }[] }` is the state-text table itself, id and all its value→text pairs. A client that wants the display strings reads them with `AP2_ENUM_TYPE_DISPLAY` (0x0404) or `_LOOK` (0x0405) against the id the point carries. [S] A digital point's present value is encoded as the float `0.0` (OFF) or `1.0` (ON) in the value field (§12.3); an enumerated point's present value is the integer state index carried in that same float field. [D] An implementer renders the value by taking the index and looking it up in the referenced state-text group; the wire never carries the display string for a value. [D]
 
 > Implementation caution: the TEC-template "PTYPE" field is a **template-local** taxonomy, NOT the §11.2 `Point_type` L-codes and NOT priority values. The 1–4 alignment with LDI/LDO/LAI/LAO is coincidental for those four only. Do not cross-map PTYPE to L-codes. [D]
 >
@@ -6869,6 +7083,14 @@ specific test that would confirm or falsify it.
    command (all captured pushes were normal-state, so those bytes never asserted).
    *Test:* capture a `0x0274` push for a point in alarm and one commanded at a
    non-default priority; the bytes that go non-zero confirm the per-field values.
+   *Narrowed:* the **definition** side of the same question is now answered —
+   `Alarm_object_data` inside the point body is decoded field-for-field
+   (§10.4.4), and `is_enhanced` is confirmed by reading `01` on the enhanced arm
+   and `00` on both standard arms. But the same scoping applies there: across all
+   73 alarm-configured points in the corpus, `inalarm`, `introuble`,
+   `inalarm_by_command`, `program_disabled` and `proofing` are **constant zero** —
+   the site's alarms were quiet throughout. Their positions are established; their
+   asserted values are not.
 
 2. **Heartbeat-miss count for failed-node transition.** *Known:* there is **no
    application-layer ACK frame** — the `dir == 0x01` success (or `dir == 0x05`
