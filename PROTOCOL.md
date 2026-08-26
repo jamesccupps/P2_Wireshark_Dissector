@@ -5267,12 +5267,13 @@ it repeats across all three tiers** — setup (`0x503A`–`0x503D`), database-ch
 model of §9.1.1 in its clearest form: one operation with a four-valued
 record-type parameter folded into the opcode, three times over. [W]
 
-**2. A `DBCHANGE_*` notification carries no data.** Every `DBCHANGE_*` frame
-observed — **20 of 20** — has a **zero-length body**, and **20 of 20** travel
-**panel → supervisor**, each answered by the supervisor with a bare success. The
-panel does not push what changed; it pushes *that* its `<section>` changed, and
-the supervisor then reads the content back with the matching
-`UPL_ADDED_<section>`. This is why the `DBCHANGE`/`UPL_ADDED` opcode pairs exist
+**2. A `DBCHANGE_*` notification carries no data.** In this exchange, **20 of
+20** `DBCHANGE_*` frames have a **zero-length body** and travel **panel →
+supervisor**, each answered with a bare success. The panel does not push what
+changed; it pushes *that* its `<section>` changed, and the supervisor then reads
+the content back with the matching `UPL_ADDED_<section>`. This is not particular
+to equipment scheduling — it holds for **every** `DBCHANGE_*` opcode in the
+corpus, across ten database sections (§16.1.1). This is why the `DBCHANGE`/`UPL_ADDED` opcode pairs exist
 at all, and it means a client that wants change notification must implement a
 **server** role for these opcodes, not merely a reader. [W]
 
@@ -5301,6 +5302,44 @@ A panel database is moved across P2 **record-by-record**, not as a single monoli
 The transfer surface is the `UPL_*` / `DBCHANGE_*` / `*_DB_GET` / `*_DB_REPLACE` opcode families: the `0x09xx` `UPL_ALL_*`/`UPL_ADDED_*`/`UPL_DEL_*` block enumerates each object class (points, PPCL, TEC, trend, EQS, SSTO, TOD), and per-domain `*_DB_GET`/`*_DB_REPLACE` pairs move whole sub-databases (e.g. `0x0337/0x0338` `USER_ACCT_DB_GET/REPLACE`, `0x0357/0x0358` `ACCESS_GROUPS_DB_*`, `0x0362/0x0363` `EMS_DB_*`, `0x040A/0x040B` `ENUM_TYPE_DB_GET/REPLACE`, the `0x06xx` `CAL_DB_*`/`DST_DB_*` calendar blocks). `0x0950 AP2_DOWNLOAD_ME` initiates a download *to* a panel. [S]
 
 The replication-direction mechanics (notify/pull/changes push) live in the `0x46xx` EBLN family and are specified in §5.3 (replication). [S]
+
+#### 16.1.1 `DBCHANGE_*` is a data-less notification, and the reader pulls
+
+The `DBCHANGE_*` family is not a change *feed*. It carries no payload at all.
+
+Across the corpus, **ten distinct `DBCHANGE_*` opcodes are wire-observed, 93
+requests in total, and every single one has a zero-length body**. Every one is
+answered with a success. Every one rides the **second channel** (`0x2E`, and
+`0x2F` in the modern dialect) — never the data dialect. [W]
+
+| Opcode | Section | Requests | Body |
+|---|---|---:|---|
+| `0x0951` | `POINT` | 19 | 0 B |
+| `0x0954` | `TREND` | 14 | 0 B |
+| `0x0955` | `PPCL` | 13 | 0 B |
+| `0x0956` | `CONTROLLER` | 11 | 0 B |
+| `0x0957` | `EQS_ZONE` | 4 | 0 B |
+| `0x0959` | `EQS_MODE_SCHED` | 16 | 0 B |
+| `0x095C`–`0x095F` | `SSTO_{GENERAL,START,STOP,NIGHT}` | 4 each | 0 B |
+
+So the notification's entire content is **its own opcode**: the opcode names
+which database section changed, and there is nothing else to parse. The node
+holding the changed data then waits, and the interested party **pulls** the new
+records with the matching `UPL_ADDED_<section>` / `UPL_DEL_<section>` opcode,
+using the selector-and-resume-key paging idiom of §10.2.3.
+
+Two consequences for an implementer, neither obvious from the opcode names:
+
+- **A client that wants change notification must implement a server role.** The
+  `DBCHANGE_*` frames arrive *inbound*, as requests, and must be answered with a
+  success. A read-only client that only ever initiates will never see them.
+- **Do not wait for data in the notification.** There is none, and the pull is a
+  separate exchange against a different opcode. §15.3.2 traces a complete cycle —
+  command, notification, pull, end-of-enumeration — for an equipment-schedule
+  change.
+
+This is what §6.2 means in calling the second channel the "announce + DB-sync"
+band: the announce carries the fact, the data channel carries the data. [W]
 
 ### 16.2 On-disk (.P2) panel-database format
 
