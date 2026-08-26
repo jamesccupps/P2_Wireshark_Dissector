@@ -3688,21 +3688,53 @@ field with nothing left over — `User_profile` + `Team_search` +
 
 Two cautions an implementer should carry from this:
 
-- **`0x4200` carries two distinct request forms, and the discriminator is not
-  length.** The function-code enumeration gives this opcode two names — one of
-  eleven aliased values, and the only one where both are observable. Both forms
-  parse cleanly as `User_profile` + `Team_search` + a 2-byte field; what
-  separates them is *what is in that field and how the buffer is sized*: [W]
+- **`0x4200` is one operation invoked two ways — not two operations.** The
+  function-code enumeration gives this opcode two names, `AP2_TEC_LOG` and
+  `AP2_CONTROLLER_LOG`, and the wire carries two cleanly separated request
+  forms. It is tempting to pair them off. **The responses show that would be
+  wrong.** [W]
 
-  | Form | Frames | Length | 2 bytes after the search |
-  |---|---:|---|---|
-  | A | 70 | variable, 28–38 B, no padding | `FFFF` — the wildcard, 70 of 70 |
-  | B | 178 | **fixed 220 B**, zero-padded | `0000`, 178 of 178 |
+  | Form | Frames | Request | `application_number` | `name_pattern` | resume key |
+  |---|---:|---|---|---|---|
+  | **A** | 70 | variable, 28–38 B | `FFFF` | 27 distinct object names | always empty |
+  | **B** | 178 | fixed 220 B, zero-padded | `0000` | `*` only | 60 distinct values |
 
-  Form A is `TEC_LOG` as its ASDU defines it. Form B is a different caller
-  supplying an explicit `0x0000` in place of the wildcard and writing into a
-  fixed-size buffer. Which enum name belongs to which form is **[OPEN]** — the
-  wire distinguishes the forms, not the names.
+  Form A is a **named lookup** of one object; form B is a **wildcard enumeration**
+  walking the set with the resume key of §10.2.3. They address the *same*
+  objects — names that appear as form A targets reappear as form B resume keys —
+  and the `application_number` split follows from the search, not from the
+  target: naming one object asks for any application on it (`0xFFFF`), while
+  enumerating supplies no application at all (`0x0000`).
+
+  Decisively, **every response to both forms is the same structure**:
+  `Team_response` + `TEC_body`, with `team_family = 0x0010` (`tec_na`).
+  242 of 242 responses parse, and the parse is self-validating — `nrOfnames`
+  must equal the number of `Team_response` entries that actually follow before
+  the descriptor, and it does in every one: [W]
+
+  ```
+  Team_response          name_space=0, name="<team name>"
+  Team_description_base  team_family=0x0010 (tec_na)
+                         team_type=0x0AA1, team_revision=0x0000
+  nrOfnames            = 2
+     names[0]            name_space=0 (system), name="<team name>"
+     names[1]            name_space=1 (user),   name="<team name>"
+  descriptor           = "<free text>"
+  … access_class, si_units, lan, drop, duct_available, nightOverride, …
+  ```
+
+  The `team_type` values overlap between the two forms, so they are not even
+  reaching different classes of TEC. **Both forms are `AP2_TEC_LOG`, and
+  `AP2_CONTROLLER_LOG` does not appear anywhere in the corpus.** [W]
+
+  A caution for the eleven aliased opcode values generally: a second wire form is
+  **not** evidence of a second operation. Check the response structure before
+  pairing a form with a name.
+
+  **[OPEN]** — what `AP2_CONTROLLER_LOG` looks like. The prediction, if the names
+  mean what they say, is that a `0x4200` naming a panel rather than a TEC returns
+  something that is *not* a `TEC_body`, or fails. Nothing in this corpus has ever
+  asked.
 
 - **Some TEC requests use a fixed 220-byte zero-padded buffer.** Form B above and
   every one of `0x4221`'s 1,173 requests are exactly 220 bytes with the remainder
