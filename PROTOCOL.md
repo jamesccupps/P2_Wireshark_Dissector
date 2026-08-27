@@ -4984,9 +4984,24 @@ confined to the 17, and among those only two selectors have been identified:
 **`All_points` is the sparse one, and as far as the evidence goes it is the only
 one.** The other fifteen — `MiscData` at 48 arms, `Command_Type` at 8,
 `Trend_type` and `Duct_type` at 3 — have no selector enum that can be matched to
-their arm names, so their tag values remain **[OPEN]**. Ordinal is the natural
-guess and is right for `Alarm_object`; it is wrong for `All_points`, which is
-precisely why the guess must not be silent.
+their arm names. Ordinal is the natural guess and is right for `Alarm_object`;
+it is wrong for `All_points`, which is precisely why the guess must not be
+silent. Two of the fifteen are now settled anyway, by other means:
+
+- **`Trend_type` is ordinal**, and confirmed three ways. Its three arms —
+  `point_cov : NULL_`, `trend_cov` (4 B), `time` (4 B) — correspond one-to-one
+  with the three trend definitions a vendor engineering tool offers: *use the
+  point's own COV limit* (nothing to carry), *a special trend COV limit* (a
+  value), and *a sampling interval* (a time). [D] On the wire **all three tag
+  values occur — 0, 1 and 2 in declaration order** — across 60 `0x0984`
+  responses that consume exactly under that reading: tag 0 on 48 definitions,
+  tag 1 on 4, tag 2 on 8. [W]
+- **`Duct_type` does not need its mapping to be decoded.** All three arms are
+  **8 bytes** — `Rectangle {height, width}`, `Circle {pad, diameter}`,
+  `Oval {height, diameter}`, two `f32` each — so the tag cannot change the
+  framing, only the labels on the two floats. Of 60 `0x0986` TEC responses, 59
+  carry `no_duct` and one carries a duct, tagged `1`. The *labels* stay
+  **[OPEN]** on a single observation; the *walk* does not depend on them. [S][W]
 
 > A single transcription discrepancy causes both failures at once. The arm
 > fields are spelled `lfmsl`/`lfmsp` and both the structures **and**
@@ -5266,8 +5281,21 @@ one width — none admits two, none admits none.** [W]
 | `std_digital_` | **38 B** | `ldi`, `l2sl` | anchor; and independently `ldo` alarmed tail 44 − unalarmed 6 |
 | `std_analog_` | **47 B** | `lai` | anchor, 44 bodies |
 | `enhanced_analog_` | **55 B** | `lai` | anchor, 3 bodies |
-| `enhanced_digital_` | **48 B** | digital | **weaker** — solved on the alarm-mode uploads, see below |
-| the other four | — | not observed here | **[OPEN]** |
+| `enhanced_digital_` | **48 B** | digital | solved on the alarm-mode uploads, then **independently confirmed** — see below |
+| `std_single_analog_` | 42 B | — | type system only |
+| `enhanced_lenum_` | 50 B | — | type system only |
+| `bacnet_alarm_analog_` | 16 B | — | type system only |
+| `bacnet_alarm_digital_` | 7 B | — | type system only |
+
+**All nine arms are pinned, and the last four came free with a validation
+attached.** The arm types are declared *inside* `Alarm_object` and were lost by
+the catalog's flattening (§10.1); read back out of the type system they size to
+`0, 38, 42, 47, 48, 55, 50, 16, 7` in tag order. What makes that usable rather
+than merely available is that **every one of the five widths already measured on
+the wire reproduces exactly** — including `enhanced_digital_` at 48, which had
+rested on four bodies and a subtraction and was labelled thin here for that
+reason. Five agreements out of five, and the four remaining arms follow from the
+same source. [W][S]
 
 **A fourth arm, and it is not anchored the way the first three are.** The
 `0x0982 UPL_ALL_ALARM_SETUP` and `0x0983 UPL_ALL_ALARM_MODE` responses both end
@@ -5282,11 +5310,14 @@ subtraction. Two distinct bodies in each carry tag `4`:
 | intersection | **48** |
 
 The two structures have different field lists, so a compensating error would
-have to survive both — but this rests on **four bodies**, against 54 for the
-arms above, and `0x0983` alone would not distinguish 48 from 55. Treat it as
-pinned-but-thin: adding it took the reference implementation from 3,838 to
-3,855 bodies with no regression, and it is the value to try first, not a
-measurement of the same standing as the anchored three. [W]
+have to survive both — but it rested on **four bodies**, against 54 for the arms
+above, and `0x0983` alone would not distinguish 48 from 55. It was published as
+pinned-but-thin for that reason.
+
+**It is no longer thin.** The type system, read directly (§10.1), declares
+`enhanced_digital_` and it sizes to **48** — an independent source agreeing with
+a value derived by subtraction from four bodies. The same read supplies the four
+arms that were never observed here. [W][S]
 
 The size is at least coherent with its neighbours — `std_digital_` 38 →
 `enhanced_digital_` 48 is +10, against `std_analog_` 47 → `enhanced_analog_` 55
@@ -5727,9 +5758,9 @@ Of the **455 operations** that have a request and/or response structure:
 
 | | operations |
 |---|---:|
-| **Decodable** from widths this document pins | **352 (77%)** |
-| Blocked on at least one unstated width or unpinned CHOICE | 103 |
-| distinct blocking types | **51** |
+| **Decodable** from widths this document pins | **366 (80%)** |
+| Blocked on at least one unstated width or unpinned CHOICE | 89 |
+| distinct blocking types | **50** |
 
 **The blockers are concentrated, and a few are worth far more than the rest.**
 "Blocks" counts operations the type appears in; "alone" counts operations for
@@ -5738,11 +5769,10 @@ immediately:
 
 | blocker | blocks | alone | what it is |
 |---|---:|---:|---|
-| `Trend_type` (CHOICE) | 14 | 6 | a 3-arm CHOICE, so the tag→arm mapping genuinely matters |
-| `Baud_rate` | 11 | 6 | see §10.1 — one `CABINET_SET_*_BAUDRATE` frame settles it |
+| `Baud_rate` | 11 | 6 | §10.1 — one `CABINET_SET_*_BAUDRATE` frame settles it |
 | `LON_extension_` | 10 | 0 | LonWorks member description — a different fieldbus |
-| `Duct_type` (CHOICE) | 8 | 0 | 3 arms |
-| `Device_type` | 7 | **7** | now the highest single-fix in the table |
+| `Duct_type` (CHOICE) | 8 | 0 | 3 arms — but all three are 8 B, so this blocks the *labels*, not the walk (§10.4.1) |
+| `Device_type` | 7 | **7** | the highest single-fix left in the table |
 | `User_access_*`, `User_command_priority`, `Language_ID` | 7 each | 0 | the user-account family, which travels together |
 
 **What is no longer here is the point of the table.** Its first two editions
@@ -5831,6 +5861,32 @@ P2 defines a fixed taxonomy of logical point types. Each type has a numeric type
 | 22 | **LFMSSL** | Logical Fast/Medium/Slow/Stop (3-speed) Latched | 3 latched DO | 1 latched DI | 4 | [S/D] |
 | 23 | **LFMSSP** | Logical Fast/Medium/Slow/Stop (3-speed) Pulsed | 4 pulsed DO | 1 latched DI | 5 | [S/D] |
 | 24 | **PPCL_LAI** | PPCL-referenced analog input (control-program-visible analog) | — | 1 AI | 1 | [S] |
+
+**Twelve of these are point types an engineer can create; the rest are not.**
+The vendor's own Point Editor documentation enumerates the types available when
+adding a point, and lists exactly: **LAI, LAO, LDI, LDO, L2SP, L2SL, LFSSL,
+LFSSP, LOOAL, LOOAP, LPACI, LENUM.** [D] Absent from it are **LCTLR** (19),
+**LDAO** (20), **LFMSSL** (22), **LFMSSP** (23) and **PPCL_LAI** (24).
+
+That is worth stating because those five are precisely the arms this document
+has had the most trouble with, and it explains why: they are not types a site
+can contain unless something other than the point editor creates them.
+`PPCL_LAI` reuses `LAI_type` outright and `LDAO_type` is declared with no fields
+at all (§10.4.1), which is consistent with both being internal rather than
+user-facing. A decoder must still handle all sixteen tags — the wire can carry
+them — but an implementer should not expect to find examples.
+
+**The same documentation independently confirms the proof model.** It describes
+the proof input, for every type that has one, as *"the status of one latched
+digital input point (proof)"* — which is exactly the recovered
+`use_proof_ = physical_address_DI + point_proof_delay` of §10.4.1. And its
+wording tracks the type system's structure precisely: the five types it calls
+**optional** proof (L2SP, LFSSL, LFSSP, LOOAL, LOOAP) are the five whose
+structures wrap it in the `Proof_option` CHOICE, while **L2SL**, the one type
+whose proof it describes without "optional", carries `physical_address_DI` and
+`point_proof_delay` as **direct fields with no CHOICE around them**. Two
+independent sources, agreeing down to which types get the optional wrapper.
+[D][S]
 
 Type code `0` is `point_type_undef` (no point). The codes are the `Point_type` enumeration values that travel as a `Point_type` tag wherever a typed point body appears in an ASDU. [S] The decimal codes are not contiguous (5, 8, 9, 10 and 16–18 are unused), so an implementer must dispatch on the explicit code, never on ordinal position. [S]
 
