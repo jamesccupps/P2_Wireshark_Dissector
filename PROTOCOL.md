@@ -3953,12 +3953,32 @@ far: [W][S]
 | `time_`, `trend_cov_` | 4 each | the two `Trend_type` arms; consumption across 5 and 2 opcodes (161 / 86 bodies) |
 | `Occurrence` | 1 | `u8` in §15.3's `0x0989` decode; consumption narrows `0x5020`/`0x0979` to this or 4 and §15.3 chooses |
 | `TEC_valid`, `Failed_status` | 1 each | the `0x0986 UPL_ALL_TEC` body, 59 of 60 consuming exactly once its absent trailing field is allowed for |
+| `Ssto_zo_mod_cl`, `Ssto_zo_mod_ht` | 1 each | **resolved, see below** — an apparent contradiction whose cause was an undeclared field, not a width |
 | **`Schedule_days`** | **4** | a **bitmask**, §15.3 — see the warning below |
 | `loggerOn_` | 1 | 2 opcodes, 23 bodies |
 | `Ssto_amd`, `Ssto_desop_value` | 1 each | 2 opcodes, 6 bodies |
 | `Grain_Type`, `Repl_Cmd_Type` | 1 each | **one opcode only** (`0x4636`, 60 bodies) — unique for it, uncorroborated |
 | `Baud_rate` + `Port_number` + `Port_type` | **4 together** | they occur only together, in `0x099f`; the group width is fixed, the split is **[OPEN]** |
-| `Ssto_zo_mod_cl`, `Ssto_zo_mod_ht` | **[OPEN]** | `0x503b` and `0x097d` give 1, `0x098d` gives 2 — an unresolved contradiction, so one of those three parses is wrong |
+
+**A contradiction worth showing, because of how it resolved.** `Ssto_zo_mod_cl`
+and `Ssto_zo_mod_ht` came out as **1** from `0x097d` and as **2** from
+`0x098d`. A type has one width, so one parse was wrong — and taking the majority
+would have reached the right answer for the wrong reason. The cause is in the
+declarations:
+
+```
+AP2_Upl_Added_SSTO_Start_Response :  team_response | ssto_start_setup
+                                     | state_text_id : SHORT_ | panel_logging
+AP2_Upl_All_SSTO_Start_Response   :  team_response | ssto_start_setup
+```
+
+The **All** variant declares nothing after `ssto_start_setup`; its own **Added**
+sibling declares a `state_text_id` there, and the wire carries one in both. Two
+fields at +1 each is the same two bytes as one missing tail, which is exactly
+why width 2 appeared to fit. Restore the tail and **60 of 60 bodies consume at
+width 1**, with the tail reading `-1005` ×45 and `-2005` ×15 — the same two
+state-text tables in the same split as `0x098C`, `0x098E` and `0x098F` (§11.5).
+Three independent confirmations, and none of them a vote. [W][S]
 
 **Do not size an enum field from its enum's value range.** The obvious shortcut
 — *the largest member is 13, so one byte is enough* — is wrong, and
