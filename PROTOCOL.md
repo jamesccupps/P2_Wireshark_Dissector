@@ -4451,18 +4451,27 @@ far: [W][S]
 | `Sensor_type` | **1** | **derived, not fitted**: `Physical_address_AI`'s address is `lan + drop + point + Analog_scale + Analog_sensor`, and `Analog_sensor` is `sensor_type + f32`. The wire measures that address at **17 bytes**, and 1 is the only `sensor_type` width that gives 17 — 2 gives 18, 4 gives 20 (§10.4.2) |
 | `Alarm_mode_type` | **1** | `0x0982` and `0x0983`, 8 bodies each; `0x0983` carries the field **twice**, so a wrong width compounds. Widths 2 and 4 land inside the trailing `DATE_TIME` run and read `0x7e` as an alarm tag. Pinning it made 19 operations decodable — the largest single gain in §10.9 |
 | `Grain_Type`, `Repl_Cmd_Type` | 1 each | **one opcode only** (`0x4636`, 60 bodies) — unique for it, uncorroborated |
-| `Baud_rate` + `Port_number` + `Port_type` | **4 together** | co-occur in `0x099f`, so only their **sum** is measured here; the split is **[OPEN]** — but see the note below, which names a one-field frame that would settle it |
+| `Baud_rate` | **2** | `0x099f`, 60 bodies, and the record carries its own oracle — see below |
+| `Port_number`, `Port_type` | 1 each | same 60 bodies; `Port_number` corroborated by `Port_request`, which types the same concept `UNSIGNED8` |
 
-**The `Baud_rate` split has a cheap falsification test, and the structure
-library names it.** Those three enums are *not* adjacent fields of one group —
-`Port_log` is `port_number : Port_number` followed by `port_status :
-Port_status`, and `Port_status` interposes a `descriptor : TEXT_` and four
-`BOOLEAN_`s before reaching `port_type`. Only their sum is constrained here, and
-three enums summing to 4 bytes means exactly one of them is two bytes wide while
-the value spaces (`Baud_rate` 0–11, `Port_number` 0–4, `Port_type` 0–1) would
-all fit in one.
+**How that split was closed, and why it is worth reading.** For a long time
+only the **sum** of those three was measured: they co-occur in `0x099F` and
+nothing isolated them, so the entry here read "4 together, split **[OPEN]**".
+Three enums summing to 4 bytes means exactly one is two bytes wide — and the
+value spaces gave no clue, because `Baud_rate` 0–12, `Port_number` 0–4 and
+`Port_type` 0–1 all fit comfortably in one byte each. The obvious inference was
+that the wide one must be whichever had the most members, which is the
+value-range reasoning §10.9 records as false.
 
-The library isolates one of the three: six request structures carry
+What settled it was not a new capture but reading the body properly (§16.1.3).
+`Baud_rate` is **2**, `Port_number` and `Port_type` **1** each, and the split
+reproduces the previously measured sum of 4 exactly — two independent
+measurements meeting. The decisive evidence is inside the record: its
+`DiagPortString` spells the port's settings in ASCII as `;bd=9600;…`, and the
+`Baud_rate` enum decodes to `baud9600` in all 60. [W]
+
+The library also offers a second, still-unused check on the same value, worth
+keeping for a commissioning capture: six request structures carry
 `baud_rate : Baud_rate` **and nothing else** —
 
 ```
@@ -4471,11 +4480,9 @@ AP2_Cabinet_Set_FLN1..3_Baudrate      = baud_rate : Baud_rate     (0x0123-0x0125
 AP2_Cabinet_Set_MMI1..2_Baudrate      = baud_rate : Baud_rate     (0x0120-0x0121)
 ```
 
-so **the body length of any one of those six frames is `Baud_rate`'s width**,
-and the other two follow by subtraction. None of the six appears anywhere in
-this corpus — they are configuration writes, which a monitoring supervisor never
-sends — so this is a gap that a single frame from a commissioning session would
-close, not one needing an experiment. [S]
+so the body length of any one of those six frames is `Baud_rate`'s width on its
+own, and should read 2. None appears in this corpus — they are configuration
+writes, which a monitoring supervisor never sends. [S]
 
 **A contradiction worth showing, because of how it resolved.** `Ssto_zo_mod_cl`
 and `Ssto_zo_mod_ht` came out as **1** from `0x097d` and as **2** from
@@ -5825,9 +5832,9 @@ Of the **455 operations** that have a request and/or response structure:
 
 | | operations |
 |---|---:|
-| **Decodable** from widths this document pins | **366 (80%)** |
-| Blocked on at least one unstated width or unpinned CHOICE | 89 |
-| distinct blocking types | **50** |
+| **Decodable** from widths this document pins | **378 (83%)** |
+| Blocked on at least one unstated width or unpinned CHOICE | 77 |
+| distinct blocking types | **46** |
 
 **The blockers are concentrated, and a few are worth far more than the rest.**
 "Blocks" counts operations the type appears in; "alone" counts operations for
@@ -5836,11 +5843,14 @@ immediately:
 
 | blocker | blocks | alone | what it is |
 |---|---:|---:|---|
-| `Baud_rate` | 11 | 6 | §10.1 — one `CABINET_SET_*_BAUDRATE` frame settles it |
 | `LON_extension_` | 10 | 0 | LonWorks member description — a different fieldbus |
 | `Duct_type` (CHOICE) | 8 | 0 | 3 arms — but all three are 8 B, so this blocks the *labels*, not the walk (§10.4.1) |
 | `Device_type` | 7 | **7** | the highest single-fix left in the table |
 | `User_access_*`, `User_command_priority`, `Language_ID` | 7 each | 0 | the user-account family, which travels together |
+
+`Baud_rate` topped this table at 11 operations until §16.1.3 measured it, and
+how it fell is worth more than the twelve operations it took with it — see the
+warning at the end of this section.
 
 **What is no longer here is the point of the table.** Its first two editions
 were topped by `use_proof_` at 48 operations and the `All_points` arms at 41
@@ -5861,7 +5871,7 @@ broke a working parse would be worse than no register at all. Treat the table
 as a work queue, not a scoreboard.
 
 **Read this against the parse rate, not instead of it.** A reference
-implementation consumes 95.1% of the bodies in the corpus, and the two figures
+implementation consumes 96.9% of the bodies in the corpus, and the two figures
 measure different things — the parse rate measures *this site*, the register
 measures *the document*. Where they disagree, the disagreement is the useful
 part, and every case falls into one of two kinds:
@@ -5887,6 +5897,30 @@ while `revstring` is **field 1** and the whole point of the read for most
 clients (§7.3.1, §10.5). Read a blocked verdict as "do not assume you can walk
 this body generically", not as "this operation is undocumented"; where a section
 of §10 describes an opcode in prose, that description is the authority.
+
+**Do not guess a width from an enum's value range.** This is the one shortcut
+that looks safe and is not, and it is recorded here because it very nearly went
+into this document as a rule. Twenty-one enum widths had been measured
+individually; nineteen were 1 byte and two were 2, and the obvious rule — *one
+byte while every member fits in a byte, two when one does not* — reproduced all
+twenty-one. `Application_family` tops out at 257, exactly the case that forces
+two. Twenty-one chances to fail and none taken; applying it moved this table
+from 366 operations to 416.
+
+**It is wrong.** The first structure in the corpus able to test it on a fresh
+enum killed it: `Baud_rate` has thirteen members topping out at 12, so the rule
+says one byte, and it is **two** — 0 of 60 bodies consume exactly at width 1,
+60 of 60 at width 2, with the decoded rate matching an oracle inside the message
+itself (§16.1.3). Fifty were 83, not 91, and the difference was entirely
+imaginary.
+
+The twenty-one agreements were a **selection effect**, and the shape of it
+generalises past enums: a field gets measured when someone finds a structure
+tight enough to pin it, and the structures tight enough to pin anything are the
+densely packed point records — which are packed to the byte. The sample was
+never "enums"; it was "enums that live in point bodies". Enum width in P2 is a
+property of the field, not of the type, and every one of the 46 remaining
+blockers has to be measured the slow way. [W][I]
 
 ### 10.10 The full structure set is enumerable
 
@@ -6712,19 +6746,63 @@ A point's alarming behavior is selected by its **alarm object** type. The `Alarm
 | 7 | `bacnet_alarm_analog` | [S] |
 | 8 | `bacnet_alarm_digital` | [S] |
 
-**Standard** alarms are the base form (limit-crossing or digital-state alarm, single destination set). **Enhanced** alarms add the richer alarm-mode machinery — multiple alarm modes (day/night/special), per-mode limits and setpoints, and enhanced-count behavior — and exist for digital, analog, and enumerated points. [S/D] The runtime alarm state of a point is the `Alarm_object_data` record: timestamps for current-state / first-alarm / acknowledgment, a `state_changes` counter, and the boolean condition set `{ ack_pending, return_to_normal_acks, inalarm, introuble, inalarm_by_command, operator_disabled, program_disabled, proofing, is_enhanced, print_alarms, enable_almcnt2 }`. [S]
+**Standard** alarms are the base form (limit-crossing or digital-state alarm, single destination set). **Enhanced** alarms add the richer alarm-mode machinery — multiple alarm modes, per-mode limits and setpoints, and enhanced-count behavior — and exist for digital, analog, and enumerated points. [S/D] **The nine arms' wire widths are in §10.4.4**, where four of them are measured; this section is the model, that section is the bytes.
+
+The runtime alarm state of a point is the `Alarm_object_data` record: timestamps for current-state / first-alarm / acknowledgment, a `state_changes` counter, and the boolean condition set `{ ack_pending, return_to_normal_acks, inalarm, introuble, inalarm_by_command, operator_disabled, program_disabled, proofing, is_enhanced, print_alarms, enable_almcnt2 }`. [S]
+
+**`enable_almcnt2` is not a display flag.** A panel keeps **two resident points
+that count how many of its points are in alarm** — `ALMCNT`, the standard
+counter, and `ALMCT2`, a second one. Every point alarm increments `ALMCNT`; a
+point with this flag set increments **both**. The second counter exists so a
+site can count a functional subset separately — smoke-control points monitoring
+door alarms is the vendor's own example — and because they are ordinary
+panel-resident points, they can be read, trended, and referenced from PPCL like
+any other. A client that wants "how many alarms does this panel have" reads
+`ALMCNT` rather than counting reports. [D]
+
+**The alarm mode is selected by another point, and its values are fixed.**
+Enhanced alarming does not carry a mode field; it carries a **mode point**, and
+that point's current value selects which mode's setpoint, levels, destinations
+and messages apply: [D]
+
+| Mode value | Mode | Notes |
+|---:|---|---|
+| 0 | night | |
+| 1 | day | |
+| 2 … 5 | special modes | e.g. warm-up, cool-down |
+
+On pre-APOGEE firmware the mode point is a **virtual LAO** carrying 0–5; on
+APOGEE firmware it should be an **LENUM or LDO**, and in practice is often a
+zone-mode point or a TEC's day/night point. Anything that can command a point
+can therefore change an alarm mode — a time-of-day schedule, a PPCL program, or
+a physical switch. **A mode must additionally be enabled** before the panel will
+report alarms while in it; a configured mode that was never enabled is silent,
+which is not the same as a point that does not alarm. [D]
 
 ### 13.2 Alarm priority is distinct from command priority
 
 An alarm carries an **alarm priority** that classifies the urgency of the *event*, which is a completely separate axis from the **command priority** (§12.4) that classifies the *ownership* of a command. An implementer must keep the two apart. [D] The `Alarm_priority` enumeration is `priority_0 … priority_6`; the operational severity bands these represent: [S/D]
 
-| Band | Severity class | Tag |
-|---|---|---|
-| highest | Life Safety / Fire | [D] |
-| | Critical | [D] |
-| | Security | [D] |
-| | Trouble | [D] |
-| lowest | Maintenance | [D] |
+| Value | Severity class | Tag |
+|---:|---|---|
+| 1 | Life Safety | [D] |
+| 2 | Fire | [D] |
+| 3 | Critical | [D] |
+| 4 | Security | [D] |
+| 5 | Trouble | [D] |
+| 6 | Maintenance | [D] |
+
+**Those six names are a site's configuration, not the protocol's.** The labels
+are defined per system in a profile an engineer edits, and the wire carries only
+the number. The set above is the vendor's own example and the one almost
+everybody uses, which is exactly why it is worth stating that a decoder must
+**not** hard-code it: two sites can disagree about what `3` means, and both are
+correct. The same applies to the 4-character short labels an alarm report may
+carry (`URGT`, `MAIN`, `TROB`) — those are the site's abbreviations of its own
+band names. Render the number; render a label only if you have that site's
+profile. [D] An earlier revision of this table merged Life Safety and Fire into
+one row, which left five bands against six values and no way to tell which value
+was missing.
 
 The alarm report carries this priority as a 1-byte value (1–6) and may append a 4-character class label (e.g. `URGT`, `MAIN`, `TROB`). [W] The type system's `Alarm_priority_enum` has **seven** members, `priority_0` through `priority_6`, and the extra one reconciles cleanly: the control language's `ALMPRI` function — which reads a point's alarm priority from inside a program — is documented as returning **1 through 6**, the same range the report carries. `priority_0` is therefore the unassigned value, not a seventh severity, and a decoder should render it as "none" rather than inventing a band for it. [D][S] The point's runtime `alarm_state` (§12.3.1) is one of `normal / alarm / high_alarm / low_alarm / trouble`. [S]
 
@@ -6732,12 +6810,57 @@ The alarm report carries this priority as a 1-byte value (1–6) and may append 
 
 An analog or pulse point carries a **high limit** and a **low limit** in engineering units. A value crossing a limit asserts the alarm condition (and, for analog, distinguishes `high_alarm` vs `low_alarm`). [S/D] An **alarm deadband** equal to one COV limit (§12.5) is automatically applied at each limit to suppress nuisance re-alarming as the value dithers across the threshold. [D] The point-definition record carries both English and SI limit pairs alongside the dual scaling (`english_low_alarm` / `english_high_alarm` / `si_low_alarm` / `si_high_alarm`). [S]
 
-Alarm transitions follow the standard three-transition model — **to-off-normal**, **to-fault**, **to-normal** (the `BAC_Transitions` set: `to_offnormal`, `to_fault`, `to_normal`) — and a point may be configured to **annunciate** on each transition independently ("Annunciate to Normal / Off-Normal / Fault Transitions"). [S/D] A `level_delay` and a `mode_delay` (both u16, in the alarm-setup record) debounce the assertion so a brief excursion does not generate an alarm. [S]
+Alarm transitions follow the standard three-transition model — **to-off-normal**, **to-fault**, **to-normal** (the `BAC_Transitions` set: `to_offnormal`, `to_fault`, `to_normal`) — and a point may be configured to **annunciate** on each transition independently ("Annunciate to Normal / Off-Normal / Fault Transitions"). [S/D] The standard-alarm time delay is the BACnet one: the value must stay outside the high/low band for that long before a to-off-normal event, or back inside it *including the deadband* before a to-normal. [D]
+
+**`level_delay` and `mode_delay` are both `u16` and they are not in the same
+unit.** They are adjacent in the alarm-setup record and describe superficially
+similar waits, which makes this the easiest field pair in the section to get
+wrong: [D]
+
+| Field | Unit | What it waits for |
+|---|---|---|
+| `level_delay` | **seconds** | how long the value must stay inside an alarm level's range before the panel reports at that level — the anti-chatter delay for a door opening |
+| `mode_delay` | **minutes** | how long the system is given to *reach and stabilise at* a new setpoint after a mode change, before the panel starts checking it at all |
+
+A decoder rendering both as seconds is wrong by 60× on one of them, and wrong in
+the forgiving direction — a 15-minute mode delay shown as 15 seconds looks like
+a plausible debounce rather than an obvious error. The two also differ in kind:
+`level_delay` suppresses a transient, `mode_delay` suppresses the *expected*
+excursion that a setpoint change itself causes.
+
+**`differential` is a return-to-normal hysteresis, applied on one side only.**
+It is not a symmetric band around the limit: a point in alarm stays in alarm
+until its value crosses back past the limit *by* the differential. A point that
+alarms at 74 °F with a differential of 2.0 does not report normal until it drops
+below 72 °F. This is distinct from the automatic one-COV-limit deadband of the
+paragraph above, which applies at the limit itself; a point can carry both. [D]
 
 An **enhanced** definition as it actually arrives on the wire — mode point,
 units, set point, and the level table with each level's offset, priority,
 category and message number — is decoded in §10.8 (`AP2_UPL_ALL_ALARM_MODE`
 response). [W]
+
+**What an `offset` in that level table means depends on the point type, and the
+two readings are not related.** [D]
+
+- **On an analog point** it is a *displacement from the mode's setpoint*, above
+  or below, that the value must cross to enter that alarm level. The levels are
+  therefore concentric bands around a setpoint that itself changes with the
+  mode — which is the whole reason enhanced alarming exists, and why an analog
+  enhanced alarm cannot be flattened into a fixed high/low pair.
+- **On an LENUM point** it is a *state index* from that point's state-text
+  table (§11.5.3), and the levels partition the index range. **A level's
+  priority applies from its own offset up to the next assigned one**, so the
+  table is sparse by design: assigning `0`→normal, `2`→PRI1, `4`→PRI6 on a
+  six-state point means `0–1` normal, `2–3` PRI1, `4–5` PRI6. If the *lowest*
+  offset carries no priority, the first assigned priority reaches downward and
+  covers everything below it — so omitting the bottom entry does not create an
+  unalarmed floor, it extends the first alarm level over it. **Up to 64 offsets
+  per LENUM point.**
+
+One operational consequence worth carrying into any tool that writes these:
+**changing an LENUM point's state-text table resets every offset**, because the
+offsets are indices into the table that is being replaced. [D]
 
 ### 13.4 Alarm destinations and routing
 
@@ -7391,6 +7514,70 @@ Two consequences for an implementer, neither obvious from the opcode names:
 This is what §6.2 means in calling the second channel the "announce + DB-sync"
 band: the announce carries the fact, the data channel carries the data. [W]
 
+#### 16.1.3 `UPL_ALL_PORT` (0x099F) — the panel's port table, and where `Baud_rate` was measured
+
+The sweep's first operation is also one of its most completely decoded. `0x099F`
+returns one record per port, and **60 of 60 bodies in the corpus consume
+exactly**: [W]
+
+```
+Port_log      port_number : Port_number            u8
+              port_status : Port_status
+Port_status   descriptor              TEXT_        (empty in all 60)
+              baud_rate               Baud_rate    u16 BE      <- TWO bytes
+              highlight_enabled       BOOLEAN_
+              autobye_enabled         BOOLEAN_
+              alarm_printing_enabled  BOOLEAN_
+              report_printing_enabled BOOLEAN_
+              port_type               Port_type    u8
+              my_site_id              TEXT_
+              AdvancedPortString      TEXT_
+              AdvancedSystemString    TEXT_
+              DiagPortString          TEXT_
+              DiagSystemString        TEXT_
+              PortName                TEXT_
+```
+
+The request is three bare bytes — `begin_port_number`, `end_port_number`,
+`last_port_number`, all `UNSIGNED8` — which is a range plus the cursor of §6.7.
+That the request types a port number as `UNSIGNED8` is the independent
+corroboration that `Port_number` is one byte in the response too. [S]
+
+**`Baud_rate` is two bytes, and this body is what settles it.** At width 1 not a
+single body consumes exactly; at width 2 all 60 do. Better than that, the record
+carries its own oracle: `DiagPortString` is an ASCII settings string of the form
+`;bd=9600;pa=0;mk=0.`, and **the decoded `Baud_rate` enum equals the `bd=` value
+in all 60 records** — `6` decoding to `baud9600` against a literal `9600` in the
+same message. `pa=` likewise tracks the record's own port number. A width that
+is right about the byte count *and* right about the number is not a coincidence.
+[W] The consequence for the enum-width shortcut is in §10.9.
+
+**The ports a panel exposes.** The five records repeat identically across the
+twelve sweeps captured: [W]
+
+| Port | `PortName` |
+|---:|---|
+| 0 | USB Modem port |
+| 1 | HMI port |
+| 2 | Telnet port |
+| 3 | USB Tool port |
+| 4 | USB Printer port |
+
+**What this body does *not* establish, stated plainly.** Every one of the 60
+records carries `baud_rate` 9600, `port_type` 0, all four booleans clear, and an
+empty `descriptor`. So the **widths** are pinned by exact consumption but the
+**value spaces** are not exercised at all: `Port_type` has a second member that
+never appears, the booleans are never seen set, and no port on this panel runs
+at any other rate. A decoder built from this will walk any port record
+correctly and has been shown nothing about what the fields mean when they are
+non-zero. **[OPEN]** [W]
+
+One thing worth noting for §17: this is an **unauthenticated read that
+enumerates a panel's console and management ports by name** — the Telnet port
+among them — and returns the site identifier in `my_site_id` and again inside
+`DiagSystemString`. It is a small disclosure on its own and a useful one to an
+attacker enumerating a plant. [W]
+
 ### 16.2 On-disk (.P2) panel-database format
 
 A panel database serialized to disk (file extension `.P2`, e.g. `P2_Archive` snapshots) uses **TLV record framing persisted to a file** — broadly the same style of encoding the panel exchanges on the wire, written to disk. This subsection is observed from **panel database exports and controller backups** (not from wire traffic) and is included only to help an operator read their own database exports; treat it as indicative rather than exhaustive. [I]
@@ -7748,7 +7935,38 @@ A panel reports its identity in the `AP2_CABINET_DISPLAY` response (opcode `0x01
 | node_name / site_name / bln_name | TEXT_ (TLV) | the cabinet's identity (cross-ref §3.4/§6) | [W/S] |
 | ip_addr_settings, MII/MAC, BACnet settings | (sub-structs) | network configuration | [S] |
 
-The panel reports a **firmware-revision string and a separate hardware string**; together they form the firmware+hardware identity. That identity selects the wire **STRING_TYPE** — whether name/string fields are encoded in **RAD-50** (pre-IP / early platforms) or **ASCII** (P2/IP platforms) — per the per-platform `APOGEE_PANEL_REVISION_LIBRARY` (`firmware.rev.xml`): each platform class (RCU_P2, MEC, MBC, SCU, MODULAR, COMPACT, FLNC, MXL, …) carries `STRING_TYPE`, `REV_STRING`, `REV_LEVEL`, `CAB_TYPE`, and `CHECK_HW_STRING`. A client decoding name fields must therefore key its string codec on the reported revision/hardware, not assume a single encoding (cross-ref §8 — the RAD-50 vs ASCII string codec and the 40-character RAD-50 alphabet). [D/W]
+The panel reports a **firmware-revision string and a separate hardware string**; together they form the firmware+hardware identity. That identity selects the wire **STRING_TYPE** — whether name/string fields are encoded in **RAD-50** or **ASCII** (cross-ref §8 — the codec and the 40-character RAD-50 alphabet). A client decoding name fields must key its codec on the reported identity rather than assume one encoding. [D/W]
+
+**The rule is narrow, and it is matchable from the identity string itself.** The
+revision library is a table of `(REV_STRING, CAB_TYPE, STRING_TYPE)` in two
+kinds — **836 firmware-revision entries** and **52 hardware-revision entries** —
+and across all 888 of them RAD-50 appears **31 + 1 times**. Everything else is
+ASCII. In full: [D]
+
+| Identity token | Platform | Codec |
+|---|---|---|
+| firmware `SCU0601` … `SCU129` (29 entries, SCU firmware **6.1 – 12.9**) | SCU | **RAD-50** |
+| firmware `INT02`, `INT03` (legacy supervisor 2.0 / 3.0) | supervisor | **RAD-50** |
+| hardware `SCU`, hardware `RCU` | SCU, RCU_P2 | **RAD-50** |
+| firmware `SV503` … `SV5111` (SCU firmware **13.0 and later**) | SCU | ASCII |
+| everything else — `COMPACT`, `MBC`, `MEC`, `MODULAR`, `MXL`, `MXL-IQ`, `NCC`, `PMI-G`, `SCT`, `XLS`, `FLNC`, and the supervisor from 2.1 on | — | ASCII |
+
+So the decision procedure is: **assume ASCII, and switch to RAD-50 only for an
+SCU below firmware 13.0, an RCU, or a pre-2.1 supervisor.** The SCU is the one
+platform that crosses over, and it does so cleanly at a major-revision boundary
+— 12.9 is RAD-50 and 13.0 is ASCII, with no mixed revision. The identity string
+observed on the wire in this corpus carries a `PXME` hardware token, which is
+the MODULAR class and therefore ASCII, consistent with every name field in the
+capture set decoding as plain text. [D][W]
+
+Two smaller facts from the same table. A `CHECK_HW_STRING` flag says whether the
+hardware token must be validated as well as the firmware one; it is `NO` for 43
+entries, the supervisor's among them, which is consistent with a supervisor
+having no panel hardware to check. And **`REV_LEVEL` is a dotted revision that
+does not sort as a number** — the SCU series runs `12.4`, `12.41`, `12.5`,
+`12.51` … `12.54`, `12.6`, so `12.41` is a revision *between* 12.4 and 12.5 and
+not "12.41 > 12.6". Compare revisions component-wise as strings-of-digits, or a
+panel at 12.9 sorts below one at 12.41. [D]
 
 **Firmware-keyed compatibility knobs.** Two legacy compatibility settings are gated by firmware identity: [D]
 
