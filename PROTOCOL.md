@@ -2566,7 +2566,22 @@ The year byte is the calendar year **minus 1900** (so `0x7E` = 126 → 2026); mo
 2026-06-25, day-of-week 4 (Thursday — which is the true weekday of that date, an independent check on
 the field order), 12:59:35.72. [W] A record may carry more than one such stamp — an alarm report (§13.6) carries **three**:
 an event time, a reference time, and a created/configured time; a second observed stamp `7C 01 1E 02 10 0B 0A 59`
-decodes to 2024-01-30, day-of-week 2 = Tuesday, 16:11:10, again weekday-consistent (a recurring "created" base). [W] This wire
+decodes to 2024-01-30, day-of-week 2 = Tuesday, 16:11:10, again weekday-consistent (a recurring "created" base). [W]
+
+**The weekday byte makes the field order self-checking, so it was checked on
+everything rather than on two examples.** Taking every 8-byte window in the
+corpus whose year, month, day, hour, minute, second and centisecond are all
+plausible — and *ignoring* the weekday byte while selecting — gives **738
+distinct stamps**, spanning 2020 to 2026. The day-of-week byte matches the true
+calendar weekday of the decoded date in **738 of 738**.
+
+That is the discriminating result rather than a restatement, because a wrong
+field order does not survive it: swap month and day and every date with a day
+past the 12th becomes invalid while the rest decode to the wrong weekday, and a
+weekday byte that was really something else would agree about one time in
+seven. 100% against a 14% null is the field order, confirmed. [W]
+
+This wire
 form is distinct from the `eBLN_Node` `baseTime`/`offset` clock-sync fields (§10.6), which are a
 separate `u32` time base plus a `u16` zone offset used for replication time alignment, not a calendar
 stamp. [W][S]
@@ -6019,12 +6034,41 @@ The `AP2_COV_ENABLE` request body (`AP2_COV_Enable_Request`) is `{ name_response
 
 ### 12.1.1 When subscriptions are registered — once, at session establishment
 
-A subscriber registers its COV subscriptions **when the session comes up, and
-not again**. This is measured rather than inferred: a 16.7-hour capture on a
-panel's own switch port holds **48 `COV_ENABLE` requests, every one of them
-within the first 8.9 seconds**, and none across the remaining sixteen hours.
-Subscriptions that succeed are not renewed, and — importantly — **a subscription
-that fails is not re-attempted for the life of the session.** [W]
+A subscriber registers its COV subscriptions **in the opening seconds of a
+session**, not continuously. This is measured rather than inferred: a 16.7-hour
+capture on a panel's own switch port holds **48 `COV_ENABLE` requests, every one
+of them within the first 8.9 seconds**, and none across the remaining sixteen
+hours. Subscriptions that succeed are not renewed, and — importantly — **a
+subscription that fails is not re-attempted for the life of the session.** [W]
+
+**Corpus-wide the concentration is real but the tail is longer, and the
+difference matters to a publisher.** Across the 159 connections that
+demonstrably *began* during their capture — 1,917 `COV_ENABLE` requests — the
+offset from the connection's first frame is: [W]
+
+| | |
+|---|---:|
+| median | **11.0 s** |
+| within 10 s | 45.6% |
+| within 60 s | 73.6% |
+| p90 | 299 s |
+| max | 721 s |
+
+So "at session establishment" is right about where the mass is and wrong as an
+absolute: roughly one subscription in eleven arrives more than five minutes in.
+A publisher must keep accepting `COV_ENABLE` for the life of the session, and a
+diagnostic tool that samples only the opening seconds will miss some.
+
+> **Why this is not simply measured over the whole corpus.** Most connections
+> were already open when their capture began, and an offset measured from a
+> mid-stream join is meaningless — including all of them drags the median to
+> 155.8 s and says nothing. Excluding every connection whose first frame sits at
+> capture start is *also* wrong, because installing an inline tap tears down
+> every session on the port, so in those captures the sessions genuinely did
+> start there: 59 of the 121 captures show that pattern and 62 are staggered.
+> The figures above take only the unambiguous case — a connection whose first
+> frame is more than 30 s after its capture's — and no reading of this corpus
+> settles the rest. [W]
 
 Three consequences an implementer needs:
 
