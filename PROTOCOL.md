@@ -87,7 +87,8 @@
   - [10.6 Session / EBLN node block (0x4640)](#106-session--ebln-node-block-0x4640)
   - [10.7 Node / BLN management bodies](#107-node--bln-management-bodies)
   - [10.8 Upload / PPCL / TEC / trend / alarm representatives](#108-upload--ppcl--tec--trend--alarm-representatives)
-  - [10.9 The full structure set is enumerable](#109-the-full-structure-set-is-enumerable)
+  - [10.9 Buildability register — what a reader can and cannot decode](#109-buildability-register--what-a-reader-can-and-cannot-decode)
+  - [10.10 The full structure set is enumerable](#1010-the-full-structure-set-is-enumerable)
 - [11. Point Model](#11-point-model)
   - [11.1 The three point layers](#111-the-three-point-layers)
   - [11.2 Logical point types](#112-logical-point-types)
@@ -4776,6 +4777,36 @@ which *is* positional, because that particular enum happens to start at zero and
 skip nothing. Reading either structure by position alone gets one of them wrong.
 [S][W]
 
+**But most CHOICEs here are far easier than that, and it is worth knowing which
+kind you are looking at before reaching for an enum table.** There are **52**
+CHOICE structures in the library, and they fall into three groups: [S]
+
+| shape | count | what a decoder needs |
+|---|---:|---|
+| **2 arms, one of them `NULL_`** — an optional field | **31** | nothing but the arm order: one tag means absent and consumes no further bytes, the other means present |
+| 2 arms, neither `NULL_` — a union of two forms | 8 | which tag picks which of the two |
+| **3 or more arms** | **13** | a genuine selector; `All_points` (16 arms) and `Alarm_object` (9) are pinned in §10.4.1 and §10.4.4, leaving **11** |
+
+So the "tag is an enum, not an ordinal" hazard bites hard on exactly **11
+structures**, and `MiscData` — 48 arms — is the extreme case. For the 39 two-arm
+CHOICEs the two readings cannot diverge; there are only two arms.
+
+**What does bite on the two-arm ones is arm order, and it is not uniform.** Of
+the 31 optional-presence CHOICEs, **25 put `NULL_` first** — so tag `0` means
+*absent* — and **6 put it second**, where tag `0` means *present*:
+
+```
+LocalOrRemote
+Physical_address_AI   Physical_address_AO   Physical_address_DI
+Physical_address_DO   Physical_address_PA
+```
+
+Five of the six are the physical-address family of §10.4.2 — the most-used
+structures in the point model. An implementer who generalises "tag 0 means the
+field is absent" from the common case reads **every physical address backwards**,
+and gets a plausible parse rather than an error. Read the arm order from the
+structure, every time. [S]
+
 **Where this now stands.** Every width in the point body is measured, and the
 model consumes **5,795 of 5,807 walked points (99.8%) with zero remainder**: [W]
 
@@ -4910,9 +4941,14 @@ mistaking them for the point's own tail is the specific error that produced the
                                       | point_extension2 : Point_extension2
 ```
 
-`Physical_address_Lenum` inverts the arm order of the others — **tag 0 =
-`not_present : NULL_`, tag 1 = `present : present_`**, one byte — so a decoder
-that assumes tag 0 means "has an address" is wrong for exactly this one CHOICE.
+`Physical_address_Lenum` inverts the arm order of the others in its family —
+**tag 0 = `not_present : NULL_`, tag 1 = `present : present_`**, one byte — so a
+decoder that assumes tag 0 means "has an address" is wrong here.
+
+Note which way round the exception runs, because it is the opposite of what the
+family suggests: measured across all 52 CHOICEs (§10.4.1), `NULL_`-first is the
+**majority** convention at 25 of 31, and `Physical_address_Lenum` follows it. It
+is `_AI`, `_AO`, `_DI`, `_DO` and `_PA` that are unusual. [S]
 
 `Point_extension2` is **not a fixed-width field**. It is a counted block: [W]
 
@@ -5418,7 +5454,56 @@ already on the segment. And because the same account name reappears in the
 `User_profile` of every request that session issues, **operator actions are
 attributable on the wire** to the account that made them.
 
-### 10.9 The full structure set is enumerable
+### 10.9 Buildability register — what a reader can and cannot decode
+
+The standard this document is held to is that a reader with **nothing but this
+page** can turn bytes into named fields. That is testable rather than a matter
+of opinion: walk each operation's request and response structures transitively
+and collect every type whose width the document never states. An operation with
+none is decodable; an operation with any is not, however well the rest of it is
+described.
+
+Of the **455 operations** that have a request and/or response structure:
+
+| | operations |
+|---|---:|
+| **Decodable** from widths this document pins | **274 (60%)** |
+| Blocked on at least one unstated width or unpinned CHOICE | 181 |
+| distinct blocking types | **87** |
+
+**The blockers are concentrated, and a few are worth far more than the rest.**
+"Blocks" counts operations the type appears in; "alone" counts operations for
+which it is the *only* thing missing — pin it and those become decodable
+immediately:
+
+| blocker | blocks | alone | what it is |
+|---|---:|---:|---|
+| `use_proof_` | 48 | 7 | the payload arm of the `Proof_option` CHOICE |
+| `ldao_`, `lfmsl_`, `lfmsp_`, `ppcl_lai_` | 41 each | 0 | the four `All_points` arms **never observed here** (§10.4.1) |
+| `Alarm_mode_type` | 19 | **19** | alarm-mode enum width — the single highest-value fix in the table |
+| `BACnetYes_` | 17 | 5 | payload arm of the `IsBacnet` CHOICE |
+| `Trend_type` (CHOICE) | 14 | 6 | a 3-arm CHOICE, so the tag→arm mapping genuinely matters |
+| `Baud_rate` | 11 | 6 | see §10.1 — one `CABINET_SET_*_BAUDRATE` frame settles it |
+
+**Read this against the parse rate, not instead of it.** A reference
+implementation consumes 95.1% of the bodies in the corpus, and the two figures
+measure different things — the parse rate measures *this site*, the register
+measures *the document*. Where they disagree, the disagreement is the useful
+part, and every case falls into one of two kinds:
+
+- **Blocked, yet every observed body parses (15 opcode-sides).** The blocking
+  arm simply does not occur here. `POINT_LOG_VALUE`'s response is blocked on
+  `ldao_`, `lfmsl_`, `lfmsp_` and `ppcl_lai_`, and parses 60 of 60 — because
+  this site has no points of those four types. **A site that has one would break
+  a decoder built to the same standard**, which is exactly what a parse rate
+  cannot tell you.
+- **Decodable, yet some bodies fail (22 opcode-sides).** Every one of these is
+  our own probe traffic: a bare scope tag `01 00 04 "SYST" 23 3F FF FF FF` sent
+  to a run of consecutive opcodes, one frame each, carrying none of the fields
+  the operation declares. All 33 such frames originate from two research hosts
+  and none from a supervisor or panel. They say nothing about the document.
+
+### 10.10 The full structure set is enumerable
 
 The ~30 structures above cover the read/command/COV core, the firmware/identity block, the session block, and one representative of each remaining major family (upload, PPCL, trend, TEC, alarm, node-management). The remaining ~1,110 structures follow the same conventions — ordered typed fields, the shared sub-types of §10.2, counted arrays, and CHOICE unions — and each maps one-to-one to a `*_Request` / `*_Response` pair for an opcode in the §9 catalog. For any opcode not detailed here, its body is the like-named ASDU structure (e.g. `AP2_<name>_Request` / `AP2_<name>_Response`), readable from the structure library with the §10.1 type mapping. [S]
 
