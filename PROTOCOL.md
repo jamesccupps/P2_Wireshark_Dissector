@@ -302,7 +302,7 @@ The port is configurable but must be set identically across all panels and the s
 
 Some installations run a supervisor that **also** listens on TCP/5034 as a second listener distinct from the canonical 5033. A client MUST NOT assume it exists and MUST default to 5033. [W]
 
-**Why a second port exists at all.** The supervisor's listening port is a configurable setting, documented as defaulting to 5033, which an integrator is directed to change only when a *second* P2 application shares the same management station — the two must not collide on one host. A non-5033 supervisor port is therefore a **deployment artifact of co-hosted P2 applications**, not a protocol feature and not a Siemens-standard second channel. This is the operational reason behind the `<host>|<port>` identity form of §3.3.1: one host can present more than one P2 endpoint, so the port disambiguates the identity. Expect the common case to be a supervisor on 5033 with no suffixed identity at all. [D] Where it appears, only the supervisor host listens on 5034; field panels never do — the listener set on 5033 is the full mesh, while 5034 is a star into one supervisor box. On the wire, 5034 carries the **panel→supervisor push/announce (reverse) channel**: panels open a connection to the supervisor's 5034 listener and push COV/value frames there, while the supervisor reaches panels on their 5033 listeners (§7.3). What that endpoint *is* was previously recorded here as undeterminable from traffic. It is largely determinable, and the answer matters to an implementer: **the second port is a P2 node with its own points, not a listener.** See §2.1.8. [W] The protocol carried on 5034 is identical to that on 5033 — the same frames, opcodes, and semantics — and unsolicited pushes (COV, alarms) are **port-agnostic**: a push rides whichever connection/port the receiving supervisor is listening on, and the port number does not change the meaning of any frame. [W]
+**Why a second port exists at all.** The supervisor's listening port is a configurable setting, documented as defaulting to 5033, which an integrator is directed to change only when a *second* P2 application shares the same management station — the two must not collide on one host. A non-5033 supervisor port is therefore a **deployment artifact of co-hosted P2 applications**, not a protocol feature and not a Siemens-standard second channel. The vendor's own configuration procedure states it directly — accept the default `5033` when the supervisor runs alone, and change it only so it does not conflict when a second P2 engineering application shares the management station. [D] This is the operational reason behind the `<host>|<port>` identity form of §3.3.1: one host can present more than one P2 endpoint, so the port disambiguates the identity. Expect the common case to be a supervisor on 5033 with no suffixed identity at all. [D] Where it appears, only the supervisor host listens on 5034; field panels never do — the listener set on 5033 is the full mesh, while 5034 is a star into one supervisor box. On the wire, 5034 carries the **panel→supervisor push/announce (reverse) channel**: panels open a connection to the supervisor's 5034 listener and push COV/value frames there, while the supervisor reaches panels on their 5033 listeners (§7.3). What that endpoint *is* was previously recorded here as undeterminable from traffic. It is largely determinable, and the answer matters to an implementer: **the second port is a P2 node with its own points, not a listener.** See §2.1.8. [W] The protocol carried on 5034 is identical to that on 5033 — the same frames, opcodes, and semantics — and unsolicited pushes (COV, alarms) are **port-agnostic**: a push rides whichever connection/port the receiving supervisor is listening on, and the port number does not change the meaning of any frame. [W]
 
 The decisive evidence that 5034 is not a protocol feature: a supervisor's identity string commonly carries a `|5034` suffix (e.g. `DCC-SVR|5034`), and that exact suffixed identity appears in thousands of frames captured on a **5033-only** connection, while the literal text `5033` appears in zero frames anywhere. The supervisor stamps its `HOST|PORT` identity into the routing slot regardless of which TCP port carries the frame — so the `|PORT` suffix is part of the *identity string*, not a live port indicator (§2.1.5, §6.4). [W] A conformant implementation derives all frame semantics from the frame's direction and contents, never from the TCP port that carried it, and defaults to 5033 only (exposing any other port as explicit configuration). [I]
 
@@ -339,7 +339,7 @@ P2 has **no multicast presence or discovery beacon that a client can listen for 
 
 #### 2.1.7 Surrounding network services
 
-A P2/IP node typically depends on several platform services around the P2 port itself: name resolution (DNS) to resolve node names to addresses, address assignment (BootP/DHCP) where dynamic addressing is used, file transfer (FTP) and a console (Telnet and/or a serial CLI) for firmware administration, and management (SNMP) for monitoring. [D] These are platform services around the P2 node and are **outside** the P2 wire protocol; only TCP/5033 (and, where present, the site-specific 5034) carries P2 itself. [I]
+A P2/IP node typically depends on several platform services around the P2 port itself: name resolution (DNS) to resolve node names to addresses — and where a site has no DNS the vendor's procedure is to populate the management station's `hosts` file with each panel's and each AEM's name and address, which is worth knowing because it makes name resolution a per-station configuration rather than a network service [D] — address assignment (BootP/DHCP) where dynamic addressing is used, file transfer (FTP) and a console (Telnet and/or a serial CLI) for firmware administration, and management (SNMP) for monitoring. [D] These are platform services around the P2 node and are **outside** the P2 wire protocol; only TCP/5033 (and, where present, the site-specific 5034) carries P2 itself. [I]
 
 #### 2.1.8 What is on the second port: a node, not a listener
 
@@ -634,6 +634,26 @@ Two hard constraints bound cross-BLN traffic:
 
 - **No BACnet→P2 path.** A point on a BACnet BLN (§3.2.4) is not reachable through a P2 frame; the supervisor brokers within and between P2 BLNs, but BACnet and P2 are separate stacks with no protocol-level bridge in the P2 direction. [D][I]
 - **~300-point cross-BLN COV-share cap.** The number of points that can be shared across BLNs by change-of-value subscription is bounded at approximately **300 points** per the cross-BLN sharing limit. Beyond this cap, cross-BLN COV sharing is not available; an implementer must not assume unbounded cross-trunk COV propagation. (COV mechanics are in §12.) [D]
+
+**Cross-trunk behaviour an implementer has to plan around.** Vendor
+documentation for the feature adds three constraints that are not visible in the
+frame format and will surprise anyone treating a cross-BLN reference as
+equivalent to a local one: [D]
+
+- **Commands and COV reports cross the boundary at one per second, and excess is
+  coalesced rather than queued** — if several commands are issued within a
+  second, *only the last is sent*. A cross-BLN write is therefore not a reliable
+  sequence of writes, and a client must not use one to drive a state machine.
+- **It is explicitly not intended for real-time control**, and the vendor
+  directs that cross-trunk references be kept out of control-loop statements.
+- **The direction is one-way.** The brokering lets a P2 panel reference points on
+  another P2 BLN or on a BACnet BLN; it does **not** let a BACnet panel reference
+  P2 points. That is the same asymmetry the first bullet above states from the
+  wire side, now confirmed from the vendor's own description of the service.
+
+The feature is also enabled per BLN rather than globally, and is not supported on
+every panel generation — so its availability is a site property, and a client
+must not assume a cross-BLN reference will resolve. [D]
 
 A node-eviction operation exists at the node-management layer, by which a node can be force-evicted from the BLN roster; it is a node-table mutation, documented here for topology completeness and flagged as **destructive** (it removes a node from the operating membership view). It is not a routing facility and is not part of normal traffic. [S][D]
 
@@ -2511,7 +2531,28 @@ Priority semantics an implementer must honor:
 
 #### 8.2.2 Point priority overlay (BACnet 16-level band) [S]
 
-The `Point_priority_enum` superset extends the command ladder of §8.2.1 with the BACnet 16-level priority array, values **101–116** (`bacnet_1` … `bacnet_16`), where `bacnet_1` (101) is highest within that band. Later, BACnet-capable controllers also expose an MMI/BACnet priority band in the 8–16 region (`APP_PRIORITY` / `MMI_PRIORITY` enums on BACnet-TEC platforms). A point on such a controller resolves its effective command from the combined ladder: the legacy P2 command priorities (0–35) and the BACnet array (101–116) coexist in one priority space, with the same higher-value-wins `>=` arbitration. The classic P2 wire `scope_byte` carries only the 0–35 legacy band; the 101–116 band is reached through the point's BACnet command path on controllers that implement it. [S][I]
+The `Point_priority_enum` superset extends the command ladder of §8.2.1 with the BACnet 16-level priority array, values **101–116** (`bacnet_1` … `bacnet_16`), where `bacnet_1` (101) is highest within that band.
+
+**The translation between the two ladders is a documented, and configurable,
+table.** When a P2 control program commands a BACnet point, the supervisor maps
+the P2 priority onto a BACnet level: [D]
+
+| P2 priority | BACnet level |
+|---|---|
+| `OPER` | 8 |
+| `SMOKE` | 10 |
+| `EMER` | 12 |
+| `PDL` | 14 |
+| `NONE` | 16 |
+
+The ordering survives the translation — BACnet numbers ascend as priority
+*falls*, so `OPER` at 8 outranks `NONE` at 16, exactly as `35` outranks `0` on
+the P2 ladder (§8.2.1). What an implementer must not do is treat the mapping as
+fixed: it is overridable per project by a plain-text configuration file, so a
+tool that infers a P2 priority from an observed BACnet level, or the reverse, is
+reading a site setting rather than a protocol constant.
+
+Later, BACnet-capable controllers also expose an MMI/BACnet priority band in the 8–16 region (`APP_PRIORITY` / `MMI_PRIORITY` enums on BACnet-TEC platforms). A point on such a controller resolves its effective command from the combined ladder: the legacy P2 command priorities (0–35) and the BACnet array (101–116) coexist in one priority space, with the same higher-value-wins `>=` arbitration. The classic P2 wire `scope_byte` carries only the 0–35 legacy band; the 101–116 band is reached through the point's BACnet command path on controllers that implement it. [S][I]
 
 ### 8.3 Numeric value fields
 #### 8.3.1 Integers [W]
