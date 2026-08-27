@@ -7149,8 +7149,16 @@ to-engineering-units curve, applied with the point's slope/intercept, §11.5).
 #### Node_complete_state  `Node_complete_state_enum`
 
 The full node-state value set as reported/set in node-state tables (§10). This is
-the value carried by GET/SET_COMPLETE_NODE_STATE and SET_NODE_STATE (§17.4). The
-local and global sub-enums below partition the same value space.
+the value carried by GET/SET_COMPLETE_NODE_STATE and SET_NODE_STATE (§17.4), and
+it is the one to decode against — the local and global sub-enums below are
+**classifications of these values, not separate wire fields**; no structure
+declares a field of either sub-enum type.
+
+They are disjoint but **not exhaustive**: local takes 6 values and global 3, and
+the remaining two — `2 unknown_protocol` and `7 p3_protocol_detected` — belong to
+neither, which is consistent with their being protocol-detection outcomes rather
+than a node condition. A decoder that consults only the two sub-enums will fail
+to name those two. [S]
 
 | Value | Name |
 |---|---|
