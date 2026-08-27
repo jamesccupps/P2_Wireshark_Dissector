@@ -2771,6 +2771,35 @@ descriptive (`__RpcRegisterCOVxx`, `__RpcCancelCOVxx`, `__RpcColdStartCabinet`,
 tier the most legible statement of *what operations exist* that this protocol
 has. [S]
 
+**The receive path is narrower than the send path, and by how much is
+measurable.** `BLN2CPI` dispatches an inbound frame through a chain of **twelve
+range switches**, each of which states its own first opcode and its own length.
+Together they reach **700 opcode values**; **97 of those have a dedicated
+handler** and the remaining 603 fall through to a single shared default. [S]
+
+| band | opcodes | cases | band | opcodes | cases |
+|---|---|---:|---|---|---:|
+| 1 | `0x0030`–`0x0042` | 19 | 7 | `0x0601`–`0x0606` | 6 |
+| 2 | `0x0051`–`0x0136` | 230 | 8 | `0x0611`–`0x0615` | 5 |
+| 3 | `0x0240`–`0x0334` | 245 | 9 | `0x095B`–`0x09A4` | 74 |
+| 4 | `0x0337`–`0x0368` | 50 | 10 | `0x09B0`–`0x09BC` | 13 |
+| 5 | `0x0402`–`0x040E` | 13 | 11 | `0x462D`–`0x4640` | 20 |
+| 6 | `0x0544`–`0x054D` | 10 | 12 | `0x4821`–`0x482F` | 15 |
+
+Two properties of this make it usable rather than trivia. **An opcode outside
+every band cannot be dispatched at all** by this receive path — 700 of the
+catalog's values are reachable and the rest are not, which bounds what a peer
+can meaningfully send *to a supervisor*. And **falling inside a band is not the
+same as being handled**: the 603 defaulted opcodes reach a single address that
+sets an error rather than decoding a body, so a client that receives a success
+for one of them is talking to something other than this codec. [S][I]
+
+The map is checked against an artifact that did not produce it: **all 97
+opcodes with a dedicated handler carry a name in the AP2 function-code
+enumeration — 97 of 97**, against 29% for the defaulted ones. If any band's
+base or length were off by one, its dedicated set would slide onto neighbouring
+values and that agreement would collapse toward the background rate. [S]
+
 #### The opcode carries an operand, which is why the catalog is so large
 
 The obvious model — one operation, one wire opcode — is wrong, and the way it is
