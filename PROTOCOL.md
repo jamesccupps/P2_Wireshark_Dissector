@@ -1007,7 +1007,13 @@ The `u32` after each name is that node's **change generation** — it increments
 
 1. You add (or rename) a node entry on panel **A**. A inserts the row, **bumps its own per-node version** (and the header table-version).
 2. On its next replication round A sends its full digest to its peers via `EBLN_REPL_PULL` (`0x4634`) — observed flowing *mutually* in every direction (panel→panel, panel→supervisor, supervisor→panel), so every node periodically advertises its whole table to every other node. [W]
-3. Each receiver compares the advertised per-node versions against its own. If they already match, it answers with an **empty (0-byte) success ACK** — the steady-state case (every matched `0x4634` response in the capture was empty: the digest *request* carries the full version vector, the response is just an ack). [W] If a peer is behind on some node (A's version is newer, or A carries an entry the peer lacks), it fetches the delta. Two delta paths are seen. The **commonly observed** one, during live database activity, is the ordinary database-change opcode family flowing on the `0x2E`/`0x2F` second channel: `DBCHANGE_*` (e.g. `0x0956 DBCHANGE_CONTROLLER`), `UPL_ADDED_*` (`0x0971 POINT`, `0x0974 TREND`, `0x0976 TEC`, …), and `UPL_DEL_*` (`0x0961`/`0x0964`/`0x0966`/…) — i.e. the changed records propagate as the same add/delete operations the supervisor uses, addressed peer→peer. [W] The dedicated replication-delta opcodes — `EBLN_REPL_NOTIFY` (`0x4633`, "I have changes"), `EBLN_REPL_CHANGES` (`0x4636`, changed records), `EBLN_REPL_PULL_MORE` (`0x4635`, paging) — are **also a live carrier**, not merely a formal one. A single passive supervisor capture holds 340 `0x4636` frames with bodies of 331–1551 bytes and **none empty** — the supervisor continuously distributing host-table state across the BLN. An earlier reading of this document called them rare and empty-bodied; that was a corpus-wide frame-count artifact and is withdrawn. Both paths are real: the `DBCHANGE_*`/`UPL_ADDED_*`/`UPL_DEL_*` family carries record propagation on the second channel, and the `EBLN_REPL_*` family carries the anti-entropy digest and delta. [W][S]
+3. Each receiver compares the advertised per-node versions against its own. If they already match, it answers with an **empty (0-byte) success ACK** — the steady-state case, and it is overwhelmingly
+the case: **10,003 of 10,016** matched `0x4634` responses are empty. The digest
+*request* carries the full version vector; the response is just an ack. An
+earlier edition said *every* matched response was empty. **Thirteen are not** —
+each carries a 4-byte body holding the `u32` value **3** (nine of them) or **2**
+(four). What that count is, is **[OPEN]**; that it exists means a client must
+read the response length rather than assume zero. [W] If a peer is behind on some node (A's version is newer, or A carries an entry the peer lacks), it fetches the delta. Two delta paths are seen. The **commonly observed** one, during live database activity, is the ordinary database-change opcode family flowing on the `0x2E`/`0x2F` second channel: `DBCHANGE_*` (e.g. `0x0956 DBCHANGE_CONTROLLER`), `UPL_ADDED_*` (`0x0971 POINT`, `0x0974 TREND`, `0x0976 TEC`, …), and `UPL_DEL_*` (`0x0961`/`0x0964`/`0x0966`/…) — i.e. the changed records propagate as the same add/delete operations the supervisor uses, addressed peer→peer. [W] The dedicated replication-delta opcodes — `EBLN_REPL_NOTIFY` (`0x4633`, "I have changes"), `EBLN_REPL_CHANGES` (`0x4636`, changed records), `EBLN_REPL_PULL_MORE` (`0x4635`, paging) — are **also a live carrier**, not merely a formal one. A single passive supervisor capture holds 340 `0x4636` frames with bodies of 331–1551 bytes and **none empty** — the supervisor continuously distributing host-table state across the BLN. An earlier reading of this document called them rare and empty-bodied; that was a corpus-wide frame-count artifact and is withdrawn. Both paths are real: the `DBCHANGE_*`/`UPL_ADDED_*`/`UPL_DEL_*` family carries record propagation on the second channel, and the `EBLN_REPL_*` family carries the anti-entropy digest and delta. [W][S]
 4. Each peer that merges the new entry then re-advertises it on its own next round, so the addition **ripples across the entire mesh until every panel and the supervisor converge** — typically within a poll cycle or two given the ~10 s notify / ~30 s poll cadence above. A removed entry lingers as a tombstone for ~24 h before it is reaped, which is also how a deletion propagates without a node that missed the change silently re-adding it.
 
 Because the key is the **exact node-name string**, adding a name that differs only in case or spelling creates a *separate* replicated entry rather than updating the existing one — the capture shows two co-existing supervisor rows differing only in case, each independently versioned and mesh-replicated. Obtaining this roster via `0x4634` is also the pre-auth membership-disclosure path of §17.3.
@@ -1971,7 +1977,19 @@ can both begin `00 03`: read as a value block, `0x0003` ("not found") would fabr
 where the peer actually reported an error. [W] A robust client treats `dir == 0x05` as an
 application-layer "operation failed with code N," distinct from transport-level RST/FIN (connection
 rejected/closed) and from silence (no reply). A 0-byte `dir == 0x01` is a positive acknowledgement,
-not an empty/failed result. [W][I]
+not an empty/failed result — and it is the **majority** shape, not an edge case:
+of 300,985 success responses paired to their requests, **169,462 (56.3%) carry a
+zero-length body**. [W]
+
+**But emptiness is a property of the exchange, not of the opcode**, and a client
+must not key on it. Some opcodes always ack empty — `0x0274 COV_ANNUNCIATE`
+(120,749 of 120,749), `0x0273 COV_DISABLE`, `0x4636`, `0x4635`, `0x0508`,
+`0x4633`. Others always return a body — `0x4640 EBLN_PING`, `0x0981
+UPL_ALL_POINT`, `0x0271 COV_ENABLE`, `0x0220 POINT_LOG_VALUE`. And at least two
+do **both**: `0x0240 POINT_CMD_VALUE` answers empty 32,451 times and with a body
+30 times (a `Name_response` — the point's name and suffix echoed back), and
+`0x4634` answers empty 10,003 times and with a `u32` 13 times (§5.3). Read the
+length; do not infer it. [W]
 
 ### 7.3a The stack's service primitives
 
