@@ -892,6 +892,26 @@ assumption — §5.3 describes `0x4634` as the digest advertisement, not
 necessarily as what the polling timer governs. Either the timer is not this
 opcode's, or this site is configured off-default. **[OPEN]**
 
+**One candidate explanation is now ruled out.** Both timers above have an
+*intrasite* and an *intersite* default, so 60 s could simply have been the
+intersite figure showing up in a mixed site. It is not, and two measurements
+close it off:
+
+| | intervals in band | connections whose **median** is that band |
+|---|---:|---:|
+| `0x4634` at 60 s | 9,652 of 9,805 | **153 of 179** |
+| `0x4634` at 30 s | **4** | 1 |
+| `0x4640` at 10 s | 99,291 of 99,383 | **378 of 426** |
+| `0x4640` at 60 s | 0 | 0 |
+
+There is no second population in either. `EPing` runs at its **intrasite**
+default of 10 s on every connection and never at the 60 s intersite value, which
+establishes that every peer here is intrasite — and an all-intrasite site should
+then show replication at 30 s, not 60 s. So the disagreement is real and is not
+a site-topology artifact: this is one timer at twice its documented intrasite
+default, uniformly, on 153 connections. What remains open is only whether
+`0x4634` is the opcode that timer governs. [W]
+
 **Measure per peer connection, not per node.** A node with several peers emits
 one of these per peer, so a per-node aggregate reads far faster than the
 protocol cadence — for `EBLN_PING` on a node with three or more peers the
