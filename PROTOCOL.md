@@ -4812,6 +4812,14 @@ The boolean run (fields 5–10) is the wire source of the point operating-state 
 
 **They are six independent flags, not a seven-way enumeration — do not model them as one state.** The type system declares six separate `BOOLEAN_` fields and imposes no exclusivity among them, so a point may legitimately report `failed` and `out_of_service` together, and "Normal" is not a value but the absence of all six. A client that collapses the run into a single state field must therefore choose a precedence order of its own, and that order is a local UI decision, not something P2 specifies. [S]
 
+**The vendor's own display confirms the combinations are real.** Its subpoint
+status column shows *"one of five statuses: Alarm, Failed, Out of Service,
+**Alarm/Out of Service**, **Alarm/Failed**"* — two of the five are compound, so
+the underlying condition is a set of flags being rendered, not an enumeration
+being named. It also shows what a client's precedence choice looks like in
+practice: this one surfaces the two combinations it considers worth
+distinguishing and does not attempt all 64. [D]
+
 The *asserted* values remain unconfirmed from the wire and this corpus cannot settle them: across the cached `0x0274` bodies the entire run is zero, because every point reporting was healthy. Confirming which flag carries which meaning needs a capture taken while a point is in each state — the same gap §8.5's layout-precision note records. **[OPEN]**
 
 ### 10.4 The point model (Point_base)
@@ -6402,6 +6410,30 @@ response). [W]
 
 An alarm-setup record (`AP2_Alarm_Setup_Request` / `_Modify` / `_Copy`) configures, per alarm point and per alarm mode: `mode_name` + `mode_suffix`, `normal_acks` (require ack on return-to-normal), `alarmcnt2` (second alarm count), `level_delay`, `mode_delay`, `differential` (f32 hysteresis), and **four destination category bytes** `category0 … category3`. [S] These four categories are the alarm's routing destinations; a system **default destination (000)** receives alarms not otherwise routed, so the effective routing is up to four configured destinations plus the default. [D] A destination is a category container that nodes append themselves to (`AP2_Category_Nodes_Append` / `_Remove`), so an alarm routed to a category reaches every node currently in that category. [S]
 
+**The category record itself, and a clean external check on it.** The structure
+is five fields: [S]
+
+```
+Category = category_id   : UNSIGNED8      -- the destination number
+           description   : TEXT_          -- its descriptor
+           dial_enabled  : BOOLEAN_
+           printing_enabled : BOOLEAN_
+           nrOfnodes_bits : u16 + nodes_bits[]   -- which nodes are in it
+```
+
+A panel's own local destination editor asks an engineer for exactly those five
+things, in that order — destination number, descriptor, printing enabled,
+dialing enabled, and the list of field panels — so the MMI screen and this wire
+record are the same object seen from two sides. [D][S] `dial_enabled` is why
+§3.9 carries a dial-up BLN limit at all: a destination can be a modem.
+
+**And the membership field comes in two forms, which is the addressing split of
+§3.3.1 showing through.** `Category` carries `nodes_bits` — a bitmap, which works
+only where nodes are *numbered*. Its Ethernet counterpart `ECategory` is field-
+for-field identical except that membership is `node_name_list : TEXT_[]`, a list
+of names. A client must pick the form that matches the BLN it is talking to;
+they are not interchangeable and the bitmap has no meaning on an EBLN. [S]
+
 ### 13.5 Controller alarms as digital points
 
 A field controller's own health and discrete fault conditions are surfaced to the BLN as **digital points** carrying the alarm attributes above: an alarmable LDI whose state is the fault, with a proof/debounce window so a momentary glitch does not alarm, and network reporting via COV (`alarm` mask bit, §12.2) or by inclusion in an alarm poll. [D] This is how a controller-level event (a comm-fault, a hardware fault, a returning/failed device state) reaches an operator through the same alarm path as a process-point limit alarm: it is modeled as a digital point and rides the standard alarm and COV machinery rather than a separate channel. [D] The device-level liveness states themselves (`Failed_status`: normal / returning / unknown / failed) drive these point states. [S]
@@ -6812,6 +6844,28 @@ EQS schedules a **zone** (a group of points) into occupancy **modes**, each mode
 ### 15.3.1 SSTO — start-stop time optimization
 
 SSTO is referenced both by PPCL (`SSTO`, `SSTOCOEF` statements, §14.3) and by the EQS SSTO opcode family above. SSTO computes an optimized equipment start time (and night-setback strategy) from learned coefficients so the zone reaches occupied setpoint by the scheduled occupancy time. The `SSTO_GENERAL/START/STOP/NIGHT` four-way split (visible across the setup/look/display opcode rows) corresponds to the four configuration blocks: general parameters, optimized-start, optimized-stop, and night-cycle. [D/S]
+
+**SSTO is adaptive, and that is why it has stored coefficients at all.** The
+vendor describes it as starting heating or cooling as late as possible before
+occupancy and stopping it as early as possible before the zone empties — and,
+crucially, that when it starts or stops too early or too late **the logic
+remembers the error and adjusts**. So the coefficient blocks a client reads or
+writes are not static tuning constants: they are the panel's learned state, and
+overwriting them discards what the zone has learned about its own thermal
+response. A tool that round-trips an SSTO configuration must preserve them
+byte-for-byte rather than re-deriving them from the setpoints. [D]
+
+**The zone model those blocks hang off.** An EQS **zone** is a schedulable
+building resource — typically a room or a floor — and is composed of points plus
+three things: its **operating modes** (the mode states the zone runs in), a
+**command table** (simple on/off control of points scheduled together, optional
+when defining a zone), and the **optimization parameters** above. An **event** is
+an activity — a meeting, a weekday schedule, a cleaning shift — that names the
+zones it affects and the operating mode each must be in. A **schedule** is the
+calendar entry saying when a zone or event starts and stops. That is the
+hierarchy the `0x50xx` opcode families of §15.3 operate on, and it explains why
+zone, command-table, mode-entry and override each get their own
+add/modify/remove/look family. [D]
 
 #### 15.3.2 An EQS zone being created, on the wire
 
