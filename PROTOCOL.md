@@ -6086,27 +6086,137 @@ An analog subpoint converts a raw digitized count to an engineering value by a l
 EngValue = (DigitizedValue × Slope) + Intercept
 ```
 
-`Slope` and `Intercept` are 32-bit big-endian floats fixed by the physical point's sensor/hardware type. [D] `DigitizedValue` is the raw ADC count. [D] A point carries **two** slope/intercept pairs — one for engineering (display) units and one for SI units — so the same digitized reading renders in either unit system; each pair is an independent linear transform from the same raw count. [S/D] The ASDU `Analog_scale` record is exactly `{ slope: f32, intercept: f32 }`; the dual-unit set is two such records plus the eng/SI units strings. [S]
+`Slope` and `Intercept` are 32-bit big-endian floats fixed by the physical point's sensor/hardware type. [D] `DigitizedValue` is the raw ADC count. [D] The ASDU `Analog_scale` record is exactly `{ slope: f32, intercept: f32 }`. [S]
+
+**Where the two constants come from — and why nothing else is applied at run
+time.** They are not measured per reading and not derived by the decoder. They
+are computed once, when the point is defined, from five inputs: the **signal
+range** (the electrical span the device presents — 4–20 mA, 0–10 Vdc,
+3–15 psig), the **device range** (the engineering span that signal represents —
+0–100 %, 0–0.5 in w.c.), the **sensor type** (§11.5.2), the **field panel or FLN
+device type**, and the **unit system** being calculated for. The vendor's
+engineering tooling takes exactly those five and emits the pair, from a lookup
+table keyed by `(device type, sensor type, unit system)` that carries the signal
+and device spans and the resulting slope and intercept together. [D] So every
+range, span and live-zero is already folded into `slope` and `intercept` before
+they reach the wire, and the transform above is the whole of the run-time
+arithmetic — see §11.5.1.1, where applying an offset a second time is the
+specific trap.
+
+**A point carries two pairs, and the pair sits behind a CHOICE.** The same
+digitized reading renders in engineering or SI units, so the scale record is
+doubled, each half with its own COV limit: [S]
+
+```
+scale_                     CHOICE, u8 tag
+  virtual_pt   NULL_       0 B     <- carries no scale record at all
+  physical_pt  20 B
+       eng_units      Analog_scale     slope f32 | intercept f32
+       eng_cov_limit  f32
+       si_units       Analog_scale     slope f32 | intercept f32
+       si_cov_limit   f32
+```
+
+Two cautions, both of which produce a decoder that looks correct on the bench:
+
+- **The `NULL_` arm is not decoration.** A reader that always consumes 20 bytes
+  here desynchronises on the first virtual member it meets, and a virtual member
+  is the common case in a team carrying computed values.
+- **Which tag selects which arm is [OPEN].** Declaration order puts
+  `virtual_pt` first, which would make tag `0` the empty arm — but the
+  `Physical_address_*` CHOICEs pair the same two concepts in the *opposite*
+  order (§10.4.2: there tag `0` is the arm that *has* an address). One of the
+  two inverts the convention and this document cannot yet say which, because the
+  only structure carrying `scale_` is `AP2_MEMBER_DESC_ADD_ANALOG` (0x4002) and
+  **neither it nor a `MEMBER_DESC_UPLOAD` response appears anywhere in the
+  corpus** — 0x4010 is present as 19 requests and no reply. Read the tag; do not
+  assume it. [S][OPEN]
+
+The units *strings* are not in this record. A point's own type (`LAI_type`,
+`LAO_type`, `LPACI_type`) carries a single `Analog_units = { eng_units: TEXT_,
+cov_limit }`, and the analog point-definition body carries the English and SI
+unit strings alongside initial values and alarm limits for both systems. Three
+structures, three scopes — an earlier revision of this section described them as
+one. [S]
 
 The FLN raw-count form is distinct from the BLN f32 value form: on the fieldbus an analog value is a raw integer whose register width is the point's `P1MaxRange` (most commonly 0–255, i.e. an 8-bit count), while the value seen at the BLN layer and in the COV payload is the scaled `f32` (§12.3). [D] Worked example: a digitized count of 1954 with slope 0.03125 and intercept −5.0 yields `1954 × 0.03125 + (−5.0) = 56.0625`, displayed as 56.06. [D]
 
-#### 11.5.1.1 The raw count is not 0–255 on a panel input, and the full scale is not a power of two
+#### 11.5.1.1 The raw count range is a property of the controller family, and neither end of it is 0
 
 §11.5.1 gives the transform and notes that FLN raw counts are commonly 8-bit.
 Panel-resident analog points are different, and the constants are unobvious:
 [D/S]
 
-| Signal class | Full-scale count | Zero offset |
-|---|---:|---:|
-| Analog input, current | 25,600 or 24,576 (hardware-generation dependent) | 3,584 or 6,144 |
-| Analog input, voltage | 25,600 | 3,584 |
-| Analog output | 30,720 | 0 |
+**The count range is a property of the controller family and the signal class
+together**, and neither end of it is 0 or a power of two. These are the raw
+digitized ranges an analog **input** is defined against: [D]
+
+| Controller family | current | voltage | pneumatic |
+|---|---|---|---|
+| MBC | 3,584 … 29,184 → 4–20 mA | 3,584 … 29,184 → 0–10 V | — |
+| MEC | 0 … 30,720 → **0–20 mA** | 3,584 … 29,184 → 0–10 V | — |
+| AHUC | 0 … 30,720 → **0–20 mA** | 3,584 … 29,184 → 0–10 V | — |
+| RCU (P2) | 4,200 … 21,000 → 4–20 mA | 0 … 21,000 → 0–10 V | — |
+| SCU | 800 … 4,000 → 4–20 mA | 0 … 4,000 → 0–10 V | 1,120 … 2,400 → 3–15 psi / 21–103 kPa |
+
+and for an analog **output**: [D]
+
+| Controller family | current | voltage | pneumatic | resistive |
+|---|---|---|---|---|
+| MBC | 0 … 30,720 → 4–20 mA | 0 … 30,720 → 0–10 V | 0 … 30,720 → 0–20 psi / 0–138 kPa | — |
+| MEC, AHUC | 0 … 30,720 → **0–20 mA** | 0 … 30,720 → 0–10 V | — | — |
+| RCU (P2) | 0 … 1,023 → 4–20 mA | 0 … 1,023 → 0–10 V | 42 … 211 → 3–15 psi / 21–103 kPa | — |
+| SCU | 0 … 255 → 4–20 mA | 0 … 255 → **0–16 V** | 0 … 255 → 0–18 psi / 0–124 kPa | 0 … 135 → 0–135 (×1 kΩ) |
+
+A **virtual** point on every family is `0 … 32,767`, identity — no signal, no
+span, and (§11.5.1) no scale record on the wire at all.
+
+**An earlier revision of this section had this wrong in a way worth naming**,
+because the same mistake is easy to make from the conversion constants alone: it
+listed "full-scale count 25,600, zero offset 3,584". **25,600 is the *span*, not
+the full scale.** The MBC current input runs 3,584 … 29,184, and 29,184 − 3,584
+= 25,600. The figure was right, the label was wrong, and the difference matters
+the moment anyone tries to bound a count field: a decoder that rejects counts
+above 25,600 rejects the top 12 % of every MBC analog input. The span is the
+quantity that appears in the generation-conversion ratios of §11.5.1.2, which is
+how it came to be recorded as if it were the maximum.
+
+Three consequences an implementer should carry:
+
+- **Live zero is per family, not per signal.** A 4–20 mA input starts at 3,584
+  counts on an MBC but at 4,200 on an RCU and 800 on an SCU — and at **0** on an
+  MEC or AHUC, whose current inputs are 0–20 mA and have no live zero to encode.
+- **Voltage inputs carry the same 3,584 offset as current on MBC/MEC/AHUC**,
+  even though 0–10 V has no live zero. The offset is a property of the input
+  circuit, not of the 4 mA floor.
+- **The SCU is an 8-bit-class device throughout** — 0…255 on every output,
+  0…4,000 on inputs — and its voltage output spans **16 V**, not 10. That single
+  fact is the whole of the `AOV16` sub-type below.
 
 So a 4–20 mA input spans a raw count of 3,584…25,600 rather than 0…full-scale:
-the zero offset **is** the live-zero of the 4 mA floor, expressed in counts. An
-implementer computing engineering values from raw counts without the offset
-gets a reading that is wrong by the live-zero and right at full scale, which is
-the hardest kind of scaling error to notice.
+the zero offset **is** the live-zero of the 4 mA floor, expressed in counts.
+
+**These constants do not belong in the run-time transform, and putting them
+there is a bug.** §11.5.1's single line is complete on its own: `slope` and
+`intercept` were derived from the signal range when the point was defined, so
+the live-zero is already inside `intercept`. A decoder that reads the table
+above and helpfully "corrects" for the offset —
+`(count − 3584) × slope + intercept` — subtracts the live-zero a second time.
+The result is not wrong by a little at one end: it is low by a **constant**
+`zero_offset × slope` at every count in the range, full scale included, which
+for the common 3,584…25,600 span is **16.3 % of the device range**. A 0–100 %
+point built this way reads −16.3 at 4 mA and 83.7 at 20 mA and is internally
+consistent the whole way, so nothing about the numbers looks broken unless
+someone knows what the reading ought to be.
+
+What the counts in the table are actually for is the other direction — reading a
+raw count when you do *not* have the point's slope and intercept, and
+sanity-checking a pair you do have. A count of 3,584 on a current input is 4 mA
+and therefore the bottom of the device range whatever the engineering units are;
+and a slope that does not satisfy
+`slope ≈ (dev_high − dev_low) / (count_high − count_low)` for its sub-type's
+counts belongs to a different sub-type or a different hardware generation
+(§11.5.1.2).
 
 Analog points carry a **sub-type** finer than the `LAI`/`LAO` distinction of
 §11.2, and the sub-type — not the point type — selects the transform:
@@ -6125,7 +6235,10 @@ A point's slope and intercept are **not portable between hardware
 generations**. Moving a point from one termination generation to another
 requires re-deriving both from the originals, and the vendor's own tooling
 carries a conversion table keyed by `(source sub-type, target sub-type,
-generation)` to do it. Five generations are covered. [S]
+generation)` to do it. Five generations are covered. [S] The controller families
+the scaling data distinguishes are **MBC**, **SCU**, **MEC**, **AHUC**, **RCU**
+(the P2 variant), **FLNC**, and the **MPU**, the last with a table of its own
+(§11.5.2.1). [D]
 
 The conversions have three shapes:
 
@@ -6143,6 +6256,36 @@ The pneumatic and resistive outputs carry their own fixed ratios
 `AOV16`), and current output additionally shifts the intercept by −4 on one
 generation — the 4 mA live zero again, this time in engineering units rather
 than counts.
+
+**Those are not five magic numbers; they are one rule.** Every ratio above falls
+out of the count and device spans in §11.5.1.1:
+
+```
+ratio = (device span, source / device span, target)
+      × (count  span, target / count  span, source)
+```
+
+Check each against the table: [I]
+
+| Constant | Source span | Target span | Reads as |
+|---|---|---|---|
+| `255/30720` | MBC out, 0–20 mA over 30,720 | SCU out, 0–20 mA over 255 | device spans equal → count ratio alone |
+| `10/16 × 255/30720` (`AOV16`) | MBC out, **0–10 V** over 30,720 | SCU out, **0–16 V** over 255 | the SCU voltage output really does span 16 V |
+| `20/18 × 255/30720` (`AOP`) | MBC out, **0–20 psi** over 30,720 | SCU out, **0–18 psi** over 255 | two different pneumatic spans |
+| `135/30720` (`AOR`) | MBC out over 30,720 | SCU resistive, 0–135 over 135 counts | resistive is count-identical, so only the count ratio survives |
+| `3200/25600` | MBC **input**, 3,584…29,184 = 25,600 | SCU input, 800…4,000 = 3,200 | both 4–20 mA, so device spans cancel |
+
+and the `−4` intercept shift is the same reconciliation one level up: **MEC and
+AHUC current channels are 0–20 mA where MBC, SCU and RCU are 4–20 mA**, so
+moving a point between those two groups moves the engineering zero by exactly
+4 mA. It is not a per-generation fudge factor; it is the live zero appearing in
+engineering units because the two families disagree about whether there is one.
+
+The one constant this does not account for is **`25600/24576`**. No family in
+§11.5.1.1's tables has a 24,576-count span, so a sixth input generation exists
+that those tables do not cover — `24,576 = 24 × 1024`, against MBC's
+`25,600 = 25 × 1024`, which makes it look like a near neighbour of the MBC
+rather than a different class. **[OPEN]**
 
 The practical consequence for anyone reading a point database: **a slope and
 intercept are only meaningful alongside the sub-type and the termination
@@ -6163,11 +6306,96 @@ An analog **input** carries a sensor type fixing its physical signal class; an a
 | 5 | thermister100k | 12 | thermister10type3 |
 | 6 | ltype | | |
 
-An `intercept_adjustment` (f32) accompanies the sensor type for field trim of the linear transform (`Analog_sensor = { sensor_type, intercept_adjustment }`). [S]
+The physical signal each class presents: **current** 4–20 mA, **voltage**
+0–10 Vdc, **pneumatic** 3–15 psig. [D] `ltype` is not a sensor technology at
+all — it marks **an analog input terminated on an FLN device rather than on the
+panel**, which is why it has no signal range of its own and why its scaling is
+the FLN device's business (§11.4). [D]
+
+**Do not read a code off a pick-list position.** The codes above are the values
+that appear in the address record on the wire. Engineering tooling presents the
+same sensor set ordered for a human — current first, then thermistor, then
+voltage — and with slightly different granularity: it offers a generic
+*Thermistor* alongside the 10 kΩ, 100 kΩ and 10 k Type-3 entries, and it does
+not offer `resistance` at all. Only `current` happens to land on the same
+number in both. A value transcribed from a configuration screen is not a wire
+code. [D][I]
+
+**Most temperature inputs are already linearised, and §11.5.1.1's count ranges
+do not apply to them.** This is the single most consequential thing in §11.5 and
+it is invisible from the wire, because a linearised input and a raw one carry
+the same `f32`:
+
+| Sensor class on MBC / SCU / MEC / AHUC | eng (°F) pair | SI (°C) pair |
+|---|---|---|
+| thermistor, MEC RTD, nickel (all variants) | slope **1**, intercept **0** | slope 0.5556, intercept −17.7778 |
+| series-1000 (MEC, AHUC) | slope 1, intercept **−0.6** | slope 0.5556, intercept −17.4445 |
+| **RTD on an MBC** — the exception | slope 0.03984, intercept −501.453 | slope 0.02205, intercept −296.3628 |
+
+The first row's engineering pair is the identity, and its SI pair is
+`0.5556 x − 17.7778`, which is exactly `(°F − 32) × 5/9` and nothing else. **For
+these sensors the panel has already done the linearisation and the "raw count"
+is degrees Fahrenheit**; the two `Analog_scale` records are doing unit
+conversion, not signal conversion. Only the MBC's RTD channel — and the
+current/voltage/pneumatic classes generally — carry a genuine count-to-
+engineering transform. A decoder that reasons about the 3,584 live-zero on a
+thermistor input is reasoning about a number that is not there. [D]
+
+**`intercept_adjustment` is lead-wire compensation, not a general trim.**
+`Analog_sensor = { sensor_type, intercept_adjustment: f32 }` (5 B, §10.4.2), and
+the adjustment exists for one purpose: on a resistance sensor the resistance of
+the sensor *leads* adds to the resistance of the sensor, and on a long run that
+is a real temperature error. It is computed from the **wire gauge and the run
+length**, using a per-AWG coefficient: [D]
+
+| AWG | 14 | 16 | 18 | 20 | 22 |
+|---|---|---|---|---|---|
+| coefficient, per foot | 0.03292 | 0.02070 | 0.01302 | 0.00818 | 0.00516 |
+| coefficient, per metre | 0.10798 | 0.06789 | 0.04271 | 0.02683 | 0.01692 |
+
+Two internal checks confirm the reading: each column is **3.280×** the one above
+it, which is feet per metre; and each gauge step is **1.59×** the next, which is
+the resistance ratio of a two-size AWG step. The MEC uses a slightly different
+set for the three heaviest gauges (0.02932 / 0.01844 / 0.01289 per foot),
+converging on the same values at 20 and 22 AWG. The coefficient's *unit* is not
+stated anywhere and is not raw ohms per foot — it is ~13× copper's — so treat it
+as a vendor-calibrated constant rather than a physical one. **[OPEN]** [D]
+
+#### 11.5.2.1 Standard input ranges, and the MPU's two
+
+A sensor's signal range is usually not typed in. The tooling offers a fixed set
+of **standard input ranges**, and picking one fills in both the signal and the
+device span; these nine are the whole set: [D]
+
+| # | Engineering (°F) | SI (°C) | Quantity |
+|---|---|---|---|
+| 1 | 20 … 120 | −6.7 … 48.9 | temperature |
+| 2 | 70 … 220 | 21.1 … 104.4 | temperature |
+| 3 | −30 … 120 | −34.4 … 48.9 | temperature |
+| 4 | −30 … 212 | −34.4 … 100 | temperature |
+| 5 | 200 … 350 | 93.3 … 176.7 | temperature |
+| 6 | −58 … 122 | −50 … 50 | temperature |
+| 7 | −20.2 … 50.1 | −29.2 … 10.1 | dewpoint (`FDP` / `CDP`) |
+| 8 | −55.3 … 114.7 | −48.5 … 45.9 | dewpoint |
+| 9 | 0 … 100 | 0 … 100 | relative humidity (`% RH`) |
+
+The **MPU** is the one controller with a scaling table of its own, and it has
+exactly two ranges, both on `ltype` inputs: [D]
+
+```
+narrow    °F:  0.5    × count            °C:  0.2778 × count − 17.7778
+wide      °F:  1.098  × count − 40       °C:  0.61   × count − 40
+```
+
+The narrow transform reproduces the documented **34–117 °F** span exactly, at
+counts 68 and 234. The wide transform gives −40 °F at count 0 as documented, but
+reaches only 240 °F at count 255 against a documented top of 260 — so either the
+wide range runs past 8 bits or the published figure is the sensor's rating
+rather than the channel's. **[OPEN]** [D]
 
 #### 11.5.3 Enumerated and digital state decoding
 
-For digital and enumerated points the wire/value field carries a small integer **state index**, not a string. The index is resolved for display against a named **text group / state-text set** (the `State_text_table`), stored once per panel as a shared catalog and referenced by name from the point or team member. [S/D] Example sets: 2000 = {Off, On}; 2001 = {Normal, Alarm}; generic sets like {Clean, Dirty}. [D] **On the wire the id is a *signed* 16-bit integer and every observed value is negative** — the per-type defaults `-1`/`-2` of §11.2, then two bands of named groups at `-1002`…`-1018` and `-2003`…`-2018`. A decoder that reads the field unsigned turns every one of them into a meaningless number in the 63,500s. The distribution is not a clean split by point type: LDI points draw exclusively from the `-20xx` band, LDO points predominantly from `-10xx` but from both, and enumerated points from both — so the bands are not "digital versus enumerated" and what separates them is **[OPEN]**. [W] The signedness is corroborated from a second direction: this id is the `enum_type_id` the **ENUM family (0x0401–0x040E)** creates and edits (§9.4), and every one of those bodies types it `i16` — `enum_type : { type_id:i16, type_name, nrOfelements:u16, elements:{ value:i16, value_text }[] }` is the state-text table itself, id and all its value→text pairs. A client that wants the display strings reads them with `AP2_ENUM_TYPE_DISPLAY` (0x0404) or `_LOOK` (0x0405) against the id the point carries. [S] A digital point's present value is encoded as the float `0.0` (OFF) or `1.0` (ON) in the value field (§12.3); an enumerated point's present value is the integer state index carried in that same float field. [D] An implementer renders the value by taking the index and looking it up in the referenced state-text group; the wire never carries the display string for **a value**. [D] **It does carry the whole table, and a client can therefore render points without any vendor file.** The ENUM family transfers them, and one of its opcodes is wire-observed: [W]
+For digital and enumerated points the wire/value field carries a small integer **state index**, not a string. The index is resolved for display against a named **text group / state-text set** (the `State_text_table`), stored once per panel as a shared catalog and referenced by name from the point or team member. [S/D] Example sets: 2000 = {Off, On}; 2001 = {Normal, Alarm}; generic sets like {Clean, Dirty}. [D] **On the wire the id is a *signed* 16-bit integer and every observed value is negative** — the per-type defaults `-1`/`-2` of §11.2, then two bands of named groups at `-1002`…`-1018` and `-2003`…`-2018`. A decoder that reads the field unsigned turns every one of them into a meaningless number in the 63,500s. The distribution is not a clean split by point type: LDI points draw exclusively from the `-20xx` band, LDO points predominantly from `-10xx` but from both, and enumerated points from both — so the bands are not "digital versus enumerated". **Nor is anything else**: see "the bands are allocation blocks" below, where three candidate rules are tested and all three fail. [W] The signedness is corroborated from a second direction: this id is the `enum_type_id` the **ENUM family (0x0401–0x040E)** creates and edits (§9.4), and every one of those bodies types it `i16` — `enum_type : { type_id:i16, type_name, nrOfelements:u16, elements:{ value:i16, value_text }[] }` is the state-text table itself, id and all its value→text pairs. A client that wants the display strings reads them with `AP2_ENUM_TYPE_DISPLAY` (0x0404) or `_LOOK` (0x0405) against the id the point carries. [S] A digital point's present value is encoded as the float `0.0` (OFF) or `1.0` (ON) in the value field (§12.3); an enumerated point's present value is the integer state index carried in that same float field. [D] An implementer renders the value by taking the index and looking it up in the referenced state-text group; the wire never carries the display string for **a value**. [D] **It does carry the whole table, and a client can therefore render points without any vendor file.** The ENUM family transfers them, and one of its opcodes is wire-observed: [W]
 
 ```
 0x040A AP2_ENUM_TYPE_DB_GET
@@ -6189,6 +6417,45 @@ ENUM_TYPE_DISPLAY` and `0x0405 ENUM_TYPE_LOOK` fetch a single table by pattern
 or by name. So the full render path for a digital or enumerated point is: read
 the point's `state_text_table` id (§10.4.1), fetch that table, index it with the
 value. [W][S]
+
+**The catalogue itself, and the two things about it that break decoders.** The
+shipped state-text catalogue holds **346 types and 2,060 levels**. Two
+properties of it are load-bearing: [D]
+
+- **A level's display text is at most 8 characters.** No exception in 2,060
+  levels; the distribution runs 1–8 with a pronounced spike at both ends (325
+  one-character names, 310 eight-character). A renderer can size a state column
+  at 8 and a generator can reject anything longer.
+- **One type in three is sparse.** `VALUE` is drawn from 0…255 but only 93
+  distinct values are ever used, and **118 of the 346 types do not number their
+  levels `0…n−1`** — `CR_CONTROLMODE1` is `{0, 2, 3, 15}`, `MC_HP_FAULTS` is
+  `{187, 188, 189, 204, 205, 206, 207, 255}`. **Index a state-text table by
+  `value`, never by array position.** Position-indexing is correct for the 2-level
+  majority and silently wrong for a third of the catalogue — and wrong in the
+  worst way, because it returns *some* other legitimate state name rather than
+  failing. This is §10.1's sparse-enum rule again, and here it is quantified.
+
+Type sizes are mostly small — 184 of 346 have exactly two levels — but the tail
+is long, up to **77 levels** in one type, so a fixed-size table is not safe
+either.
+
+**The bands are allocation blocks, not a typed namespace.** It is tempting to
+read meaning into `-10xx` versus `-20xx`, and three natural rules were tested
+against the catalogue. All three fail: [I]
+
+| Candidate rule | Result |
+|---|---|
+| `-10xx` is two-state, `-20xx` is multi-state | 74 % vs 61 % two-level — no split |
+| `-10xx` ships every vocabulary in both polarities (`OFF_ON` / `ON_OFF`) | only 46 of 194 have a reversed twin; 2 of 31 in `-20xx` — a tendency, not a rule |
+| `-20xx` exists because a name-length limit was lifted | both bands top out at 16 characters |
+
+There is one real class boundary, and it is at **`-3xxx`**: those 107 types are
+the LonMark/BACnet standard vocabularies, distinguishable by lowercase `name_t`
+spelling, and they are the only band containing types flagged as *not* supported
+on APOGEE. Everything from `-1000` to `-2999` is one flat, APOGEE-supported
+vocabulary that happens to have been allocated in two sittings. **Treat the id
+as opaque and resolve it through the catalogue; nothing about the band is
+decodable.**
 
 > Implementation caution: the TEC-template "PTYPE" field is a **template-local** taxonomy, NOT the §11.2 `Point_type` L-codes and NOT priority values. The 1–4 alignment with LDI/LDO/LAI/LAO is coincidental for those four only. Do not cross-map PTYPE to L-codes. [D]
 >
@@ -8355,6 +8622,27 @@ specific test that would confirm or falsify it.
    shapes per polymorphic opcode and which operation each selects. *Test:* for
    each known-polymorphic opcode, capture every distinct body shape against a lab
    panel and label the operation produced.
+
+7. **CHOICE tag→arm assignment where declaration order is the only evidence.**
+   *Known:* the type system lists a CHOICE's arms in a fixed order, and for most
+   CHOICEs the wire tag is that ordinal. But **the `Physical_address_*` family
+   inverts it** — there tag `0` is `real_addr`, the arm that carries data, and
+   the `NULL_` arm is `1` (§10.4.2). So declaration order is a hypothesis, not a
+   rule, and reading it the wrong way round parses cleanly whenever the two arms
+   are a `NULL_` and a fixed-width record: the decoder consumes the wrong number
+   of bytes only on the *other* tag value, which a single-valued corpus never
+   produces. *Missing:* the tag values for every CHOICE not exercised on the
+   wire. The sharpest case is **`scale_`** (§11.5.1), the virtual/physical
+   selector on a team member's analog scaling: declaration order says tag `0` is
+   the empty `virtual_pt` arm, which is the *opposite* pairing to
+   `Physical_address_*` for the same virtual/physical distinction. Its only
+   carrier, `AP2_MEMBER_DESC_ADD_ANALOG` (0x4002), does not appear in the corpus
+   at all, and `AP2_MEMBER_DESC_UPLOAD` (0x4010) appears as 19 requests with no
+   reply. *Test:* one `MEMBER_DESC_UPLOAD` response for a team containing both a
+   virtual and a physical analog member settles it — the physical member's arm is
+   20 bytes and the virtual member's is zero, so the tag that precedes the
+   20 bytes is the answer. A `POINT_ADD_*` for a virtual analog point read back
+   with `MEMBER_DESC_UPLOAD` would produce it deliberately.
 
 ### Appendix E — Evidence-tag legend and lineage pointer
 
