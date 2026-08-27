@@ -6501,18 +6501,24 @@ Two name-length limits apply, and they are distinct:
 | `HOLIDA` | holiday indicator | [D] |
 | `FAILED` | failure indicator | [D] |
 | `LINK` | BLN link-status point | [D] |
-| **`NODE1` … `NODE99`** | per-node liveness booleans — **the set is reserved to 99** | [D] |
+| **`NODE0` … `NODE99`** | per-node liveness points — one per node address, **100 names reserved** | [D] |
 
 Both the `$`-prefixed and bare forms are reserved: `$LOC1`–`$LOC15` and
 `LOC1`–`LOC15`, `$ARG1`–`$ARG15` and `ARG1`–`ARG15`, and `SECND1`–`SECND7`
 alongside `SECNDS`. None may be used as a point name. [D]
 
-**The liveness point set caps at 99, and that is the only hard node-count
-figure in this document.** It bounds the *liveness model* — a program cannot
-reference a hundredth node's boolean because no such reserved name exists. It
-does **not** by itself establish the capacity of the host/node-name table of
-§5.3, which is a separate structure; treat 99 as the ceiling on
-liveness-addressable nodes and the table's own limit as **[OPEN]**.
+**The liveness point set is `NODE0`–`NODE99` — one hundred names — and that is
+the only hard node-count figure in this document.** It runs from zero, not one,
+which matters for a reserved-name check: `NODE0` is a resident point and must
+not be used as a point name. The vendor's own description is that *"all devices
+or CPUs on the network occupy a node corresponding to its address"*, so the set
+is one name per address across the full 0–99 range of §3.4.4. [D]
+
+It bounds the *liveness model* — a program cannot reference a hundredth node's
+point because no such reserved name exists. It does **not** by itself establish
+the capacity of the host/node-name table of §5.3, which is a separate structure;
+treat 100 as the ceiling on liveness-addressable nodes and the table's own limit
+as **[OPEN]**.
 
 ### 14.3 Statement / keyword vocabulary
 
@@ -6641,10 +6647,21 @@ functions                   built-in functions (MIN, MAX, ROOT-class, etc.)
 ROOT                        square-root operator
 *  /                        multiply, divide
 +  -                        add, subtract
-<  <=  =  >=  >  <>          relational comparison
+EQ NE GT GE LT LE           relational comparison
 AND  NAND                   logical AND / NAND
 OR  XOR                     logical OR / XOR             (lowest)
 ```
+
+**The relational operators are mnemonics, not symbols, and a decompiler that
+emits symbols produces source that will not compile.** The vendor's precedence
+table spells them `EQ`, `NE`, `GT`, `GE`, `LT`, `LE`; no symbolic form (`<`,
+`>=`, `<>`) appears anywhere in the language's own documentation. An earlier
+edition of this table listed the symbols. [D]
+
+`ROOT` is likewise not a prefix function but a **dotted infix operator**,
+written `(value1.ROOT.value2)` — a form worth noting because it is unlike
+everything around it, and a tokenizer that treats `.` as a decimal point or a
+name separator will mis-lex it. [D]
 
 **Built-in functions.** The language provides a small fixed set of numeric functions, callable in any
 expression: the arithmetic/transcendental set **`ROOT`** (square root, also written `SQRT`), **`LN`**
@@ -6712,6 +6729,15 @@ All PPCL operations are AP2 function codes. The enumerate/upload family lives in
 | `0x410A` | `AP2_PPCL_PROGRAM_DISPLAY` | display (decompiled) program source | read | [S] |
 | `0x410B` | `AP2_PPCL_MODIFY_LINE` | modify one line in place | write | [S] |
 | `0x410C` | `AP2_PPCL_COPY_LINE` | copy a line | write | [S] |
+
+**A line range is at most sixteen lines, and that is a different sixteen from
+§14.4's.** The language-level statements these opcodes serve — `ACT` to enable
+and `DEACT`/`DISABL` to disable — each act on *"from 1 to 16 lines of PPCL
+code"*, so `0x4104` and `0x4105` carry a bounded range rather than an arbitrary
+one, and enabling a 40-line block takes three calls. Do not conflate this with
+the 16-slot **parameter** array of a single command statement (§14.4): one
+bounds how many lines an operation may touch, the other how many operands a line
+may carry. Both are 16 and they are unrelated. [D]
 | `0x410E` | `AP2_PPCL_LOOK_LINES` | look at a line range (read interior) | read | [S] |
 | `0x412A` | `AP2_PPCL_PROGRAM_DISPLAY_UNRESOLVED` | display only the unresolved lines | read | [S] |
 | `0x410F`–`0x4111` | `AP2_PPCL_PDL_RESET/INIT/DISPLAY` | peak-demand-limiting control/init/display | mixed | [S] |
