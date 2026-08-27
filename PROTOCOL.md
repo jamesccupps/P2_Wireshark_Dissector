@@ -4493,7 +4493,7 @@ far: [W][S]
 | **`Schedule_days`** | **4** | a **bitmask**, §15.3 — see the warning below |
 | `loggerOn_` | 1 | 2 opcodes, 23 bodies |
 | `Ssto_amd`, `Ssto_desop_value` | 1 each | 2 opcodes, 6 bodies |
-| `Sensor_type` | **1** | **derived, not fitted**: `Physical_address_AI`'s address is `lan + drop + point + Analog_scale + Analog_sensor`, and `Analog_sensor` is `sensor_type + f32`. The wire measures that address at **17 bytes**, and 1 is the only `sensor_type` width that gives 17 — 2 gives 18, 4 gives 20 (§10.4.2) |
+| `Sensor_type` | **1** | originally derived rather than fitted — 1 is the only width giving the wire-measured 17-byte `Physical_address_AI`. **Now directly attested**: the panel's own encoder writes it with the one-byte primitive, masked `& 0xff` (§10.4.2) [F] |
 | `Alarm_mode_type` | **1** | `0x0982` and `0x0983`, 8 bodies each; `0x0983` carries the field **twice**, so a wrong width compounds. Widths 2 and 4 land inside the trailing `DATE_TIME` run and read `0x7e` as an alarm tag. Pinning it made 19 operations decodable — the largest single gain in §10.9 |
 | `Grain_Type`, `Repl_Cmd_Type` | 1 each | **one opcode only** (`0x4636`, 60 bodies) — unique for it, uncorroborated |
 | `Baud_rate` | **2** | `0x099f`, 60 bodies, and the record carries its own oracle — see below |
@@ -5226,11 +5226,34 @@ exactly** — DI 5, DO 5, AO 12, and AI 17, the last only if `Sensor_type` is on
 byte, which is the *only* width that yields 17 (2 gives 18, 4 gives 20). That
 agreement is what licenses the fifth. [W][S]
 
-**`_PA` is a correction.** It was carried here as 5 B by analogy with `_DI` and
-`_DO`, and never tested: `Physical_address_PA` is used by exactly one structure,
-`LPACI_type`, and **no `lpaci` point occurs anywhere in the corpus** — 0 of
-5,807 walked points. It is 9 bytes, because a pulse-accumulator address carries
-a `gain` f32 that a digital one does not.
+**`_PA` is a correction, and it is now confirmed from the panel.** It was
+carried here as 5 B by analogy with `_DI` and `_DO`, and never tested:
+`Physical_address_PA` is used by exactly one structure, `LPACI_type`, and **no
+`lpaci` point occurs anywhere in the corpus** — 0 of 5,807 walked points. It is
+9 bytes, because a pulse-accumulator address carries a `gain` f32 that a digital
+one does not. **The controller's own encoder writes exactly that**, in this
+order and with these widths — `u8 lan, u8 drop, u16 point, f32 gain, u8
+count_both_edges` — so the one width in this table that no capture could reach
+is attested by the firmware that produces it. [F]
+
+**The same encoder settles the tag, and it settles it the way §10.4.2 feared.**
+The `Physical_address_*` encoder writes the tag byte and then emits the address
+**only when that tag is zero**:
+
+```c
+FUN_802e9a30(buf, tag);            // the tag, one byte
+if (tag == 0) {                    //  <-- tag 0 IS the real_addr arm
+    write u8 lan; write u8 drop; write u16 point;  ...
+}
+```
+
+So for this CHOICE family **tag `0` selects the arm that *has* an address**, and
+the empty `virtual_addr` arm is `1` — the inverse of the ordinary convention.
+That was inferred here from arm order and wire widths; it is now read off the
+code. It is also the reason §11.5.1's `scale_` tag assignment stays **[OPEN]**:
+`scale_` pairs the same virtual/physical concepts in the *opposite* declaration
+order, and this section proves the declaration order is not the thing to trust.
+[F]
 
 The distinction the flattening destroyed is also semantic and worth keeping: the
 digital-output boolean is `inverted` and the digital-input one is
@@ -7641,10 +7664,17 @@ twelve sweeps captured: [W]
 records carries `baud_rate` 9600, `port_type` 0, all four booleans clear, and an
 empty `descriptor`. So the **widths** are pinned by exact consumption but the
 **value spaces** are not exercised at all: `Port_type` has a second member that
-never appears, the booleans are never seen set, and no port on this panel runs
-at any other rate. A decoder built from this will walk any port record
-correctly and has been shown nothing about what the fields mean when they are
-non-zero. **[OPEN]** [W]
+never appears, and no port on this panel runs at any other rate. A decoder built
+from this will walk any port record correctly and has been shown nothing about
+what the fields mean when they are non-zero. **[OPEN]** [W]
+
+**Two of the four booleans are not fields at all.** The panel's port encoder
+writes `highlight_enabled` and `autobye_enabled` as **literal zero** — not read
+from the port record, written as a constant — while `alarm_printing_enabled` and
+`report_printing_enabled` are fetched from the object. So those two reading zero
+in all 60 captures is not a sample of a quiet site; **this firmware cannot emit
+anything else**. A decoder should carry them as reserved-zero rather than as
+state, and a virtual panel should write zero. [F]
 
 One thing worth noting for §17: this is an **unauthenticated read that
 enumerates a panel's console and management ports by name** — the Telnet port
