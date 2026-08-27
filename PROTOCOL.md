@@ -100,7 +100,7 @@
   - [11.5 Analog scaling, sensor types, and enumerations](#115-analog-scaling-sensor-types-and-enumerations)
 - [12. Change-of-Value (COV)](#12-change-of-value-cov)
   - [12.1 The subscription opcode set](#121-the-subscription-opcode-set)
-  - [12.1.1 When subscriptions are registered — once, at session establishment](#1211-when-subscriptions-are-registered--once-at-session-establishment)
+  - [12.1.1 When subscriptions are registered — concentrated at session establishment](#1211-when-subscriptions-are-registered--concentrated-at-session-establishment)
   - [12.2 The COV class mask and subscription type](#122-the-cov-class-mask-and-subscription-type)
   - [12.3 The annunciate / value payload](#123-the-annunciate--value-payload)
   - [12.4 Command priority (carried in the COV payload)](#124-command-priority-carried-in-the-cov-payload)
@@ -6178,7 +6178,7 @@ The four COV opcodes are `AP2 Function Code` values (names and numbers from the 
 
 The `AP2_COV_ENABLE` request body (`AP2_COV_Enable_Request`) is `{ name_response, cov_mask }` — the addressed point plus the subscription's class mask; the response (`AP2_COV_Enable_Response`) is `{ point: All_points, lenum_address, point_extension2 }`, i.e. the panel returns the full current point object as the subscription's first report. [S] `AP2_COV_DISABLE` is `{ name_response, cov_mask }`; `AP2_COV_DELETE_STUB` is `{ name_response }`. [S] `AP2_COV_ANNUNCIATE` carries a count-prefixed array of `Annunciate_request` records (§12.3). [S] An annunciate push uses the request encoding (direction byte `0x00`, §6.3) because it is unsolicited; the peer acknowledges with a direction-`0x01` empty success. [W]
 
-### 12.1.1 When subscriptions are registered — once, at session establishment
+### 12.1.1 When subscriptions are registered — concentrated at session establishment
 
 A subscriber registers its COV subscriptions **in the opening seconds of a
 session**, not continuously. This is measured rather than inferred: a 16.7-hour
