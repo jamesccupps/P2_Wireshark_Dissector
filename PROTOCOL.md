@@ -854,6 +854,31 @@ BLN**. All values in seconds. [D]
 | Holdback delay | 10 | 10 |
 | Tombstone lifetime | 86400 | 86400 |
 
+**Measured against the wire.** Five opcodes run on a fixed period, measured per
+peer connection across 621,268 frames — every one with a median absolute
+deviation of **0.00 s**: [W]
+
+| Opcode | Period | Intervals | Connections |
+|---|---:|---:|---:|
+| `0x4636` `EBLN_REPL_CHANGES`, `0x4635` `EBLN_REPL_PULL_MORE` | 1.00 s | 147 / 111 | 16 / 8 |
+| `0x4640` `EBLN_PING` | **10.00 s** | 99,383 | 366 |
+| `0x010C` `CABINET_DISPLAY` | 30.01 s | 102 | 17 |
+| `0x4634` `EBLN_REPL_PULL` | 60.01 s | 9,805 | 168 |
+
+`EBLN_PING` at 10.00 s is the EPing row of the table above, confirmed on the
+wire. `EBLN_REPL_PULL` at 60 s per peer does **not** match the 30 s
+"replication polling period", and the discrepancy is left open rather than
+reconciled: the mapping from that documented timer name to this opcode is an
+assumption — §5.3 describes `0x4634` as the digest advertisement, not
+necessarily as what the polling timer governs. Either the timer is not this
+opcode's, or this site is configured off-default. **[OPEN]**
+
+**Measure per peer connection, not per node.** A node with several peers emits
+one of these per peer, so a per-node aggregate reads far faster than the
+protocol cadence — for `EBLN_PING` on a node with three or more peers the
+aggregate median is 0.01 s, which is the emission burst, not the timer. Every
+period above is per connection.
+
 The intra-site column is what a single-site capture shows, and it is the column
 this document's observed timings match. The scaling rule applies only to the
 inter-site timers, and the guidance is to leave the defaults alone **below 50
@@ -3720,7 +3745,7 @@ with nothing left over: [S][W]
 |---|---|---|---|
 | `0x0606 CAL_DB_GET_OTHER` | `User_profile` | 12 B | **exact** |
 | `0x09AB UPL_ALL_UC` | `Team_search` | 11 B | **exact** |
-| `0x0954 DBCHANGE_TREND` | (no body) | 0 B | **exact** (§16.1.1) |
+| `0x0954 DBCHANGE_TREND` | (no body) | 0 B | **exact** (§16.1.2) |
 | `0x4208 TEC_DEFINITION` | `User_profile` + `Team_search` | 25 B | 23 consumed, 2 over |
 
 ```
@@ -6020,7 +6045,7 @@ supervisor**, each answered with a bare success. The panel does not push what
 changed; it pushes *that* its `<section>` changed, and the supervisor then reads
 the content back with the matching `UPL_ADDED_<section>`. This is not particular
 to equipment scheduling — it holds for **every** `DBCHANGE_*` opcode in the
-corpus, across ten database sections (§16.1.1). This is why the `DBCHANGE`/`UPL_ADDED` opcode pairs exist
+corpus, across ten database sections (§16.1.2). This is why the `DBCHANGE`/`UPL_ADDED` opcode pairs exist
 at all, and it means a client that wants change notification must implement a
 **server** role for these opcodes, not merely a reader. [W]
 
@@ -6050,7 +6075,40 @@ The transfer surface is the `UPL_*` / `DBCHANGE_*` / `*_DB_GET` / `*_DB_REPLACE`
 
 The replication-direction mechanics (notify/pull/changes push) live in the `0x46xx` EBLN family and are specified in §5.3 (replication). [S]
 
-#### 16.1.1 `DBCHANGE_*` is a data-less notification, and the reader pulls
+#### 16.1.1 The supervisor uploads the whole database as one ordered sweep
+
+What §16.1 describes as a surface, the supervisor drives as a **single periodic
+sweep**. On the busiest connection in the corpus it issues **611 requests in
+about 8 seconds** and repeats the whole thing every **90–135 seconds**, always
+in the same order: [W]
+
+```
+UPL_ALL_PORT -> UPL_ALL_PROGRAM -> TEAM_DESC_UPLOAD -> MEMBER_DESC_UPLOAD
+-> REPORT_DESC_UPLOAD -> UPL_ALL_TEC xN -> UPL_ALL_UC -> UPL_ALL_LON
+-> UPL_ALL_POINT xN                       <- the bulk of the sweep
+-> UPL_ALL_ALARM_SETUP -> UPL_ALL_ALARM_MODE -> UPL_ALL_ALARM_MESSAGE
+-> UPL_ALL_TREND xN -> UPL_ALL_PPCL xN
+-> UPL_ALL_EQS_ZONE xN -> UPL_ALL_EQS_CMD_TABLE xN
+-> UPL_ALL_EQS_MODE_SCHED xN -> UPL_ALL_EQS_OVERRIDE
+-> UPL_ALL_SSTO_GENERAL xN -> _START xN -> _STOP xN -> _NIGHT xN
+-> UPL_ALL_PARTNER -> HOA_MAP_LOOK -> CAL_DB_GET_OTHER
+```
+
+Each `xN` is the cursor pagination of §6.7 — the opcode is re-issued carrying
+the previous record's name until the panel signals end-of-list — which is why
+the point and TEC sections dominate the frame count.
+
+**Do not read a per-opcode cadence off this.** Every `UPL_ALL_*` opcode shows
+the *same* inter-burst interval (90 s for those at the head of the sweep, 102 s
+for those after the long `UPL_ALL_POINT` run) because they are not independently
+scheduled; those numbers are their positions in one sweep. The schedulable unit
+is the sweep.
+
+For an implementer building a panel: it must answer a ~600-request burst within
+seconds **while** continuing to meet its 10-second `EPing` obligation on every
+peer connection (§5.0). The two run concurrently on separate connections. [W]
+
+#### 16.1.2 `DBCHANGE_*` is a data-less notification, and the reader pulls
 
 The `DBCHANGE_*` family is not a change *feed*. It carries no payload at all.
 
