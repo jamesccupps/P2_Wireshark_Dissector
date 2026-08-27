@@ -3952,6 +3952,7 @@ far: [W][S]
 | `Total_rate` | 1 | inside the totalizer arm, §10.4.5 |
 | `time_`, `trend_cov_` | 4 each | the two `Trend_type` arms; consumption across 5 and 2 opcodes (161 / 86 bodies) |
 | `Occurrence` | 1 | `u8` in §15.3's `0x0989` decode; consumption narrows `0x5020`/`0x0979` to this or 4 and §15.3 chooses |
+| `TEC_valid`, `Failed_status` | 1 each | the `0x0986 UPL_ALL_TEC` body, 59 of 60 consuming exactly once its absent trailing field is allowed for |
 | **`Schedule_days`** | **4** | a **bitmask**, §15.3 — see the warning below |
 | `loggerOn_` | 1 | 2 opcodes, 23 bodies |
 | `Ssto_amd`, `Ssto_desop_value` | 1 each | 2 opcodes, 6 bodies |
@@ -3992,6 +3993,23 @@ a long tail of exotica: the single most-used undeclared type,
 `Point_extension2`, appears in **89** structures. Widths for the ones that
 matter are pinned from the wire in §10.4.2. Regenerate every count in this
 section with `s164_typecensus.py`. [S]
+
+**Three rules a decoder needs that the structure library does not state.**
+Each was found by a body that would not consume, and together they take request
+bodies from 91% to **99.2%** decoded (2,494 of 2,515): [W]
+
+| Rule | Evidence |
+|---|---|
+| **A trailing declared field may be absent.** A body ending exactly on a field boundary with fields still to come is truncated, not malformed — the library describes a **later firmware revision than a given panel emits**. Report what was not received; do not reject the body. | `0x0986 UPL_ALL_TEC` omits its final `is_bacnet` in **59 of 60** bodies; `0x010C CABINET_DISPLAY` stops short in all 60 |
+| **Request bodies are padded with zeros to a fixed size** — **220 bytes** at this site. Content of 2 to 65 bytes pads to the same total. | 174 bodies across 8 opcodes; `0x040A`'s entire declared body is one `SHORT_` and the frame carries `f8 2a` then 218 zeros |
+| **Some responses carry one or two bytes the library does not declare**, consistently per opcode. | 43 bodies: `0x0291` always +2, `0x0987` and `0x5038` always +1. **[OPEN]** — an undeclared trailing field, not padding |
+
+On the second: **[OPEN]** whether the constant is the body or the whole frame.
+Every observed instance is one supervisor talking to one panel, so the routing
+slots are the same length throughout and the two readings cannot be told apart
+here. At a site with different node-name lengths a frame-sized buffer would give
+a different body size — so an implementer should treat 220 as *this site's*
+observation, not a protocol constant.
 
 Two structural conventions recur. **CHOICE / tagged union:** several structures begin with a `tag_ : UNSIGNED_8` followed by one alternative per possible type (e.g. `All_points`, `Alarm_object`, `Physical_address_Lenum`); the tag selects which one alternative is actually present on the wire. **Counted array:** a `nrOf<x> : UNSIGNED_16` immediately precedes its `<x> : <T>[]` array. [S]
 
