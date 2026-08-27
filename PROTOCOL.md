@@ -1488,10 +1488,30 @@ limit of §3.4.2, and the source-identity slot runs longest because of its
 
 | slot | role | distinct values | longest |
 |---|---|---:|---:|
-| 0 | BLN name | 137 | see below |
+| 0 | BLN name | 137 | 255 — **all six over-30 values are our own probes**, below |
 | 1 | destination node name | 119 | **16** |
-| 2 | BLN name (doubled) | 138 | see below |
+| 2 | BLN name (doubled) | 138 | 255 — same six |
 | 3 | source node identity | 159 | **21** |
+
+**The documented 30-character limit cannot be tested from outside, and it is
+worth saying why.** Exactly six distinct slot strings in the corpus exceed 30
+characters, at lengths 32, 63, 64, 127, 128 and 255 — powers of two and their
+off-by-ones, each appearing exactly twice because the BLN name is doubled into
+slots 0 and 2. All six are `0x4640` frames from a single capture whose name
+marks it a probe, and no P2 frame returned on the reverse tuple for any of
+them.
+
+That is **not** evidence the panel enforces a length limit. A 255-character BLN
+name is, by construction, *not this site's BLN name* — so the BLN-correctness
+gate of §17.2 rejects it on identity long before any length check could matter,
+and the two variables are confounded. The rejection is what §6.4's wrong-BLN
+result already predicts, and it would look the same at 31 characters as at 255.
+
+A length limit on the BLN-name slot can therefore only be tested from the
+inside, by configuring an over-length BLN name on a panel and observing whether
+the firmware accepts it. Treat 30 as a **documented** bound (§3.4.1) that
+vendor traffic never approaches — the longest real name here is well under
+it — rather than as an enforced wire constraint. [W]
 
 On a request (`dir == 0x00`, including an unsolicited push) the slot order is:
 
