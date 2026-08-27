@@ -6444,7 +6444,7 @@ An alarm carries an **alarm priority** that classifies the urgency of the *event
 | | Trouble | [D] |
 | lowest | Maintenance | [D] |
 
-The alarm report carries this priority as a 1-byte value (1–6) and may append a 4-character class label (e.g. `URGT`, `MAIN`, `TROB`). [W] The point's runtime `alarm_state` (§12.3.1) is one of `normal / alarm / high_alarm / low_alarm / trouble`. [S]
+The alarm report carries this priority as a 1-byte value (1–6) and may append a 4-character class label (e.g. `URGT`, `MAIN`, `TROB`). [W] The type system's `Alarm_priority_enum` has **seven** members, `priority_0` through `priority_6`, and the extra one reconciles cleanly: the control language's `ALMPRI` function — which reads a point's alarm priority from inside a program — is documented as returning **1 through 6**, the same range the report carries. `priority_0` is therefore the unassigned value, not a seventh severity, and a decoder should render it as "none" rather than inventing a band for it. [D][S] The point's runtime `alarm_state` (§12.3.1) is one of `normal / alarm / high_alarm / low_alarm / trouble`. [S]
 
 ### 13.3 Analog limits, transitions, and deadband
 
@@ -7332,11 +7332,35 @@ A controller **application** is a pre-engineered point/control template loaded i
 
 | Element | Form | Tag |
 |---|---|---|
-| Application number | numeric (the catalog is ~1000+ applications) | [D] |
+| Application number | numeric; the catalog runs **1,043 applications** across nine libraries — see below | [D] |
 | Application revision | 4-character revision string | [D] |
 | Scope | controller class (TEC / MSTP / LAB / FHOOD, etc.) | [D] |
 | Resolution | application# + class → an ordered list of subpoints (each with type, reference INPUT/OUTPUT, slope/intercept/units) | [D/S] |
 | Family tag | `Application_family` enum: `eqs`=5, `ppcl_program`=7, `tec_na`=16, `uc`=17, `tcu`=18, `lon`=19, `p1_pxc`=20, `bacnet_mstp`=21, `tec_eu`=257, plus `pdl_area`/`pdl_load_group`/`decision_table`/`loop` (1–4) | [S] |
+
+**The catalog, counted.** Vendor documentation enumerates **1,043
+applications** in **nine libraries**, numbered from 600 to 8102: [D]
+
+| Library | Applications | Number range |
+|---|---:|---|
+| `APOGEE_INT` | 440 | 2700–6095 |
+| `APOGEE_CUSTOM` | 179 | 604–8102 |
+| `APOGEE_PTEC` | 108 | 6511–6727 |
+| `APOGEE_LABS` | 107 | 600–6792 |
+| `APOGEE_P1` | 76 | 2020–2899 |
+| `APOGEE_BTEC` | 50 | 2510–2599 |
+| `APOGEE_ATEC` | 38 | 2473–6637 |
+| `APOGEE_LON` | 23 | 8020–8089 |
+| `APOGEE_P1SEC` | 22 | 2120–2192 |
+
+Two properties of that numbering matter to an implementer. **Numbers are
+effectively unique across the whole catalog** — 1,042 distinct values across
+1,043 rows, the single repeat being two similarly-named variants inside one
+library, which reads as a documentation artifact rather than a real collision.
+But **the library ranges interleave rather than partition**: `APOGEE_CUSTOM`
+spans 604–8102 and `APOGEE_LABS` 600–6792, so several libraries occupy the same
+numeric territory. A decoder can therefore resolve an application *by number*,
+and must **not** try to infer its library or device class *from* the number.
 
 A **live device advertises its application number at subpoint 2** (subpoint 0 = bundled controller point, subpoint 1 = controller address, subpoint 2 = application). A client reading subpoint 2 learns which application a controller runs, and therefore which subpoint-list template applies (cross-ref §9 — FLN/sub-device browse, and §11 — point model). [D]
 
