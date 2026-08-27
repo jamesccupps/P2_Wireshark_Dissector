@@ -96,6 +96,7 @@
   - [11.1 The three point layers](#111-the-three-point-layers)
   - [11.2 Logical point types](#112-logical-point-types)
   - [11.3 Physical-subpoint composition](#113-physical-subpoint-composition)
+  - [11.3.1 Hand/Off/Auto — a point can be taken away from the panel at the terminal](#1131-handoffauto--a-point-can-be-taken-away-from-the-panel-at-the-terminal)
   - [11.4 Point teams (.ptd) and the FLN subpoint model](#114-point-teams-ptd-and-the-fln-subpoint-model)
   - [11.5 Analog scaling, sensor types, and enumerations](#115-analog-scaling-sensor-types-and-enumerations)
 - [12. Change-of-Value (COV)](#12-change-of-value-cov)
@@ -5973,6 +5974,54 @@ Each physical subpoint is one of four base hardware classes; analog classes are 
 | **DO** (digital output) | — | energized / de-energized; latched (maintained) or pulsed (momentary) | [D] |
 
 The wire/ASDU representation of a subpoint's address is one of the `Physical_address_{AI,AO,DI,DO,PA}` variants, each a tagged union of `real_addr` (a hardware-terminated channel) versus `virtual_addr` (NULL — no hardware), plus the `Physical_address_Lenum` variant (`not_present` versus `present`) carried alongside LENUM points. [S] The tag byte selects the variant; an implementer reads the tag first, then the variant body.
+
+#### 11.3.1 Hand/Off/Auto — a point can be taken away from the panel at the terminal
+
+A physical termination may carry a **manual override switch**, and when an
+operator throws it the point stops being controlled by the panel. P2 exposes
+this in three connected places, and a client that ignores it will report a
+commanded value the equipment is not following.
+
+**On a point.** `Control_status` (§10.3) carries the state directly:
+
+| value | meaning |
+|---|---|
+| 0 | `remote` — normal, panel-controlled |
+| 1 | `tool_override` |
+| 2 | `by_priority` |
+| 3 | `config_only` |
+| 4 | `input_only` |
+| **5** | **`manual_override`** — the termination's own switch is in control |
+| 6 | `undefined` |
+
+The language exposes the same condition as the **`HAND`** status indicator,
+which a control program tests to ask *"is this point currently being controlled
+through a manual override switch?"* — so `HAND` in a program and
+`manual_override` on the wire are the same fact. [D][S]
+
+**As a panel-wide map.** The switch positions are also readable as a table in
+their own right, through a small opcode family: [S]
+
+| Opcode | Operation |
+|---|---|
+| `0x5354` | `HOA_MAP_LOOK` — read the map |
+| `0x5355` / `0x5351` | `HOA_MAP_ADD` / `HOA_MAP_MODIFY` |
+| `0x5356` | `DBCHANGE_HOA_MAP` — replication notification |
+
+`Hoa_Map` is a `u16` count followed by `Hoa_Map_Entry` pairs. **Two structures
+describe an entry and they transpose the field types** — `Hoa_Map_Entry` is
+`switch_number : UNSIGNED8` + `point_number : CHAR_`, while `HOA_assignment` is
+`point_number : UNSIGNED8` + `switch_number : CHAR_`. Both are two bytes, so the
+framing is unaffected and a decoder cannot detect the difference; only the
+labels swap. Which is authoritative for a given opcode is **[OPEN]**, and a tool
+that reports switch and point the wrong way round will do so silently. [S]
+
+**What the corpus shows, which is mostly absence.** `HOA_MAP_LOOK` is
+wire-observed — 27 requests, every one a bare scope tag with no parameters, so
+the read takes no arguments — but **no response was captured**, and across 5,807
+walked points **`manual_override` occurs zero times**. Nothing here is in HAND.
+`tool_override` does occur, on 15 points, so the neighbouring states are real.
+The map's response layout is therefore `[S]` only. [W]
 
 ### 11.4 Point teams (.ptd) and the FLN subpoint model
 
