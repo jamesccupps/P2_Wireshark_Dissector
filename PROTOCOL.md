@@ -4209,10 +4209,26 @@ produces a plausible value rather than an error. Where both appear in one
 structure, validate against the field's own enum, not against "is this a
 sensible small integer". [S]
 
-**Enum field widths are not in the structure library, and they have to be.** The
-library gives an ordered field list for all 1,144 structures, but for an enum
-field it gives only a type name — so **field order is fully specified and field
-width is not**, and a decoder cannot be built from the library alone.
+**The catalog is a flattening, and it drops nested types.** The 1,144-structure
+figure counts the *named* types the vendor system declares. Types declared
+**inside** another — the lowercase, trailing-underscore names like `real_addr_`,
+`use_proof_` and the sixteen `All_points` arms — survive the flattening as a
+field's type name with no definition attached, which is why so many structures
+appeared to reference something undeclared. They are declared; read directly,
+the type system holds **277 further definitions**, and recovering them closed
+the largest gaps in this document (§10.4.1, §10.4.2, §10.9).
+
+The recovery was validated before it was used, against the one thing already
+known independently: the five `real_addr_` variants. Four had been measured on
+the wire, painfully, and **all four reproduce exactly**; the fifth had never
+been measured and is corrected (§10.4.2). Where a definition and the wire
+disagree, the wire wins and the disagreement is a finding — but here they do
+not disagree.
+
+**Enum field widths are still not in the structure library, and they have to
+be.** For an enum field the system gives only a type name — so **field order is
+fully specified and field width is not**, and a decoder cannot be built from the
+type system alone.
 **Fifty-three** distinct enum types appear as fields. The widths pinned so
 far: [W][S]
 
@@ -4237,6 +4253,7 @@ far: [W][S]
 | **`Schedule_days`** | **4** | a **bitmask**, §15.3 — see the warning below |
 | `loggerOn_` | 1 | 2 opcodes, 23 bodies |
 | `Ssto_amd`, `Ssto_desop_value` | 1 each | 2 opcodes, 6 bodies |
+| `Sensor_type` | **1** | **derived, not fitted**: `Physical_address_AI`'s address is `lan + drop + point + Analog_scale + Analog_sensor`, and `Analog_sensor` is `sensor_type + f32`. The wire measures that address at **17 bytes**, and 1 is the only `sensor_type` width that gives 17 — 2 gives 18, 4 gives 20 (§10.4.2) |
 | `Alarm_mode_type` | **1** | `0x0982` and `0x0983`, 8 bodies each; `0x0983` carries the field **twice**, so a wrong width compounds. Widths 2 and 4 land inside the trailing `DATE_TIME` run and read `0x7e` as an alarm tag. Pinning it made 19 operations decodable — the largest single gain in §10.9 |
 | `Grain_Type`, `Repl_Cmd_Type` | 1 each | **one opcode only** (`0x4636`, 60 bodies) — unique for it, uncorroborated |
 | `Baud_rate` + `Port_number` + `Port_type` | **4 together** | co-occur in `0x099f`, so only their **sum** is measured here; the split is **[OPEN]** — but see the note below, which names a one-field frame that would settle it |
@@ -4723,30 +4740,35 @@ trusts it *and* falls through to a neighbour mislabels them. Neither of the four
 is wire-observed here, so the failure would not show up in testing against this
 corpus either.
 
-**Two of those four are only a spelling away, and the difference matters.**
-`LFMSSL_type` and `LFMSSP_type` *are* fully declared — eight and nine fields
-each, state-text table, on/stage delays and three or four `Physical_address_DO`
-subpoint addresses. Only the resolver cannot reach them. `ldao_` and
-`ppcl_lai_` have no declared structure at all. So the arms divide three ways,
-and the division is what an implementer needs rather than the count: [S]
+**None of the four is actually undeclared — the extraction lost them.** The
+structure catalog of §10.1 is produced by flattening the vendor type system, and
+a nested type flattens to a bare name with no definition attached. Read back out
+of the type metadata directly, all four are there:
 
-| status | arms | what is needed |
+| arm | what the type system declares | so |
 |---|---|---|
-| **Decodable today** — 7 | `ldi` `ldo` `lai` `lao` `l2sl` `lenum` `lpaci` | nothing; six are wire-observed here and `lpaci` is declared but unseen |
-| **Blocked on one thing** — 7 | `looap` `l2sp` `looal` `lfssl` `lfssp` `lfmsl` `lfmsp` | the width of **`use_proof_`**, the payload arm of the `Proof_option` CHOICE that every one of them ends with |
-| **Undeclared** — 2 | `ldao` `ppcl_lai` | a structure definition; the library has none |
+| `lfmsl_`, `lfmsp_` | `LFMSSL_type` (8 fields), `LFMSSP_type` (9) | present; only the **double S** defeats the naming rule |
+| `ppcl_lai_` | `{ pb, lai : LAI_type }` — it **reuses `LAI_type`** outright | decodable with no new information at all |
+| `ldao_` | `{ pb, ldao : LDAO_type }` where `LDAO_type` is declared with **zero fields** | an `ldao` point is the base and nothing more |
 
-**`use_proof_` is the single highest-leverage unknown in the point model.**
-Pinning that one anonymous field takes the point types a decoder can handle from
-**7 of 16 to 14 of 16**, and it is the top entry in §10.9's register at 48
-operations blocked.
+The same recovery settles `use_proof_`, which gated the seven proofed arms and
+was the largest single blocker in the document at 48 operations:
 
-It cannot be settled from this corpus, and the reason is not a gap in the
-analysis: **zero of 5,807 walked points are of any type that carries
-`proof_option`.** Only six of the sixteen point types exist at this site at all.
-A proofed point is a start/stop output with feedback — a fan or pump starter
-with a status contact — so what is needed is a capture from a site that has one,
-not more work on this one. [W]
+```
+use_proof_  =  physical_address_DI : Physical_address_DI    (CHOICE: 1 B or 6 B)
+               point_proof_delay   : Point_proof_delay      (proof_delay u16
+                                                             + proof_status)   3 B
+```
+
+so **4 bytes for a proofed point with no physical proof input, 9 with one** — it
+has no single width, which is why no fixed-width search could ever have found
+it. The content is exactly what the name promises: the address of the contact
+that reports the point actually did what it was told, and how long to wait
+before deciding it did not.
+
+**All sixteen arms are now decodable**, six of them wire-observed here and ten
+resting on the type system alone. That is the state to hold in mind when reading
+§10.9: the arms stopped being the document's bottleneck. [S]
 
 And what precedes the arm is `Point_base`, common to every point: [S][W]
 
@@ -4889,9 +4911,42 @@ distinct layouts are wire-measured: [W]
 
 | CHOICE | `real_addr_` | layout |
 |---|---:|---|
-| `_DI` / `_DO` | **5 B** | FLN, drop, point u16 BE, inverted flag |
+| `_DI` / `_DO` | **5 B** | FLN, drop, point u16 BE, one boolean |
 | `_AI` | **17 B** | FLN, drop, point u16 BE, **slope f32, intercept f32**, 5 B |
 | `_AO` | **12 B** | FLN, drop, point u16 BE, **slope f32, intercept f32** |
+| `_PA` | **9 B** | FLN, drop, point u16 BE, **gain f32**, one boolean |
+
+**Field by field.** The five variants are declared separately in the vendor type
+system — the extraction that produced §10.1's structure catalog flattens a
+nested type to a bare name, which is what made them look like one field with
+three widths. Read back out of the type metadata they are: [S]
+
+| enclosing CHOICE | `real_addr_` fields | width |
+|---|---|---:|
+| `Physical_address_DO` | `FLN_lan_number` u8 · `FLN_drop_number` u8 · `FLN_point_number` u16 · `inverted` bool | 5 |
+| `Physical_address_DI` | … · `normally_closed` bool | 5 |
+| `Physical_address_AO` | … · `analog_scale : Analog_scale` | 12 |
+| `Physical_address_AI` | … · `analog_scale` · `analog_sensor : Analog_sensor` | 17 |
+| `Physical_address_PA` | … · `gain` f32 · `count_both_edges` bool | 9 |
+
+with `Analog_scale = slope f32 + intercept f32` (8 B) and
+`Analog_sensor = sensor_type + intercept_adjustment f32` (5 B).
+
+**Four of these five were already wire-measured, and all four reproduce
+exactly** — DI 5, DO 5, AO 12, and AI 17, the last only if `Sensor_type` is one
+byte, which is the *only* width that yields 17 (2 gives 18, 4 gives 20). That
+agreement is what licenses the fifth. [W][S]
+
+**`_PA` is a correction.** It was carried here as 5 B by analogy with `_DI` and
+`_DO`, and never tested: `Physical_address_PA` is used by exactly one structure,
+`LPACI_type`, and **no `lpaci` point occurs anywhere in the corpus** — 0 of
+5,807 walked points. It is 9 bytes, because a pulse-accumulator address carries
+a `gain` f32 that a digital one does not.
+
+The distinction the flattening destroyed is also semantic and worth keeping: the
+digital-output boolean is `inverted` and the digital-input one is
+`normally_closed`. Same width, same position, different meaning — a decoder that
+labels both "inverted" is right about the bytes and wrong about the point. [S]
 
 ```
 a digital output      03 01 00 07 01
@@ -5517,9 +5572,9 @@ Of the **455 operations** that have a request and/or response structure:
 
 | | operations |
 |---|---:|
-| **Decodable** from widths this document pins | **293 (64%)** |
-| Blocked on at least one unstated width or unpinned CHOICE | 162 |
-| distinct blocking types | **84** |
+| **Decodable** from widths this document pins | **352 (77%)** |
+| Blocked on at least one unstated width or unpinned CHOICE | 103 |
+| distinct blocking types | **51** |
 
 **The blockers are concentrated, and a few are worth far more than the rest.**
 "Blocks" counts operations the type appears in; "alone" counts operations for
@@ -5528,19 +5583,30 @@ immediately:
 
 | blocker | blocks | alone | what it is |
 |---|---:|---:|---|
-| `use_proof_` | 48 | 7 | the payload arm of the `Proof_option` CHOICE — and it gates **7 of the 16 point-type arms** (§10.4.1), the largest single lever in the document |
-| `ldao_`, `ppcl_lai_` | 41 each | 0 | the two `All_points` arms the library never declares (§10.4.1) |
-| `BACnetYes_` | 17 | 5 | payload arm of the `IsBacnet` CHOICE |
 | `Trend_type` (CHOICE) | 14 | 6 | a 3-arm CHOICE, so the tag→arm mapping genuinely matters |
 | `Baud_rate` | 11 | 6 | see §10.1 — one `CABINET_SET_*_BAUDRATE` frame settles it |
+| `LON_extension_` | 10 | 0 | LonWorks member description — a different fieldbus |
+| `Duct_type` (CHOICE) | 8 | 0 | 3 arms |
+| `Device_type` | 7 | **7** | now the highest single-fix in the table |
+| `User_access_*`, `User_command_priority`, `Language_ID` | 7 each | 0 | the user-account family, which travels together |
+
+**What is no longer here is the point of the table.** Its first two editions
+were topped by `use_proof_` at 48 operations and the `All_points` arms at 41
+each, and those are gone — not measured, but *recovered*: the vendor type system
+declares them and the extraction that built §10.1's catalog had flattened them
+away (§10.4.1, §10.4.2). Nothing left blocks more than 14 operations, and the
+remaining families are peripheral to the point model: LonWorks, user accounts,
+serial port settings.
 
 **The register predicts its own gains, which is the check that it works.** Its
 first run named `Alarm_mode_type` as blocking 19 operations and being the *only*
 thing missing from all 19. Pinning it (§10.1, 1 byte) moved the total from 274
-to **293 — exactly the 19 predicted**, and took the reference implementation
-from 3,838 to 3,855 bodies with no regression. The table above is therefore a
-work queue, not a scoreboard: `use_proof_` at 48 blocked and 7 alone, and the
-four unobserved `All_points` arms at 41 each, are what is worth attacking next.
+to **293 — exactly the 19 predicted**. Recovering the flattened nested types
+then moved it to **352**, and closed the whole `All_points` arm family at once.
+Through all of it the reference implementation went 3,838 → 3,856 bodies and
+never regressed — which matters, because a "decodable" verdict that quietly
+broke a working parse would be worse than no register at all. Treat the table
+as a work queue, not a scoreboard.
 
 **Read this against the parse rate, not instead of it.** A reference
 implementation consumes 95.1% of the bodies in the corpus, and the two figures
