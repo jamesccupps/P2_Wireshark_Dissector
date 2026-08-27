@@ -1643,7 +1643,28 @@ in the first time it reaches a peer:
    IP/APOGEE revisions = **ASCII** (above) — via the vendor's per-revision `STRING_TYPE`. [S][D]
 4. **Select dialect.** The generation selects the message-class dialect — **modern `0x34`/`0x2F`** for
    the newer-firmware generation, **legacy `0x33`/`0x2E`** otherwise (§6.2). The selector reduces to a
-   single bit driven by the stored per-peer generation, not by anything on the wire. [W][I]
+   single bit driven by the stored per-peer generation, not by anything on the wire. **Measured across
+   the corpus, and it holds:** [W]
+
+   | | pairs | mixing the two dialects |
+   |---|---:|---:|
+   | source→destination pairs carrying a data dialect | 762 | **34** |
+   | …carrying a second-channel frame | 362 | **0** |
+   | …carrying a peer carrier `0x29`/`0x2A` | 857 | **0** |
+
+   The 34 are not counter-examples. **Twenty-nine mix by exactly one frame**, the
+   rest by two to five, and the largest — eighteen — is in a capture named for a
+   supervisor enumeration test: they are our own scanner probing both dialects,
+   not a peer alternating. **728 of 762 pairs never mix at all.**
+
+   The generations also agree between the two channels: of the nodes emitting
+   exactly one data dialect and exactly one second-channel class, **263 of 263**
+   pair `0x33` with `0x2E` and `0x34` with `0x2F`, with **zero** disagreements.
+
+   Note the unit. A *node* may well emit both `0x33` and `0x34` — 34 of 461
+   sources do — because a supervisor speaking to a mixed fleet uses each peer's
+   dialect. Group by the **pair**, never by the sender, or the mixed-fleet
+   supervisor looks like a protocol violation. [W]
 5. **Cache and reuse.** The record is stored against the peer and reused for every subsequent frame;
    it is refreshed only when the peer's firmware identity changes. [I]
 
