@@ -4237,6 +4237,7 @@ far: [W][S]
 | **`Schedule_days`** | **4** | a **bitmask**, §15.3 — see the warning below |
 | `loggerOn_` | 1 | 2 opcodes, 23 bodies |
 | `Ssto_amd`, `Ssto_desop_value` | 1 each | 2 opcodes, 6 bodies |
+| `Alarm_mode_type` | **1** | `0x0982` and `0x0983`, 8 bodies each; `0x0983` carries the field **twice**, so a wrong width compounds. Widths 2 and 4 land inside the trailing `DATE_TIME` run and read `0x7e` as an alarm tag. Pinning it made 19 operations decodable — the largest single gain in §10.9 |
 | `Grain_Type`, `Repl_Cmd_Type` | 1 each | **one opcode only** (`0x4636`, 60 bodies) — unique for it, uncorroborated |
 | `Baud_rate` + `Port_number` + `Port_type` | **4 together** | co-occur in `0x099f`, so only their **sum** is measured here; the split is **[OPEN]** — but see the note below, which names a one-field frame that would settle it |
 
@@ -5030,7 +5031,31 @@ one width — none admits two, none admits none.** [W]
 | `std_digital_` | **38 B** | `ldi`, `l2sl` | anchor; and independently `ldo` alarmed tail 44 − unalarmed 6 |
 | `std_analog_` | **47 B** | `lai` | anchor, 44 bodies |
 | `enhanced_analog_` | **55 B** | `lai` | anchor, 3 bodies |
-| the other five | — | not observed here | **[OPEN]** |
+| `enhanced_digital_` | **48 B** | digital | **weaker** — solved on the alarm-mode uploads, see below |
+| the other four | — | not observed here | **[OPEN]** |
+
+**A fourth arm, and it is not anchored the way the first three are.** The
+`0x0982 UPL_ALL_ALARM_SETUP` and `0x0983 UPL_ALL_ALARM_MODE` responses both end
+in `alarm_object`, so once every other field in them is pinned (see
+`Alarm_mode_type` in §10.1, settled in the same pass) the arm width follows by
+subtraction. Two distinct bodies in each carry tag `4`:
+
+| solved from | widths giving an exact consume on every body |
+|---|---|
+| `0x0982 Upl_All_Alarm_Setup_Response` | **48** — unique |
+| `0x0983 Upl_All_Alarm_Mode_Response` | 48 **or** 55 |
+| intersection | **48** |
+
+The two structures have different field lists, so a compensating error would
+have to survive both — but this rests on **four bodies**, against 54 for the
+arms above, and `0x0983` alone would not distinguish 48 from 55. Treat it as
+pinned-but-thin: adding it took the reference implementation from 3,838 to
+3,855 bodies with no regression, and it is the value to try first, not a
+measurement of the same standing as the anchored three. [W]
+
+The size is at least coherent with its neighbours — `std_digital_` 38 →
+`enhanced_digital_` 48 is +10, against `std_analog_` 47 → `enhanced_analog_` 55
+at +8, so "enhanced" costs 8–10 bytes in both families.
 
 **Inside an arm.** The first 24 bytes of all three are three `DATE_TIME` (§8.3.4)
 — `time_of_current_state`, `time_of_first_alarm`, `time_of_acknowledgment` — and
@@ -5467,9 +5492,9 @@ Of the **455 operations** that have a request and/or response structure:
 
 | | operations |
 |---|---:|
-| **Decodable** from widths this document pins | **274 (60%)** |
-| Blocked on at least one unstated width or unpinned CHOICE | 181 |
-| distinct blocking types | **87** |
+| **Decodable** from widths this document pins | **293 (64%)** |
+| Blocked on at least one unstated width or unpinned CHOICE | 162 |
+| distinct blocking types | **86** |
 
 **The blockers are concentrated, and a few are worth far more than the rest.**
 "Blocks" counts operations the type appears in; "alone" counts operations for
@@ -5480,10 +5505,17 @@ immediately:
 |---|---:|---:|---|
 | `use_proof_` | 48 | 7 | the payload arm of the `Proof_option` CHOICE |
 | `ldao_`, `lfmsl_`, `lfmsp_`, `ppcl_lai_` | 41 each | 0 | the four `All_points` arms **never observed here** (§10.4.1) |
-| `Alarm_mode_type` | 19 | **19** | alarm-mode enum width — the single highest-value fix in the table |
 | `BACnetYes_` | 17 | 5 | payload arm of the `IsBacnet` CHOICE |
 | `Trend_type` (CHOICE) | 14 | 6 | a 3-arm CHOICE, so the tag→arm mapping genuinely matters |
 | `Baud_rate` | 11 | 6 | see §10.1 — one `CABINET_SET_*_BAUDRATE` frame settles it |
+
+**The register predicts its own gains, which is the check that it works.** Its
+first run named `Alarm_mode_type` as blocking 19 operations and being the *only*
+thing missing from all 19. Pinning it (§10.1, 1 byte) moved the total from 274
+to **293 — exactly the 19 predicted**, and took the reference implementation
+from 3,838 to 3,855 bodies with no regression. The table above is therefore a
+work queue, not a scoreboard: `use_proof_` at 48 blocked and 7 alone, and the
+four unobserved `All_points` arms at 41 each, are what is worth attacking next.
 
 **Read this against the parse rate, not instead of it.** A reference
 implementation consumes 95.1% of the bodies in the corpus, and the two figures
