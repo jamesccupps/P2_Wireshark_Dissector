@@ -2233,6 +2233,12 @@ sections. This is the whole sequence, from TCP connect to steady state. [W][S]
    That one read fixes both the dialect to frame in and how names are encoded
    for that peer, permanently (§6.6). Do not blind-probe `{0x33, 0x34}`.
 
+   > You do **not** need to decode the whole block to do this. `revstring` is
+   > **field 1** — the first `TEXT_` TLV in the body — so the generation is
+   > three bytes and a string into the response. §10.9 lists this response as
+   > not fully decodable, which is true of the other fifty fields and
+   > irrelevant here.
+
 6. **Hold the connection and keep it alive.** Re-send `0x4640` every **10.0 s**
    (§5.1). Sessions here are permanent: 24 of 24 substantive sessions ran an
    entire 16.7-hour capture with no reconnect (§7.3). Open once and keep it.
@@ -5720,6 +5726,16 @@ part, and every case falls into one of two kinds:
   to a run of consecutive opcodes, one frame each, carrying none of the fields
   the operation declares. All 33 such frames originate from two research hosts
   and none from a supervisor or panel. They say nothing about the document.
+
+**A "blocked" verdict is about the whole body, and that can mislead.** The
+register asks whether *every* field of an operation can be turned into named
+bytes; it cannot express "the part you need is fine." `CABINET_DISPLAY`
+(`0x010C`) is the clearest case — its response is listed as blocked, and the
+fields responsible are BACnet and port-configuration sub-blocks near the end,
+while `revstring` is **field 1** and the whole point of the read for most
+clients (§7.3.1, §10.5). Read a blocked verdict as "do not assume you can walk
+this body generically", not as "this operation is undocumented"; where a section
+of §10 describes an opcode in prose, that description is the authority.
 
 ### 10.10 The full structure set is enumerable
 
