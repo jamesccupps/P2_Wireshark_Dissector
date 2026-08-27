@@ -2105,11 +2105,27 @@ These 2-byte codes appear as the `dir == 0x05` error tail in the corpus. Distrib
 | Wire code | Meaning | How established | Tag |
 |---|---|---|---|
 | `0x0003` | **not found** — the named object does not exist on the panel (also returned for an unrecognized-opcode probe) | wire behaviour and the vendor error catalog agree | [W][D] |
-| `0x00AC` | **not supported** — the function code is unused on this panel, **or is specific to a different firmware revision** | wire behaviour and the vendor catalog agree; the revision case is documentary only | [W][D] |
-| `0x0002` | **invalid command** — the command is not valid for the addressed object (seen on `POINT_CMD_ALARM 0x0244` and on `CMD_ALARM_DISABLE 0x0247` addressed to a point name that does not exist; the documented example is commanding a non-virtual LDI or LAI point) | wire behaviour and the vendor catalog agree | [W][D] |
+| `0x00AC` | **not supported** — the function code is unused on this panel, **or is specific to a different firmware revision** | wire behaviour and the vendor catalog agree, **and the revision case is now firmware-attested** — see below | [W][D][F] |
+| `0x0002` | **invalid command** — the command is not valid for the addressed object (seen on `POINT_CMD_ALARM 0x0244` and on `CMD_ALARM_DISABLE 0x0247` addressed to a point name that does not exist; the documented example is commanding a non-virtual LDI or LAI point). **Also returned for an over-length `0x0136 P2_ROUTE`**, see below | wire behaviour and the vendor catalog agree, plus firmware | [W][D][F] |
 | `0x0009` | **already exists** — a define collided with a record already present | vendor catalog; the single wire observation answers `0x0540` | [D][W] |
 | `0x0E11` | **FLN: invalid drop number** — the addressed FLN device's drop number is invalid (seen answering `POINT_ADD_LAI 0x0204`) | vendor catalog | [D][W] |
 | `0x0E12` | **FLN: device failed** | vendor catalog | [D][W] |
+
+**Where `0x00AC` comes from, read off the panel.** A controller does not hold
+one opcode table. It holds **at least eight**, each a list of
+`{u16 internal_code, u16 ap2_opcode}` records with its own count, and it picks
+between them at dispatch time on a per-peer selector value. An incoming opcode
+is matched against the **second** field of each record; when the selected table
+has no matching entry, the panel writes `0x00AC` into the response and stops.
+So "not supported" is not a single global judgement about the function code —
+**it is the answer from one particular translation table**, which is exactly why
+the same opcode can be refused by one panel and answered by another. The
+revision reading of this error was documentary until now; it is the structure
+the firmware actually implements. [F]
+
+The same function special-cases `0x0136 AP2_P2_ROUTE` ahead of any table lookup
+and enforces its length bound inline — payload ≤ 249 bytes, total ≤ 253 (§6.8) —
+writing **`0x0002`** if the frame exceeds it. [F]
 | `0x0E15` | **physical point not commandable** — the point cannot process commands (seen on `POINT_CMD_VALUE`) | wire behaviour and the vendor catalog agree | [W][D] |
 
 **`0x0E10`–`0x0E17` is the FLN error band.** Every code in it reports a fault in
