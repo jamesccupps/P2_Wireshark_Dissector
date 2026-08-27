@@ -7997,6 +7997,37 @@ does not sort as a number** — the SCU series runs `12.4`, `12.41`, `12.5`,
 not "12.41 > 12.6". Compare revisions component-wise as strings-of-digits, or a
 panel at 12.9 sorts below one at 12.41. [D]
 
+#### 16.5.1 What a panel actually runs
+
+Useful context for anyone modelling panel behaviour, and none of it is
+guessable from the wire: [F]
+
+- **The control processor is a Motorola 68000, and the operating system is
+  pSOS+** — the Integrated Systems real-time kernel, banner `PSOS+ S68000
+  V2.0.E`, copyright 1988–1992, with its configuration symbols (`KC_PSOSCODE`,
+  `KC_RN0SADR`) present in the image. Confirmed two ways: the banner appears in
+  26 of 42 shipped images, and **28 of 42 disassemble coherently as 68000** and
+  not at all as PowerPC.
+- **Two images are PowerPC**, and they are the large ones — the 3.2 MB `V1` and
+  the 2.5 MB French MEC. Under PowerPC they decode at 40% and 11% instruction
+  density with `blr` rates of 0.38 and 0.42; under 68000 they decode at 0.0%
+  and 0.1%. The lineage therefore spans two instruction sets, which is exactly
+  why §22.4's dispatch table being byte-identical across both is evidence that
+  it is protocol *data* rather than compiled code.
+- **A third of the images are packed** and decode as neither architecture. The
+  split is not by family but by revision: `FLNC2p5`/`MBC2p5` decode at 34%,
+  while `flnc2p5p2`/`MBC2p5p2` — the very next patch level, same size class —
+  decode at 5%.
+
+Why an implementer should care: a pSOS+ task model explains the panel's
+observed timing more honestly than a generic "it is busy" would. The **10 s
+`EPing` cadence with a 0.00 s median absolute deviation** (§5.0, §7.3.1) is a
+kernel timer tick, not a polling loop; the **~600-request database sweep
+answered in ~8 seconds while heartbeats continue on other connections** (§16.1.1)
+is separate tasks on separate priorities rather than one loop multiplexing. A
+virtual panel that services both from a single thread will pass a functional
+test and fail a timing one. [F][I]
+
 **Firmware-keyed compatibility knobs.** Two legacy compatibility settings are gated by firmware identity: [D]
 
 - **Legacy P2 Host ID field** — an older host-identity field retained for back-compatibility with pre-IP supervisors.
