@@ -1109,7 +1109,9 @@ field-panel delete first. [W]
 
 The `0x464A`–`0x4650` block is the EBLN replication diagnostic set. None of
 these values appears in the supervisor-side `AP2_Function_Code` enum except
-`0x464C`, and none occurs in ordinary traffic — a supervisor never issues them.
+`0x464C`, and none occurs in ordinary traffic — **this** supervisor never
+issues them, across the whole corpus. Whether another supervisor product or a
+maintenance tool does is untested.
 They are nonetheless implemented: every one below answered `dir=0x01` **success**
 with a distinct structured body opening with the standard `SYST` scope preamble.
 
@@ -1256,7 +1258,7 @@ followed by an opcode-specific body. [W]
 | Offset | Field | Type | Value/Notes | Tag |
 |---|---|---|---|---|
 | 0 | `total_len` | u32 BE | Total frame length, **including these 4 bytes** (self-inclusive). | [W] |
-| 4 | `msg_type` | u32 BE | High three bytes always `0x00 0x00 0x00`; low byte is the message-class discriminator (§6.2). | [W] |
+| 4 | `msg_type` | u32 BE | High three bytes `0x00 0x00 0x00` in **all 621,268 trusted frames, without exception**; low byte is the message-class discriminator (§6.2). | [W] |
 | 8 | `sequence` | u32 BE | Per-connection request sequence; echoed verbatim in the matching response (§6.5). | [W] |
 | 12 | `dir` | u8 | Direction byte: `0x00` request/push, `0x01` success, `0x05` error (§6.3). | [W] |
 | 13 | `slot[0]` | ASCIIZ | BLN name. | [W] |
@@ -1508,7 +1510,7 @@ for example `P2SCAN|5033` or `DCC-SVR|5034`. The `|PORT` portion is part of the 
 string* — a `HOST|PORT` disambiguator that lets one host present distinct identities — and is **not**
 a network-layer port indicator and **not** a field delimiter. [W] Decisive evidence: a supervisor
 stamps `DCC-SVR|5034` into `slot[3]` in thousands of frames captured on a **5033-only** link,
-and the literal `5033` never appears in any slot. The same suffixed identity rides whatever TCP port
+and the literal `5033` appears in no slot of any frame in the corpus. The same suffixed identity rides whatever TCP port
 carried the frame. [W] Handling: when **building** a frame, emit the full literal identity including
 the suffix and do not split on `|`; when **parsing**, accept both the suffixed and bare forms —
 responses and routing-table entries frequently return the bare `NAME` without the suffix. [W]
