@@ -59,6 +59,8 @@
   - [7.2 Success vs error responses](#72-success-vs-error-responses)
   - [7.3a The stack's service primitives](#73a-the-stacks-service-primitives)
   - [7.3 Connection and session model](#73-connection-and-session-model)
+    - [7.3.1 Session establishment, in order](#731-session-establishment-in-order)
+    - [7.3.2 Response timing, measured](#732-response-timing-measured)
   - [8.1 The string TLV](#81-the-string-tlv)
 - [8. Body Encoding Primitives](#8-body-encoding-primitives)
   - [8.2 Scope tag and command priority](#82-scope-tag-and-command-priority)
@@ -687,7 +689,7 @@ Beneath an individual panel hangs a Field Level Network — a sub-bus of field c
 
 FLN device classes are enumerated by the vendor `FLN_Device_Type` set: `TEC` (terminal equipment controller), `TCU`, `UC` (unitary controller), `PXM`, `DPU`/`MPU`, `P1BIM` (P1 Bus Interface Module), `GATEWAY`/`FLOAT_GATEWAY`, `GLOBAL_IO`, and `FSCS`. [S]
 
-An implementer reaches FLN data by establishing a session to the parent panel (§ handshake) and issuing the FLN browse/enumerate opcodes of the `0x09xx` upload family (`UPL_ALL_TEC`, etc.; see §9 and §10). FLN-scoped operations ride a session-carrier message class on the wire (§6). The panel returns the FLN device's point data on behalf of the field controller; there is no direct P2 transport to an FLN device. An FLN point is selected by its drop number on the addressed FLN plus its subpoint index — this is the lowest level of the LAN/Drop/Address tuple (§3.3) and the FLN-device tail of the named-scope hierarchy (§3.4). [W][S][I]
+An implementer reaches FLN data by establishing a session to the parent panel (§7.3.1) and issuing the FLN browse/enumerate opcodes of the `0x09xx` upload family (`UPL_ALL_TEC`, etc.; see §9 and §10). FLN-scoped operations ride a session-carrier message class on the wire (§6). The panel returns the FLN device's point data on behalf of the field controller; there is no direct P2 transport to an FLN device. An FLN point is selected by its drop number on the addressed FLN plus its subpoint index — this is the lowest level of the LAN/Drop/Address tuple (§3.3) and the FLN-device tail of the named-scope hierarchy (§3.4). [W][S][I]
 
 ### 3.9 Documented topology limits
 
@@ -1333,7 +1335,12 @@ further bytes to complete the frame. A single TCP segment may carry several P2 f
 frame may span multiple segments; a receiver MUST buffer across segment boundaries until a whole
 frame has arrived. [W] An implementation should reject any frame whose declared `total_len`
 exceeds a sane ceiling (for example 65536 bytes) before buffering, to bound memory against a
-malformed or hostile length prefix. [I]
+malformed or hostile length prefix. [I] It should equally reject one that is
+too **small**: 13 header bytes plus four NUL terminators is 17, and a request
+adds two opcode bytes for 19, so any `total_len` below that cannot describe a
+valid frame and a reader that subtracts without checking will underflow. No
+frame in the corpus comes close — the observed range is **31 to 1,622 bytes**,
+median 85 — but the floor is a property of the format, not of the traffic. [W]
 
 #### 6.1.2 Annotated hex example
 
@@ -1780,7 +1787,7 @@ cursors and a `more_data : BOOLEAN_` field for exactly this). [S]
 maximum P2 data packet" is a vendor *connection-test ping* figure, not a limit on how large a single
 P2 frame may be. [D] On the wire a single P2 frame's `total_len` is bounded only by the header's u32
 length field (implementations cap at a sane ceiling); the largest single **legitimate** frame observed
-in the corpus has `total_len` ≈ **1,587 bytes** — roughly a **1,530-byte body** of packed
+in the corpus has `total_len` = **1,622 bytes** — a **1,570-byte body** of packed
 `TLV(name)+value` records plus the 13-byte header and the NUL-terminated routing slots. (A raw census
 maximum of 65,536 B is a stream-desynchronization artifact, not a real frame.) Large multi-record
 read/trend responses arrive as one large frame, not as a 256-byte-segmented exchange. [W]
@@ -1813,15 +1820,26 @@ response returns the next object's record. To walk a list the client re-issues t
 previous response's object name until the panel returns end-of-list. A controller with a long point
 list (e.g. an AHU returning consecutive ~1514-byte records) is walked the same way — each response is
 one near-MTU frame and the **next** record is fetched by cursor, not by a continuation bit. Across
-every `UPL_ALL_*` capture the panel kept each response to a single frame (frame ≤ ~1,587 B) and the client
+every `UPL_ALL_*` capture the panel kept each response to a single frame (frame ≤ 1,622 B) and the client
 advanced by cursor; the data-channel more-follows flag was **not observed firing**. [W] The codec
 *has* a more-follows mechanism [S] and the `EBLN_REPL_*` replication bodies use explicit segment
 cursors (above), but for ordinary `0x33`/`0x34` reads the on-wire pattern is cursored request/response
 pagination capped near one MTU.
 
-**[OPEN]** Whether a single object whose record exceeds the ~1,587 B frame ceiling triggers the
-codec's frame-level more-follows flag (and at what byte) is still unpinned — no single record that
-large was captured; every large result was continued by cursor instead. [S][OPEN]
+**[OPEN]** Whether a single object whose record exceeds the largest observed
+frame triggers the codec's frame-level more-follows flag (and at what byte) is
+still unpinned — no single record that large was captured; every large result
+was continued by cursor instead. [S][OPEN]
+
+**Do not read the Ethernet MTU as the boundary.** A P2 frame is not capped near
+1,514 bytes: **128 frames in the corpus exceed it**, running to 1,622, in both
+dialects and across five captures, each one arithmetically exact
+(`13 + slots + body = total_len`). 122 of the 128 are responses and 6 are
+`0x4636` replication requests. So a P2 frame routinely spans more than one
+Ethernet segment and a receiver *must* reassemble across TCP segment boundaries
+(§6.1.1) — the MTU is a property of the link, not a protocol limit, and the
+pagination described above is a *cursor* convention rather than a size ceiling
+the codec enforces. [W]
 
 P2 segmentation is **distinct** from the BACnet-side Transport Segment Management (TSML) layer
 (High/Low halves, per-TSM `invokeID`/`userID`, `ReqACK`, out-of-order `expected/received`
@@ -1882,7 +1900,7 @@ stripped by a lower layer this code does not contain.
 
 > **A note on the ~256-byte figure.** §6.7 records, correctly, that the ~256-byte
 > number in vendor connection-test material is a *ping* size and not a maximum
-> P2 data-packet cap — TCP frames run to ≈1,587 bytes. That stands. But a
+> P2 data-packet cap — TCP frames run to 1,622 bytes. That stands. But a
 > **253-byte cap, enforced in code**, now exists on this link, and the proximity
 > is suggestive: the vendor figure may describe this encoding's frame limit
 > rather than anything about TCP. Offered as a plausible origin, not a
@@ -2162,8 +2180,14 @@ substantive traffic and all 24 run the entire capture** — every one opens with
 **0.1 minutes** of the start, every one is still open at the end, and all 24 are
 open *simultaneously* at the midpoint. There is not a single reconnect. The
 steady state is a permanently-established mesh, so a client should open its
-connections once and keep them, and a panel should expect to hold a couple of
-dozen concurrent P2 sessions indefinitely. [W]
+connections once and keep them. [W]
+
+**Size a panel from the per-listener figure, not this one.** The 24 above is the
+whole capture — every session between every pair of nodes — and sizing a
+listener from it would be the wrong denominator. What one panel actually holds
+is measured in §3.9: a peak of **9 concurrent peers on 18 sockets**, which in
+those captures is every other node on the BLN at once. Expect roughly two
+sockets per peer, and expect them to stay open. [W]
 
 > **A trap worth naming, because it produced a phantom finding.** Dividing a
 > capture's connection count by its duration does *not* give a reconnect rate —
@@ -2173,7 +2197,59 @@ dozen concurrent P2 sessions indefinitely. [W]
 > capture also shows 2,393 single-frame tuples against those 36 real sessions,
 > so a raw tuple count is not a session count either.
 
-#### 7.3.1 Response timing, measured
+#### 7.3.1 Session establishment, in order
+
+Everything below is stated elsewhere in this document; what was missing is the
+*order*, and a responder cannot be written from facts scattered across five
+sections. This is the whole sequence, from TCP connect to steady state. [W][S]
+
+1. **Connect.** Open TCP to the peer's listener — `5033` for a field panel
+   (§4.1). A supervisor's listener is deployment-specific (§2.1.2); do not infer
+   it from a `|PORT` identity suffix (§6.4).
+
+2. **Send `0x4640` (`EBLN_PING` / IdentifyBlock) as the first frame.** There is
+   no separate handshake opcode: establishment *is* this exchange (§6.2). Frame
+   it on the **second-channel** class matching the peer's generation — `0x2E`
+   legacy, `0x2F` modern (§6.6) — with `dir = 0x00`, slots `[0]` and `[2]` both
+   the BLN name, `[1]` the destination node name, `[3]` your own identity. The
+   body is the `eBLN_Node` block of §10.6: three name TLVs then exactly 16 bytes.
+
+3. **The BLN name is the gate, and it is checked before anything else.** A
+   wrong BLN name draws a **TCP RST** from a panel or a graceful **FIN** from a
+   supervisor listener, before any application processing and with no node-table
+   side effect (§17.2). Nothing else in the frame is examined — not the
+   identity, not the body.
+
+4. **A correct BLN name is admitted, and the reply tells you which kind of
+   peer you are.** A `slot[3]` identity already in the receiver's peer list draws
+   a short (~48-byte) second-channel response — effectively a peer offer back.
+   A novel identity draws the longer data-dialect response *and writes a
+   Permanent node-table entry at your IP* (§5.3.3, §6.2). Registration is gated
+   by BLN-correctness, not by being served data: the data-service identity check
+   is a separate, later gate.
+
+5. **Learn the peer's generation once, then stop guessing.** Issue
+   `CABINET_DISPLAY` (`0x010C`, §10.5) and classify from the returned revision.
+   That one read fixes both the dialect to frame in and how names are encoded
+   for that peer, permanently (§6.6). Do not blind-probe `{0x33, 0x34}`.
+
+6. **Hold the connection and keep it alive.** Re-send `0x4640` every **10.0 s**
+   (§5.1). Sessions here are permanent: 24 of 24 substantive sessions ran an
+   entire 16.7-hour capture with no reconnect (§7.3). Open once and keep it.
+
+7. **Expect the reverse connection.** The pair is two connections, one per
+   direction (§7.3), so a conformant node also *listens* and repeats steps 3–4 as
+   the receiver.
+
+**Role asymmetry is real and will bite a symmetric implementation.** A
+panel-initiated `EBLN_PING` into a supervisor's `5033` may be accepted at TCP
+and answered with **zero payload bytes and a FIN** while that same supervisor
+answers its own outbound pings on 10.0 s — 984 such connections in 25 minutes at
+one observed supervisor (§5.1). Do not treat "the TCP connection was accepted"
+as "the session was established"; the establishment signal is the `0x4640`
+*reply*.
+
+#### 7.3.2 Response timing, measured
 
 Across **306,990 paired request/response exchanges** — every request matched to
 the response echoing its `sequence` on the reverse direction of the same
@@ -2845,7 +2921,7 @@ A subset of opcodes mutate panel firmware state, node-table membership, point va
 - **DATABASE** (0x0307/0x0308/0x030B) — whole-database load/save and tape trailer (legacy archive).
 - **PPCL** (0x030A, 0x4100–0x4138) — Powers Process Control Language program editing: add/edit/remove/enable/disable lines, clear trace, program log/search/query/display (incl. unresolved-reference display), modify/copy/setup-modify/look lines, PDL reset/init/display, and the `PROGRAM_*` wrapper ops. PPCL is the panel's resident control-logic language layered over P2.
 - **COLBAS** (0x030D, 0x4A00–0x4A06) — COLBAS scripting: immediate/connect/disconnect/write/abort/upload. The write/abort members are destructive.
-- **P1/FLN** (0x030F–0x0317, 0x4230–0x4232) — Protocol-I fieldbus operations: P1 poll/route/line-test/reset-counters, FLN scan enable/disable, P1 diagnostics log. P1 is the fieldbus tier below P2 (§see topology).
+- **P1/FLN** (0x030F–0x0317, 0x4230–0x4232) — Protocol-I fieldbus operations: P1 poll/route/line-test/reset-counters, FLN scan enable/disable, P1 diagnostics log. P1 is the fieldbus tier below P2 (§3.8).
 - **ENVELOPE** (0x0316, 0x031B–0x0320) — message-envelope open/close for destination, text, and user lists (alarm/report routing envelopes).
 - **LOGGER** (0x0325/0x0327) — event-logger and buffer-alarm setup.
 - **USER/ACCESS** (0x0330–0x0358) — user-account log/display/add/modify/copy/delete/look and db get/replace; access-group log/modify/db get/replace. The operator-credential database.
@@ -5296,7 +5372,7 @@ reliable generation discriminator. [W]
 |---|---|---|---|
 | 1 | node_name | TEXT_ | the peer's node name |
 | 2 | site_name | TEXT_ | site name |
-| 3 | bln_name | TEXT_ | BLN name (the access-gate identity; §see addressing) |
+| 3 | bln_name | TEXT_ | BLN name (the access-gate identity; §3.4.1, §17.2) |
 | 4 | failed | BOOLEAN_ | peer failed |
 | 5 | ready | BOOLEAN_ | peer ready |
 | 6 | replication_online | BOOLEAN_ | replication active |
@@ -7016,7 +7092,7 @@ The panel reports a **firmware-revision string and a separate hardware string**;
 **Firmware-keyed compatibility knobs.** Two legacy compatibility settings are gated by firmware identity: [D]
 
 - **Legacy P2 Host ID field** — an older host-identity field retained for back-compatibility with pre-IP supervisors.
-- **Extended Timeout flag** — `0x003E AP2_CABINET_TIMEOUT_NORMAL` / `0x003F AP2_CABINET_TIMEOUT_EXTENDED` toggle a normal-vs-extended communications timeout; extended timeout accommodates slower links (modem/AEM-tunneled serial, cross-ref §4/§transport).
+- **Extended Timeout flag** — `0x003E AP2_CABINET_TIMEOUT_NORMAL` / `0x003F AP2_CABINET_TIMEOUT_EXTENDED` toggle a normal-vs-extended communications timeout; extended timeout accommodates slower links (modem/AEM-tunneled serial, cross-ref §4.2).
 
 ### 16.6 Cabinet lifecycle and destructive opcodes
 
