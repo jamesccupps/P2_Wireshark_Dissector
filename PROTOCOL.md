@@ -5192,6 +5192,19 @@ digital-output boolean is `inverted` and the digital-input one is
 `normally_closed`. Same width, same position, different meaning — a decoder that
 labels both "inverted" is right about the bytes and wrong about the point. [S]
 
+**`real_addr_` is not the exception it looks like — it is the general case.**
+Sixty-five names in the type system are declared *inside* a parent, and a
+decoder must resolve them **against the enclosing type, not globally**. Six more
+turned up behaving exactly like `real_addr_` once anyone looked:
+`LON_extension_` (different under `Extended_team_desc` than under
+`Extended_team_member`), `name_suffix_`, `xfixed_` (a lone `f32` inside
+`cov_limit_`, a counted address array inside `dns_`), `address_` (a
+virtual/physical CHOICE in one parent, a bare `UNSIGNED32` IP in another),
+`alarm_info_` and `Fln_type_`. Resolving those six by parent removed them from
+§10.9's blocked list at a stroke. **A flat type table is therefore not enough to
+decode P2**: the same field name, in two structures, is two different layouts,
+and nothing in the name says so. [S]
+
 ```
 a digital output      03 01 00 07 01
                       FLN3 Drop1 Pt7  inverted
@@ -5832,9 +5845,9 @@ Of the **455 operations** that have a request and/or response structure:
 
 | | operations |
 |---|---:|
-| **Decodable** from widths this document pins | **378 (83%)** |
-| Blocked on at least one unstated width or unpinned CHOICE | 77 |
-| distinct blocking types | **46** |
+| **Decodable** from widths this document pins | **384 (84%)** |
+| Blocked on at least one unstated width or unpinned CHOICE | 71 |
+| distinct blocking types | **40** |
 
 **The blockers are concentrated, and a few are worth far more than the rest.**
 "Blocks" counts operations the type appears in; "alone" counts operations for
@@ -5843,10 +5856,21 @@ immediately:
 
 | blocker | blocks | alone | what it is |
 |---|---:|---:|---|
-| `LON_extension_` | 10 | 0 | LonWorks member description — a different fieldbus |
 | `Duct_type` (CHOICE) | 8 | 0 | 3 arms — but all three are 8 B, so this blocks the *labels*, not the walk (§10.4.1) |
 | `Device_type` | 7 | **7** | the highest single-fix left in the table |
 | `User_access_*`, `User_command_priority`, `Language_ID` | 7 each | 0 | the user-account family, which travels together |
+| `Reference_Type`, `Pattern_type` | 7 each | 0 | team-member description |
+| `Date_type` | 5 | 5 | the calendar — and see below, this one is *unmeasurable here* |
+
+**What the remaining list is made of matters more than its length.** Thirty-one
+of the forty are **enum widths**, and §10.9's dead rule means each has to be
+measured against a body rather than derived. Of the 71 blocked operations, only
+five have any body in this corpus at all, and the one with a clean single
+blocker — `AP2_CAL_DB_GET_OTHER` (`0x0606`, `Date_type`) — returns a two-byte
+empty response nineteen times over, because **this site keeps no calendar
+entries**. That is the honest ceiling: the rest cannot be closed by looking
+harder at this capture set, only by a capture from a system that exercises those
+features. They are listed rather than guessed.
 
 `Baud_rate` topped this table at 11 operations until §16.1.3 measured it, and
 how it fell is worth more than the twelve operations it took with it — see the
@@ -5856,9 +5880,14 @@ warning at the end of this section.
 were topped by `use_proof_` at 48 operations and the `All_points` arms at 41
 each, and those are gone — not measured, but *recovered*: the vendor type system
 declares them and the extraction that built §10.1's catalog had flattened them
-away (§10.4.1, §10.4.2). Nothing left blocks more than 14 operations, and the
-remaining families are peripheral to the point model: LonWorks, user accounts,
-serial port settings.
+away (§10.4.1, §10.4.2). `LON_extension_` topped the third edition at 10 and
+went the same way, along with `name_suffix_`, `xfixed_`, `address_`,
+`alarm_info_` and `Fln_type_`: **all six are declared inside a parent type, and
+one name means different things under different parents** — exactly the
+`real_addr_` situation of §10.4.2, which turned out to be a general pattern
+rather than a special case. Nothing left blocks more than 8 operations, and the
+remaining families are peripheral to the point model: user accounts, calendars,
+duct geometry, LonWorks and MSTP team extensions.
 
 **The register predicts its own gains, which is the check that it works.** Its
 first run named `Alarm_mode_type` as blocking 19 operations and being the *only*
