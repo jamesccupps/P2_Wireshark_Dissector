@@ -1022,10 +1022,10 @@ The replication exchange is a small family of AP2 function codes. In the current
 
 | Opcode | AP2 name | Role | Status in corpus | Tag |
 |---|---|---|---|---|
-| `0x4633` | `AP2_EBLN_REPL_NOTIFY` | "I have changes" notification to peers | 23 frames; **22 of 23 request bodies empty** (the notification carries no payload); symmetric, 48% each direction | [W] |
+| `0x4633` | `AP2_EBLN_REPL_NOTIFY` | "I have changes" notification to peers | 41 requests; **40 of 41 request bodies empty** (the notification carries no payload) — the one exception is 12 bytes | [W] |
 | `0x4634` | `AP2_EBLN_REPL_PULL` | pull replicated data (carries the node-table version digest; leaks node membership) | routinely observed (the dominant replication opcode) | [W] |
 | `0x4635` | `AP2_EBLN_REPL_PULL_MORE` | continuation pull (segmented replication payload) | 130 frames; request bodies 8–12 B, **none empty**; 64% panel-initiated | [W] |
-| `0x4636` | `AP2_EBLN_REPL_CHANGES` | changed-records delta exchange | **the live replication carrier**: 340 frames (170 requests + 170 replies) in a single passive supervisor capture, bodies 331–1551 B, **none empty**; bidirectional (62% supervisor→panel, 37% panel→supervisor) | [W] |
+| `0x4636` | `AP2_EBLN_REPL_CHANGES` | changed-records delta exchange | **the live replication carrier**: 180 requests corpus-wide, of which **170 requests + 170 replies** fall in a single passive supervisor capture, bodies 331–1551 B, **none empty**; bidirectional (62% supervisor→panel, 37% panel→supervisor) | [W] |
 | `0x464C` | `AP2_EBLN_REPL_DIAG_NODELIST` | replication-diagnostic node list | observed once | [W] |
 
 `0x4634` (`EBLN_REPL_PULL`) is the mechanism by which a node advertises/obtains the current node roster — the same roster that constitutes BLN membership; its request carries the full version digest and the matched response is an empty (`0 B`) success ack (§5.3 step 3). The actual changed-record delta propagation observed on the wire rides the `DBCHANGE_*`/`UPL_ADDED_*`/`UPL_DEL_*` family on the second channel, not these `0x463x` opcodes.
@@ -1927,7 +1927,7 @@ The model has two transaction shapes, which map directly onto the direction byte
 
 The stack-selector layer's read primitives confirm the split: `ReadConfirmedInd` (confirmed
 request/response) versus `ReadEventInd` (asynchronous event indication). [S] The dominant Event-class
-transaction is the change-of-value push `0x0274` (`COV_ANNUNCIATE`): 53,101 request frames in the corpus under the criteria of §9.5 —
+transaction is the change-of-value push `0x0274` (`COV_ANNUNCIATE`): 120,764 request frames in the corpus under the criteria of §9.5 —
 almost all acknowledged with a 0-byte success, a small minority unanswered. [W] COV itself is a
 register/cancel **subscription** — a peer arms COV with `COV_ENABLE` (`0x0271`) / disarms with
 `COV_DISABLE` (`0x0273`), after which the panel emits `COV_ANNUNCIATE` events. [W][S] The
