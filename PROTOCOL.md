@@ -793,6 +793,8 @@ The **AEM (APOGEE Ethernet Microserver)** is a Lantronix-class serial-to-TCP ter
 | Device class | Lantronix-class terminal server (e.g. AEM100 / AEM200); `Local_1>` admin prompt | [D] |
 | Channel 1 (Remote ALN / P2) | default **TCP/3001**, default 38400 bps (BLN baud tied to panel firmware) | [D] |
 | Channel 2 (HMI / setup) | default **TCP/3002**, 9600–115200 bps | [D] |
+| Panel-side attachment | the panel's **HMI/Modem** port, with the BLN name set and **the modem disabled** | [D] |
+| Exclusivity | one AEM serves **one** management station; two stations need two AEMs | [D] |
 | Serial line params | 8/N/1, no hardware flow control | [D] |
 | Fallback addressing | AutoIP 169.254.x when no DHCP; SNMP/Telnet/TFTP/HTTP admin services present | [D] |
 
@@ -7393,6 +7395,26 @@ answers with a **TCP RST**, a supervisor listener with a graceful **TCP FIN** �
 before any application processing occurs, and **no node-table side effect is
 written** for a wrong-BLN attempt. [W] (Verified by controlled test: 24 wrong-BLN
 handshakes across 8 variants produced 24 RSTs and zero table entries.)
+
+**The vendor's own connection-failure checklist is the clearest external
+confirmation of this.** Its troubleshooting for *"Ethernet BLN will not
+connect"*, for *"AEM BLN will not connect"*, and for *"not receiving alarms or
+COVs"* gives the same three remedies each time: make sure the panel's name
+resolves via DNS or the hosts file; make sure the driver is allowed through the
+management station's **host firewall**; and make sure **the BLN name in the
+panel's IP-settings report is identical to the BLN name configured for the
+network**. [D]
+
+Two things follow. The firewall item is host configuration on the supervisor
+machine, not a panel-side access control, so it does not add a second protocol
+gate. And the checklist contains **no authentication step at all** — no
+credential to check, no key to match, no account to enable — because at this
+layer there is none to check. A vendor's own list of everything that can stop a
+peer connecting is a good inventory of what is actually enforced.
+
+The insistence on *identical* is also the strictness of §3.4.1 stated
+operationally: the match is exact, and a near-miss is indistinguishable from an
+attacker.
 
 This makes the BLN name function as a **read-only-reject access gate**, not as a
 secret:
