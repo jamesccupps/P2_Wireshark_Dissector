@@ -1988,6 +1988,22 @@ is where the panel's announce/identity and DB-change/replication records flow to
 These connections are long-lived; reconnects (panel reboot, link flap, supervisor restart) add further
 connections over the life of a capture. [W]
 
+**How long-lived, measured.** In the 16.7-hour capture, **24 sessions carry
+substantive traffic and all 24 run the entire capture** — every one opens within
+**0.1 minutes** of the start, every one is still open at the end, and all 24 are
+open *simultaneously* at the midpoint. There is not a single reconnect. The
+steady state is a permanently-established mesh, so a client should open its
+connections once and keep them, and a panel should expect to hold a couple of
+dozen concurrent P2 sessions indefinitely. [W]
+
+> **A trap worth naming, because it produced a phantom finding.** Dividing a
+> capture's connection count by its duration does *not* give a reconnect rate —
+> 24 connections over 16.7 hours reads as "a new connection every 42 minutes"
+> and is completely wrong when the 24 are concurrent and permanent. Check
+> whether sessions overlap before treating their count as a rate. The same
+> capture also shows 2,393 single-frame tuples against those 36 real sessions,
+> so a raw tuple count is not a session count either.
+
 **The BLN is a full peer mesh.** Every node holds live P2 sessions with the supervisor **and** with
 every other node on the BLN — panel↔panel sessions run over `panel:5033` just like the supervisor's
 poll channel (carried by the `0x29`/`0x2A` peer-session band, §6.2). This realizes the self-organizing
