@@ -3887,7 +3887,7 @@ Field types in the structure tables map to wire encodings as follows. These are 
 | `<Enum>` | integer, **width per enum** — see below | value space per the enum tables (priorities, point types, cov masks, node states, etc.). The structure library does **not** state the wire width of any enum; each must be pinned separately. [S] |
 
 **A caution that governs this whole section: a generated lookup fails
-plausibly, not loudly.** Three independent properties of the protocol's type
+plausibly, not loudly.** Four independent properties of the protocol's type
 system each produce, in a mechanically generated decoder, a *valid wrong answer*
 rather than an error — which is the hardest kind of defect to notice, because
 the output looks like a successful decode:
@@ -3897,11 +3897,14 @@ the output looks like a successful decode:
 | **Enum values are sparse** (below) — 18 of 66 have gaps | an array-index lookup returns a different, valid name past the first gap |
 | **A CHOICE `tag_` is an enum value, not an ordinal** (§10.4.1) | positional arm selection is right for the first few values and wrong after |
 | **`Name_space_enum` is defined twice, with incompatible values** — `0 system / 1 user / 65535 any`, and separately `1 LAO_actuator / 2 HOA` | whichever definition the generator loads last silently wins for every `Name_space` field |
+| **An enum's members can be bit positions, not values** — `Schedule_days` has 14 members and a 4-byte field | sizing the field from the enum's maximum gives one byte instead of four, and then decodes a mask as a value |
 
 The first two have each already produced a wrong claim in an earlier edition of
 this document. The third has not, because §8.5 documents the first definition
 and every observed value (`0000`, `FFFF`) belongs to it — but a decoder built by
-scraping the enum dump has a one-in-two chance of the other.
+scraping the enum dump has a one-in-two chance of the other. The fourth was
+found by trying to *use* an enum's value range as a constraint while solving for
+widths, and discovering that the constraint is unsound (§10.1, below).
 
 **The defensive rule:** resolve every enum value through a lookup keyed by
 *value* within a namespace named by the *field*, never by position and never by
@@ -3947,6 +3950,24 @@ far: [W][S]
 | `Representation` | 1 | inside `Analog_format`, constant across analog points |
 | `Proof_status` | 1 | the only width that closes an `l2sl` body, §10.4.1 |
 | `Total_rate` | 1 | inside the totalizer arm, §10.4.5 |
+| `time_`, `trend_cov_` | 4 each | the two `Trend_type` arms; consumption across 5 and 2 opcodes (161 / 86 bodies) |
+| `Occurrence` | 1 | `u8` in §15.3's `0x0989` decode; consumption narrows `0x5020`/`0x0979` to this or 4 and §15.3 chooses |
+| **`Schedule_days`** | **4** | a **bitmask**, §15.3 — see the warning below |
+| `loggerOn_` | 1 | 2 opcodes, 23 bodies |
+| `Ssto_amd`, `Ssto_desop_value` | 1 each | 2 opcodes, 6 bodies |
+| `Grain_Type`, `Repl_Cmd_Type` | 1 each | **one opcode only** (`0x4636`, 60 bodies) — unique for it, uncorroborated |
+| `Baud_rate` + `Port_number` + `Port_type` | **4 together** | they occur only together, in `0x099f`; the group width is fixed, the split is **[OPEN]** |
+| `Ssto_zo_mod_cl`, `Ssto_zo_mod_ht` | **[OPEN]** | `0x503b` and `0x097d` give 1, `0x098d` gives 2 — an unresolved contradiction, so one of those three parses is wrong |
+
+**Do not size an enum field from its enum's value range.** The obvious shortcut
+— *the largest member is 13, so one byte is enough* — is wrong, and
+`Schedule_days` is the counter-example. Its fourteen members are `Sunday` …
+`Saturday` and `Replacement1` … `Replacement7`, values 0–13, and the field is
+**four bytes**, because the members are **bit positions in a mask**, not values
+the field takes. A decoder sized that way reads one byte where four are
+required, and reads a value where a mask is meant. Both failures are silent, and
+this is the fourth member of the family in the caution at the head of this
+section. [W][S]
 
 The remainder are **[OPEN]**, and the honest scoping matters: a large share of
 them are BACnet-side object types (`analog_input_`, `binary_output_`,
