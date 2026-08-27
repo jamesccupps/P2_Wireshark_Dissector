@@ -422,7 +422,9 @@ This hierarchy is corroborated by the vendor's own object model, which nests **B
 
 #### 2.2.3 Point teams
 
-A "point team" groups the physical/virtual subpoints that make up one logical point. A logical point name may bind **1 to 4** subpoints under a single name; the team's *default member* is the logical point a client normally reads or commands, and a panel's point-team metadata maps the team's members to their subpoint indices, link types, and engineering-unit scaling. [S][D] FLN sub-device subpoints derive their names from the parent point name plus a suffix describing the subpoint. The point team is the unit a panel uploads when a supervisor enumerates a device's points (§9), and the FLN/TEC point-team templates (the vendor's `.ptd` device-family library) define, per device family, which subpoint indices exist and what each means. [S][D] Full point-model detail is in §11.
+A "point team" groups the physical/virtual subpoints that make up one logical point. A logical point name may bind **1 to 4** subpoints under a single name — but that is a *product* constraint, not a wire one, and a decoder must not encode it: `member_count` is an `UNSIGNED16` and the member array is `nrOfreport_members : UNSIGNED_16` followed by `Team_Members[]`, so the encoding admits 65,535. Read the count; do not size a fixed array of four. [S]
+
+The team's *default member* is the logical point a client normally reads or commands, and a panel's point-team metadata maps the team's members to their subpoint indices, link types, and engineering-unit scaling. [S][D] FLN sub-device subpoints derive their names from the parent point name plus a suffix describing the subpoint. The point team is the unit a panel uploads when a supervisor enumerates a device's points (§9), and the FLN/TEC point-team templates (the vendor's `.ptd` device-family library) define, per device family, which subpoint indices exist and what each means. [S][D] Full point-model detail is in §11.
 
 ### 2.3 Service model (informative)
 
@@ -1470,8 +1472,26 @@ inside a value block (which signals device health). [W][I]
 ### 6.4 Routing slots
 
 The four slots carry the routing identity of the frame as **NUL-terminated** ASCII strings. They
-carry no length prefix — distinct from the length-prefixed TLV form (`01 00 <len>`) used inside
-bodies; the two MUST NOT be conflated. [W]
+carry no length prefix — distinct from the length-prefixed TLV form (`<textType> <len:u16>`) used
+inside bodies; the two MUST NOT be conflated. [W]
+
+**There are always exactly four, and the count is not conditional on anything** —
+direction, message class, opcode or body: **621,268 frames of 621,268** carry
+four, with no exceptions. A parser may therefore read four NUL-terminated
+strings unconditionally after the header and does not need to probe for a
+terminator count. [W]
+
+**Slot lengths, measured.** Across those frames — about 2.5 million slot
+strings — the two node-name slots stay well inside the documented 30-character
+limit of §3.4.2, and the source-identity slot runs longest because of its
+`|PORT` suffix: [W]
+
+| slot | role | distinct values | longest |
+|---|---|---:|---:|
+| 0 | BLN name | 137 | see below |
+| 1 | destination node name | 119 | **16** |
+| 2 | BLN name (doubled) | 138 | see below |
+| 3 | source node identity | 159 | **21** |
 
 On a request (`dir == 0x00`, including an unsolicited push) the slot order is:
 
@@ -4081,8 +4101,29 @@ Field types in the structure tables map to wire encodings as follows. These are 
 | `NULL_` | 0 bytes | a present-but-empty CHOICE alternative or placeholder. [S] |
 | `DATE_TIME` / `DATE_` / `TIME_` | packed date/time block | [S] |
 | `<Name>` (capitalized) | nested sub-structure | expanded inline; shared sub-types defined once in §10.2. [S] |
-| `<Name>[]` | repeating array | preceded by a `nrOf<name>` u16 BE count field. [S] |
+| `<Name>[]` | repeating array | preceded by a `nrOf<name>` u16 BE count field — **always** u16, see below. [S] |
 | `<Enum>` | integer, **width per enum** — see below | value space per the enum tables (priorities, point types, cov masks, node states, etc.). The structure library does **not** state the wire width of any enum; each must be pinned separately. [S] |
+
+**No documented maximum is an encoding bound.** Every variable-length
+repetition in P2 is a count followed by elements, and the count is **always
+`UNSIGNED_16`** — measured across the library, 159 of 162 array-typed fields are
+immediately preceded by an `nrOf<name> : UNSIGNED_16`, and **all 159 count
+fields are u16; not one is u8 or u32**. The three exceptions are not arrays in
+the usual sense: `BITSTRING_128` is a fixed 128-bit field, and `TEXT_`'s two
+byte-array fields are bounded by its own `textLen : UNSIGNED_16` — the same
+pattern under a different field name. [S]
+
+This matters because the document quotes a number of vendor-documented
+maxima — 4 multicast address/port pairs per panel (§5.2), 8 listener-port slots
+per panel (§4.1), 1–4 members in a point team (§2.2.3), 32 devices per FLN trunk
+(§3.8) — and **none of them is what the encoding allows.** `IP_Address_Settings`
+carries `nrOfmulticast : UNSIGNED_16` and `nrOfapp_ports : UNSIGNED_16`; a team's
+`member_count` is `UNSIGNED16`. Each documented figure is a *product* constraint
+that a given firmware imposes, and a decoder must read the count field and size
+from it. Sizing a fixed array from a documented maximum is the one mistake this
+type system makes easy and does not warn about: the buffer is right on every
+frame at this site and wrong on the first frame from a panel configured
+differently.
 
 **A caution that governs this whole section: a generated lookup fails
 plausibly, not loudly.** Four independent properties of the protocol's type
@@ -4156,7 +4197,31 @@ far: [W][S]
 | `loggerOn_` | 1 | 2 opcodes, 23 bodies |
 | `Ssto_amd`, `Ssto_desop_value` | 1 each | 2 opcodes, 6 bodies |
 | `Grain_Type`, `Repl_Cmd_Type` | 1 each | **one opcode only** (`0x4636`, 60 bodies) — unique for it, uncorroborated |
-| `Baud_rate` + `Port_number` + `Port_type` | **4 together** | they occur only together, in `0x099f`; the group width is fixed, the split is **[OPEN]** |
+| `Baud_rate` + `Port_number` + `Port_type` | **4 together** | co-occur in `0x099f`, so only their **sum** is measured here; the split is **[OPEN]** — but see the note below, which names a one-field frame that would settle it |
+
+**The `Baud_rate` split has a cheap falsification test, and the structure
+library names it.** Those three enums are *not* adjacent fields of one group —
+`Port_log` is `port_number : Port_number` followed by `port_status :
+Port_status`, and `Port_status` interposes a `descriptor : TEXT_` and four
+`BOOLEAN_`s before reaching `port_type`. Only their sum is constrained here, and
+three enums summing to 4 bytes means exactly one of them is two bytes wide while
+the value spaces (`Baud_rate` 0–11, `Port_number` 0–4, `Port_type` 0–1) would
+all fit in one.
+
+The library isolates one of the three: six request structures carry
+`baud_rate : Baud_rate` **and nothing else** —
+
+```
+AP2_Cabinet_Set_BLN_BaudRate_Request  = baud_rate : Baud_rate     (0x0126)
+AP2_Cabinet_Set_FLN1..3_Baudrate      = baud_rate : Baud_rate     (0x0123-0x0125)
+AP2_Cabinet_Set_MMI1..2_Baudrate      = baud_rate : Baud_rate     (0x0120-0x0121)
+```
+
+so **the body length of any one of those six frames is `Baud_rate`'s width**,
+and the other two follow by subtraction. None of the six appears anywhere in
+this corpus — they are configuration writes, which a monitoring supervisor never
+sends — so this is a gap that a single frame from a commissioning session would
+close, not one needing an experiment. [S]
 
 **A contradiction worth showing, because of how it resolved.** `Ssto_zo_mod_cl`
 and `Ssto_zo_mod_ht` came out as **1** from `0x097d` and as **2** from
