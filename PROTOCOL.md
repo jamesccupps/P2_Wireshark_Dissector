@@ -701,9 +701,26 @@ The architectural maxima below are deployment limits, not wire-protocol constant
 | Ethernet connections per workstation | 64 | concurrent EBLN connections | [D] |
 | Remote auto-dial BLNs | 300 | dial-up reachable BLNs | [D] |
 | Cross-BLN COV-share | ~300 points | total points shareable across BLN boundaries (§3.5) | [D] |
-| Concurrent peer sessions per panel | small, firmware-dependent | per panel TCP/5033 listener | [D][I] |
+| Concurrent peer sessions per panel | **≥ 9 observed** (full mesh); documented only as firmware-dependent | per panel TCP/5033 listener — see the measurement below | [W][D] |
 
 **The two per-BLN limits have different origins, and the difference matters.** On an RS-485 BLN the ~99 ceiling is an *addressing* artifact: it is the 0–99 drop range and nothing more. An Ethernet BLN does not use drop numbers at all — its members are identified by DNS-resolvable names (§3.4.2) — and yet it is still capped, at 100 panels per logical BLN. A limit that survives the removal of the addressing scheme that supposedly caused it is not an addressing limit. It is a **node-table capacity**, which is the right way for an implementer to think about it when sizing the replicated table of §5.3. [D][I]
+
+**Concurrent sessions, measured.** The last row is the only one of these that
+the corpus can speak to, and vendor documentation gives it no number. Sweeping
+connection lifetimes across 11,529 connections that have a P2 listener at one
+end, on 515 distinct listeners: a single **field panel's** 5033 listener serves a
+peak of **9 concurrent sessions from 9 distinct peer hosts**, and in each capture
+where that peak occurs exactly **10** P2 hosts are present — so the peak is
+*every other node on the BLN at once*. A supervisor listener peaks at the same 9.
+Counted as sockets rather than hosts the peak is **18**, because a peer commonly
+holds two connections to the same node (the 5033/5034 pattern of §2.1.2). [W]
+
+Read this as a **floor, not a ceiling**: nothing in the corpus was refused a
+connection, so no firmware limit was reached, and the site is a 10-node BLN — 9
+is what full mesh costs here, not what the panel can bear. The useful conclusion
+for an implementer is the shape rather than the number: **a panel must expect
+every other node on its BLN to hold an open session simultaneously**, so a
+listener that accepts only one or two peers is not conformant.
 
 These figures derive from vendor topology documentation; treat them as the *documented* ceiling, not a guarantee that a given firmware enforces each one identically. Where a finding or operation depends on a limit (e.g. the cross-BLN COV cap), the dependency is called out at the relevant section. [D][I]
 ## 4. Physical & Datalink Layer
@@ -1665,8 +1682,23 @@ in the first time it reaches a peer:
    sources do — because a supervisor speaking to a mixed fleet uses each peer's
    dialect. Group by the **pair**, never by the sender, or the mixed-fleet
    supervisor looks like a protocol violation. [W]
-5. **Cache and reuse.** The record is stored against the peer and reused for every subsequent frame;
-   it is refreshed only when the peer's firmware identity changes. [I]
+5. **Cache and reuse.** A client may store the record against the peer and reuse it for every
+   subsequent frame: the dialect itself is stable per peer for as long as any connection to it lasts
+   (item 4). What a client must **not** assume is that the identity block behind it is read once.
+   The observed supervisor **re-reads `CABINET_DISPLAY` on a fixed timer** — measured per peer across
+   the corpus, successive reads to the same peer fall in two tight populations, **30.006 s**
+   (σ 0.0043 s, n=82 intervals over 7 peers) and **≈3600.4 s** (n=33 over 10 peers), with one peer
+   showing both. All 115 of those intervals are **within a single live connection**, so neither is a
+   reconnect artifact, and only 13 of the 115 connections carrying an `0x010C` open with one — it is
+   a poll, not a session handshake. Whether the supervisor is refreshing its dialect record or merely
+   using the same opcode for periodic health is not observable from the wire; what is observable is
+   that a peer must expect the identity block to be re-read on a schedule regardless of whether
+   anything about it has changed. [W]
+
+   (§5.0's cadence table measures the same opcode **per connection** and reports 30.01 s over 102
+   intervals; this measurement is **per peer**, which is a different denominator, and it is what
+   exposes the hourly population — an hourly peer contributes few intra-connection intervals.
+   The two figures agree where they overlap; neither corrects the other.)
 
 The practical consequence for an implementer: you do **not** blind-probe `{0x33, 0x34}` or guess the
 encoding. You issue one `CABINET_DISPLAY`, classify the generation from the returned revision, and from
@@ -1882,7 +1914,7 @@ nothing else on the wire confirms receipt. [W]
 
 **Measured round-trip latency.** Median application round-trip (request `dir == 0x00` → matched
 response `dir == 0x01`/`0x05`, by echoed `sequence`) on a busy live link, with p95 < ~2× the median and
-up to 9 requests pipelined outstanding (§6.5):
+up to 14 requests pipelined outstanding (§6.5):
 
 | Opcode | Operation | Median RTT | Tag |
 |---|---|---|---|
@@ -2265,7 +2297,7 @@ Properties an implementer must honor:
   field. Standard P2 name fields are far under either. [S][W]
 - **The empty TLV `01 00 00` (length 0) is common** and serves as a positional placeholder inside request bodies — reserving or separating a field that carries no value in a given request (for example a device-name slot left empty to address a BLN-virtual point). [W]
 
-Notation used throughout §9: `S<n>` abbreviates a string TLV `01 00 <n> <n content bytes>`, and `S()` abbreviates the empty placeholder TLV `01 00 00`. [I]
+Notation used throughout §9: `S<n>` abbreviates a string TLV — `<textType> <n:u16 BE> <n content bytes>` — and `S()` abbreviates the empty placeholder TLV. Worked examples render these as `01 00 <n> …` and `01 00 00` because they are verbatim capture bytes and `textType` is `0x01` in 113,499 of the 113,523 TLVs measured. **Read the notation as positional, not literal:** the leading byte is a type, the empty form occurs on the wire as `00 00 00` as well as `01 00 00`, and a decoder must take each TLV from its structural position rather than matching the leading byte (§8.1). [W][I]
 
 The TLV's `TEXT_` content is what realizes a logical name on the wire. In the vendor's own ASDU field model (§8.5) a name field decomposes into a `name_space` selector plus `name` and `suffix` `TEXT_` fields; on the wire each `TEXT_` field is a string TLV, and a multi-component name is carried as consecutive TLVs. [S]
 
@@ -2444,7 +2476,7 @@ Field-type-to-primitive mapping:
 
 | ASDU field type | Wire realization | Primitive |
 |---|---|---|
-| `TEXT_` | A string TLV `01 00 <len> <bytes>` | §8.1 |
+| `TEXT_` | A string TLV `<textType> <len:u16> <bytes>`, usually `01 00 <len> …` | §8.1 |
 | `FLOAT_` | `f32 BE` (4 bytes) | §8.3.2 |
 | `UNSIGNED8` / `UNSIGNED_8` / `BOOLEAN_` | `u8` (1 byte) | §8.3.1 |
 | `UNSIGNED16` / `UNSIGNED_16` | `u16 BE` (2 bytes) | §8.3.1 |
@@ -2660,10 +2692,12 @@ the wire. There is not one.
 
 #### The message-structure catalog, and three command shapes
 
-The supervisor's own symbol vocabulary names **505 request structures** on a
-strict convention: an operation contributes `<OPERATION>_REQ` and, where it
-answers with data, `<OPERATION>_RESP` (158 of those), with shared field groups
-as `<NAME>_TYPE`. That is a second, coarser view of the same surface the
+The supervisor's own symbol vocabulary names **505 structures** on a
+strict convention: an operation contributes `<OPERATION>_REQ` (**343** of them)
+and, where it answers with data, `<OPERATION>_RESP` (**158**), with shared field
+groups as `<NAME>_TYPE` (**4**) — 343 + 158 + 4 = 505. Only the 343 are
+*requests*; the read/write split below is taken over those, which is why it
+counts 343 and not 505. That is a second, coarser view of the same surface the
 type-system catalog of §10.1 describes in 1,144 structures; the two use
 different suffixes because they come from different layers of the stack, and
 neither count contradicts the other. The
@@ -4037,7 +4071,7 @@ Field types in the structure tables map to wire encodings as follows. These are 
 
 | ASDU type | Wire encoding | Notes |
 |---|---|---|
-| `TEXT_` | string TLV: `textType` u8 (`0x01`) + `textLen` **u16 BE** + content | See §8.1 — the length is **two** bytes; ASCII content, not NUL-terminated inside the TLV; empty = `01 00 00`. [S][W] |
+| `TEXT_` | string TLV: `textType` u8 (`0x01`, but see §8.1 — `0x00` also occurs) + `textLen` **u16 BE** + content | See §8.1 — the length is **two** bytes; ASCII content, not NUL-terminated inside the TLV; empty = `01 00 00` **or** `00 00 00`. [S][W] |
 | `UNSIGNED8` / `UNSIGNED_8` | 1 byte | [S] |
 | `UNSIGNED16` / `UNSIGNED_16` | 2 bytes, big-endian | counts/markers/error codes are u16 BE. [W] |
 | `UNSIGNED32` | 4 bytes, big-endian | sequence numbers, identifiers. [W] |
@@ -4473,7 +4507,11 @@ The COV-enable response returns the point's `All_points` value block (same shape
 | 11 | alarm_state | Alarm_state (enum) | normal / alarm / high / low / trouble |
 | 12 | alarm_priority | Alarm_priority (enum) | priority_0..6 |
 
-The boolean run (fields 5–10) is the wire source of the point operating-state taxonomy (Normal / Failed / Out-of-Service / Proofing / Alarm-by-Command / Operator-Disabled / Program-Disabled); these are the semantic meaning of the COV condition bits. [S][I]
+The boolean run (fields 5–10) is the wire source of the point operating-state names (Normal / Failed / Out-of-Service / Proofing / Alarm-by-Command / Operator-Disabled / Program-Disabled); these are the semantic meaning of the COV condition bits. [S][I]
+
+**They are six independent flags, not a seven-way enumeration — do not model them as one state.** The type system declares six separate `BOOLEAN_` fields and imposes no exclusivity among them, so a point may legitimately report `failed` and `out_of_service` together, and "Normal" is not a value but the absence of all six. A client that collapses the run into a single state field must therefore choose a precedence order of its own, and that order is a local UI decision, not something P2 specifies. [S]
+
+The *asserted* values remain unconfirmed from the wire and this corpus cannot settle them: across the cached `0x0274` bodies the entire run is zero, because every point reporting was healthy. Confirming which flag carries which meaning needs a capture taken while a point is in each state — the same gap §8.5's layout-precision note records. **[OPEN]**
 
 ### 10.4 The point model (Point_base)
 
@@ -5006,7 +5044,7 @@ reliable generation discriminator. [W]
 
 **Wire-confirmed, field by field.** [W] The block above was struct-derived; a
 16.7-hour panel-side capture decodes it with nothing left over. The three
-`TEXT_` fields are TLVs (`01 00 <len> <bytes>`) and the nine that follow are a
+`TEXT_` fields are TLVs (`<textType> <len:u16> <bytes>`, usually `01 00 <len> …`) and the nine that follow are a
 **fixed 16-byte tail**:
 
 | offset in tail | field | width |
@@ -5602,7 +5640,16 @@ A subscription names a **COV mask** selecting which classes of change generate a
 | 6 | `temp_all` | a temporary all-class subscription | [S] |
 | 7 | `proof_on` | proof-status change | [S] |
 
-A complementary `Point_cov_type` enumeration selects the granularity of what is reported: `0 = all_types`, `1 = point_values`, `2 = point_priorities`, `3 = point_status`. [S] Together the mask (which transitions) and type (which attributes) define a subscription. A subscriber wanting only value movement subscribes with the `data` mask bit and `point_values` type; a supervisor mirroring full point state subscribes `all_types`. [I]
+A `Point_cov_type` enumeration also exists in the type system, nominally selecting the granularity of what is reported: `0 = all_types`, `1 = point_values`, `2 = point_priorities`, `3 = point_status`. [S]
+
+**Do not try to send it — it has no wire field.** Of the 459 distinct field types used across the 1,144-structure library, **none** is a `Point_cov_type`, and the two subscription requests are two fields each with no room for one:
+
+```
+AP2_COV_Enable_Request  =  name_response : Name_response ,  cov_mask : Cov_mask
+AP2_COV_Disable_Request =  name_response : Name_response ,  cov_mask : Cov_mask
+```
+
+`Cov_mask` is carried by exactly three structures — those two and `Cov_data`, the cross-reference record below. So on the P2 wire a subscription is defined by the **mask alone**: which transitions generate a report. The granularity enum is declared but unreachable through these opcodes, and is most likely a supervisor-internal or BACnet-side concept (the library does carry a separate `Bacnet_COV_Destination`). An implementer building a subscriber sets mask bits and nothing else. [S]
 
 The panel also maintains a **COV cross-reference** (which peers are subscribed to which points), readable via `AP2_Xref_COV_Display` — its response is a count-prefixed array of `Cov_data = { destination_panel: u16, cov_mask }` rows, i.e. for each subscribing panel the mask it holds. [S]
 
@@ -6309,13 +6356,26 @@ Record framing (observed across **36 distinct panel databases** — Insight `.P2
 
 | Element | Value | Tag |
 |---|---|---|
-| Record delimiter | **SYN `0x16`** at the start of each record | [I] |
-| Field encoding | ASCII-hex fields | [I] |
+| Record delimiter | **SYN `0x16`** at the start of each record — and at byte 0 of the file | [W] |
+| Field encoding | **ASCII-hex text** — the record is a hex *string*; the structures below are what it decodes to, not what the file contains | [W] |
 | Record terminator | **CRLF in Insight `.P2` exports; CR only in Desigo CC device backups.** A reader MUST split on the leading SYN, not on a line terminator — assuming CRLF silently yields **zero** records from a device backup rather than an error | [W] |
 | Record-type byte | at offset 6 within the record. Only two values occur: **`0x02`** point record (13,365) and **`0x41`** PPCL record (9,106) | [W] |
 | Format byte | `0x02` = legacy generation / `0x03` = BACnet-era generation | [I] |
 
 **Withdrawn — the "distinct numbering" note.** An earlier revision of this document described a `.P2` "subtype byte" numbered `1`=LDI, `2`=LAI, `4`=analog, `6`=LDO, `0x15`=enum, and warned that it MUST NOT be cross-mapped to the §11.2 `Point_type` codes. Both claims were tagged as inference and **neither survives testing.** 12,670 `.P2` point records whose point name resolves to a declared point type were scanned at every byte offset — absolute, relative to the record end, and relative to the TLV block — and **no byte position discriminates point type at all**: every candidate that reached full purity did so by being constant across all types. There is no such subtype byte in the container, and therefore no rival numbering to warn about. Where a point type *is* recoverable from vendor-produced files, it carries **the same codes as §11.2** (1=LDI, 2=LDO, 3=LAI, 4=LAO, 6=L2SL, 11=LPACI, 21=LENUM), verified as a bijection over 3,123 points — see §16.2.1. [W] The format byte (`0x02`/`0x03`) is the on-disk reflection of the firmware-generation split described in §16.5, and that part stands. [I] **Record layout (per-record decode pass, 39,456 records across 38 panel databases and 7 Desigo CC device backups).** There are **two** record layouts, distinguished by where the scope preamble `01 00 04 "SYST" 23 3f ff ff ff` falls. That preamble is present in **97.9%** of records and is the same scope selector the wire uses (§8). [W]
+
+**Hex-decode first — the layouts below are post-decode.** This is the single
+easiest way to misread a `.P2`, because every offset in this subsection is an
+offset into the *decoded* record and none of them is an offset into the file. A
+record is a run of ASCII hex digits: unhexlify it, then apply the layout. Across
+the 37 Insight `.P2` databases here — 9,092 records deduplicated on content —
+**every record decodes, with zero failures**, each file begins with the SYN at
+byte 0, and records are CRLF-terminated throughout (the CR-only form is the
+Desigo CC device-backup variant noted above). The check that settles it: the
+`01 00 04 "SYST"` preamble appears **0 times in the raw file bytes and 9,056
+times after decoding**. A reader that scans the file for the preamble, or reads
+`u16 length` at byte 0 of a record, finds nothing and concludes the format is
+undocumented. [W]
 
 ```
 Layout A   preamble at offset 8      4,886 records
@@ -7426,7 +7486,7 @@ specific test that would confirm or falsify it.
    (§7.2) [W]; P2 relies on TCP for delivery/retransmit and has no app-layer
    retransmit (§7.2) [W]; the ~10 s heartbeat cadence is observed. The
    request→response latency distribution is now **measured** — median round-trips
-   range ≈ 6 ms (ping/COV) to ≈ 53 ms (trend), p95 < ~2× median, up to 9 requests
+   range ≈ 6 ms (ping/COV) to ≈ 53 ms (trend), p95 < ~2× median, up to 14 requests
    pipelined (§7.2, §6.5) [W]. *Missing:* the exact heartbeat-miss count /
    ACK-timeout that declares a peer failed is not pinned. *Test:* on a controlled
    peer, count the heartbeat misses that trigger a failed-node transition.
