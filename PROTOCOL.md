@@ -1885,6 +1885,38 @@ carries a numeric code (§7.2.2) that maps onto them. [S]
 | `AP2Error` | Base/generic AP2 error. | [S] |
 | `AP2MappingError` | An AP2↔CPI function-code mapping failure. | [S] |
 
+#### 7.2.1a Nothing retries a failed request
+
+There is **no retry behaviour** in the observed clients. A first look suggested
+the opposite — of 6,005 error responses paired to their requests, **5,522 are
+followed by the same opcode on the same connection, at a median of 0.02 s** —
+but that test cannot tell a retry from the next request in a poll cycle, and
+`POINT_LOG_VALUE` is issued constantly.
+
+The control settles it. Measuring how long until the **identical** request
+recurs — same opcode *and* same body length — split by whether the answer was an
+error or a success: [W]
+
+| Opcode | recurs after **error** | after **success** |
+|---|---:|---:|
+| `0x0220 POINT_LOG_VALUE` | 0.42 s (n=2,570) | **0.01 s** (n=4,001) |
+| `0x0271 COV_ENABLE` | 0.68 s (n=1,319) | **0.10 s** (n=5,120) |
+| `0x0240 POINT_CMD_VALUE` | 4.36 s (n=29) | **0.43 s** (n=32,371) |
+| `0x0986 UPL_ALL_TEC` | 2.58 s (n=29) | **0.00 s** (n=902) |
+
+A retried request would recur **faster** after a failure. It recurs *slower* —
+42× slower for `POINT_LOG_VALUE`. So a client that receives an error moves on,
+and the request reappears only when its normal cycle comes round again.
+
+Two consequences for an implementer. A panel **must not** rely on a client
+re-asking; an error is final for that exchange. And a client gains nothing by
+implementing retry against these panels' behaviour — if a name is `not_found` it
+will still be `not_found`, which is what 97% of these errors are (§7.2.2).
+
+**Scope.** Every client in this corpus is the same supervisor product, so this
+characterises *that implementation*, not a protocol requirement. Nothing in the
+wire format forbids a retry; nothing here performs one. [W]
+
 #### 7.2.2 Observed wire error codes
 
 These 2-byte codes appear as the `dir == 0x05` error tail in the corpus. Distribution across the
