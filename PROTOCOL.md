@@ -4723,6 +4723,31 @@ trusts it *and* falls through to a neighbour mislabels them. Neither of the four
 is wire-observed here, so the failure would not show up in testing against this
 corpus either.
 
+**Two of those four are only a spelling away, and the difference matters.**
+`LFMSSL_type` and `LFMSSP_type` *are* fully declared — eight and nine fields
+each, state-text table, on/stage delays and three or four `Physical_address_DO`
+subpoint addresses. Only the resolver cannot reach them. `ldao_` and
+`ppcl_lai_` have no declared structure at all. So the arms divide three ways,
+and the division is what an implementer needs rather than the count: [S]
+
+| status | arms | what is needed |
+|---|---|---|
+| **Decodable today** — 7 | `ldi` `ldo` `lai` `lao` `l2sl` `lenum` `lpaci` | nothing; six are wire-observed here and `lpaci` is declared but unseen |
+| **Blocked on one thing** — 7 | `looap` `l2sp` `looal` `lfssl` `lfssp` `lfmsl` `lfmsp` | the width of **`use_proof_`**, the payload arm of the `Proof_option` CHOICE that every one of them ends with |
+| **Undeclared** — 2 | `ldao` `ppcl_lai` | a structure definition; the library has none |
+
+**`use_proof_` is the single highest-leverage unknown in the point model.**
+Pinning that one anonymous field takes the point types a decoder can handle from
+**7 of 16 to 14 of 16**, and it is the top entry in §10.9's register at 48
+operations blocked.
+
+It cannot be settled from this corpus, and the reason is not a gap in the
+analysis: **zero of 5,807 walked points are of any type that carries
+`proof_option`.** Only six of the sixteen point types exist at this site at all.
+A proofed point is a start/stop output with feedback — a fan or pump starter
+with a status contact — so what is needed is a capture from a site that has one,
+not more work on this one. [W]
+
 And what precedes the arm is `Point_base`, common to every point: [S][W]
 
 | Field | Type | Wire |
@@ -5494,7 +5519,7 @@ Of the **455 operations** that have a request and/or response structure:
 |---|---:|
 | **Decodable** from widths this document pins | **293 (64%)** |
 | Blocked on at least one unstated width or unpinned CHOICE | 162 |
-| distinct blocking types | **86** |
+| distinct blocking types | **84** |
 
 **The blockers are concentrated, and a few are worth far more than the rest.**
 "Blocks" counts operations the type appears in; "alone" counts operations for
@@ -5503,8 +5528,8 @@ immediately:
 
 | blocker | blocks | alone | what it is |
 |---|---:|---:|---|
-| `use_proof_` | 48 | 7 | the payload arm of the `Proof_option` CHOICE |
-| `ldao_`, `lfmsl_`, `lfmsp_`, `ppcl_lai_` | 41 each | 0 | the four `All_points` arms **never observed here** (§10.4.1) |
+| `use_proof_` | 48 | 7 | the payload arm of the `Proof_option` CHOICE — and it gates **7 of the 16 point-type arms** (§10.4.1), the largest single lever in the document |
+| `ldao_`, `ppcl_lai_` | 41 each | 0 | the two `All_points` arms the library never declares (§10.4.1) |
 | `BACnetYes_` | 17 | 5 | payload arm of the `IsBacnet` CHOICE |
 | `Trend_type` (CHOICE) | 14 | 6 | a 3-arm CHOICE, so the tag→arm mapping genuinely matters |
 | `Baud_rate` | 11 | 6 | see §10.1 — one `CABINET_SET_*_BAUDRATE` frame settles it |
