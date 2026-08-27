@@ -4995,7 +4995,27 @@ which makes the liveness heartbeat a complete health feed: a passive listener
 learns each node's readiness and replication state every interval without
 issuing a single request.
 
-The `bln_name` field here is the same value the access gate checks: a peer presenting the wrong BLN is rejected at the network layer; the node/site/bln triple is also echoed back in `CABINET_DISPLAY` (§10.5). [W][I]
+The `bln_name` field here is the same value the access gate checks: a peer presenting the wrong BLN is rejected at the network layer. [W]
+
+**The triple is not one identity — two thirds of it is shared and one third is
+the sender's.** Measured across 60 `0x4640` requests, 60 responses and 60
+`CABINET_DISPLAY` responses: [W]
+
+| | node name | site name | BLN name |
+|---|---|---|---|
+| `0x4640` **request** (supervisor → panel) | the **supervisor's** | shared | shared |
+| `0x4640` **response** (panel → supervisor) | the **answering panel's** | shared | shared |
+| `CABINET_DISPLAY` (§10.5) | the **responding panel's** | shared | shared |
+
+The site and BLN names are identical in **60 of 60** bodies of all three kinds —
+they are properties of the BLN, so every node on it emits the same pair. The
+node name is not: the request's and the response's differ from each other, and
+the request's node name appears in **0 of 60** `CABINET_DISPLAY` bodies while the
+response's appears in exactly the ones that came from that panel.
+
+So an implementer must **not** read the session block's node name as "the peer's
+name". It names whoever *emitted* that frame, and direction decides who that is.
+Only the site and BLN names can be compared across nodes.
 
 ### 10.7 Node / BLN management bodies
 
