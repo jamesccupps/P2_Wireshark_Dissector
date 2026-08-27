@@ -582,6 +582,21 @@ BLN (Building Level Network)
              └─ FLN device / drop (sub-bus, separate namespace)
 ```
 
+**The point-name separator is configurable, and a parser must not hard-code
+it.** Point names are compound — the observed corpus is full of dotted forms —
+but the character joining the parts is a **site setting chosen from six**:
+period, apostrophe, comma, dash, underscore or space. Period is the default and
+the vendor recommends it, which is why almost everything one sees uses it, and
+exactly why a tokenizer written against observed traffic will hard-code the
+wrong thing. [D]
+
+Note that this is the opposite constraint from the scopes below it: BLN, node
+and site names *forbid* periods and spaces (§3.4.1–§3.4.3), while a point name
+may be joined by either. A client splitting a compound name must take the
+separator from configuration, and one that cannot should treat the name as
+opaque rather than guess — the wire carries the name as a single `TEXT_` TLV in
+any case (§8.1), so nothing in the protocol requires it to be split at all.
+
 The wire-level enforcement asymmetry of these names (BLN strict, destination node case-insensitive, source identity format-shaped) is specified with the handshake; this section gives the naming constraints themselves.
 
 #### 3.4.1 BLN name
