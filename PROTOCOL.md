@@ -6676,7 +6676,9 @@ the token set — the emergency, PDL, phone, alarm-limit and COV-control familie
 control logic is made of but nothing about what the language supports.
 
 **`OIP` is used 152 times and is not in the vendor statement-type enum.** Its
-form is `OIP (<identifier>, "<point name>")`. The enum has exactly two unnamed
+form is `OIP (<identifier>, "<point name>")` — independently confirmed by the
+compiler's own error text, which names *"syntax error in OIP statement,
+parenthesis or quotes"* and so attests both delimiters. The enum has exactly two unnamed
 members, `WHOPUNKNOWN1` and `WHOPUNKNOWN2` (values 61 and 62), so the token set
 itself records that not every statement is named in it.
 
@@ -6728,6 +6730,32 @@ just below parentheses in the precedence chain above). [S/D]
 - an `@`-priority indicator (see below).
 
 An implementer building a command line must count parameters against the 16-slot ceiling; a 17th parameter is rejected. [D]
+
+**There is a second, larger ceiling that is easy to miss: 32 operators.** The
+compiler enforces both, and they count different things — *"a total of 16
+operands can be used in one PPCL statement"* and *"a total of 32 operators can
+be used in one PPCL statement."* An operand is a point reference or a constant;
+an operator is each arithmetic, relational or logical operation the expression
+performs. A statement can therefore exceed neither, and a generator that checks
+only the operand count will emit lines a panel rejects. [D]
+
+**Three more constraints a program writer has to satisfy, from the compiler's
+own error set:** [D]
+
+- **No backward `GOTO`, except the last one in the program.** Any other `GOTO`
+  referring to an earlier line number is rejected — so a program is essentially
+  a forward flow with at most one loop back, and a naive code generator that
+  emits loops will not compile.
+- **A `GOTO`/`GOSUB` target must be an integer line number that exists.** Both
+  the non-integer and the dangling-reference cases are distinct errors.
+- **A statement may not reference a point in another panel.** Cross-panel
+  references are a compile error, not a runtime failure — which is what the
+  Cross Trunk feature of §3.5 exists to work around, and why it carries the
+  restrictions it does.
+
+Line numbering itself is `1`–`32,767`, conventionally assigned in multiples of
+ten to leave insertion room, and each must be unique — the compiler rejects a
+duplicate or out-of-range number outright. [D]
 
 **Priority `@`-indicators.** A PPCL command may specify the command priority at which it acts using an `@`-prefixed indicator. These map one-to-one onto the command-priority ladder of §8: [S]
 
