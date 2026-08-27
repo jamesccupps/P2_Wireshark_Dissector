@@ -4826,30 +4826,49 @@ skip nothing. Reading either structure by position alone gets one of them wrong.
 [S][W]
 
 **But most CHOICEs here are far easier than that, and it is worth knowing which
-kind you are looking at before reaching for an enum table.** There are **52**
-CHOICE structures in the library, and they fall into three groups: [S]
+kind you are looking at before reaching for an enum table.** Counting over the
+complete type system — the flattened catalog plus the nested types it drops
+(§10.1) — there are **73** CHOICE structures in three groups: [S]
 
 | shape | count | what a decoder needs |
 |---|---:|---|
-| **2 arms, one of them `NULL_`** — an optional field | **31** | nothing but the arm order: one tag means absent and consumes no further bytes, the other means present |
-| 2 arms, neither `NULL_` — a union of two forms | 8 | which tag picks which of the two |
-| **3 or more arms** | **13** | a genuine selector; `All_points` (16 arms) and `Alarm_object` (9) are pinned in §10.4.1 and §10.4.4, leaving **11** |
+| **2 arms, one of them `NULL_`** — an optional field | **42** | nothing but the arm order: one tag means absent and consumes no further bytes, the other means present |
+| 2 arms, neither `NULL_` — a union of two forms | 14 | which tag picks which of the two |
+| **3 or more arms** | **17** | a genuine selector |
 
-So the "tag is an enum, not an ordinal" hazard bites hard on exactly **11
-structures**, and `MiscData` — 48 arms — is the extreme case. For the 39 two-arm
-CHOICEs the two readings cannot diverge; there are only two arms.
+For the 56 two-arm CHOICEs the enum and ordinal readings **cannot diverge** —
+there are only two arms. So the "tag is an enum, not an ordinal" hazard is
+confined to the 17, and among those only two selectors have been identified:
+
+| CHOICE | selector | values |
+|---|---|---|
+| `All_points` | `Point_type_enum` | **sparse** — skips 5, 8–10 and 16–19, so the tag is *not* the arm index |
+| `Alarm_object` | `Alarm_object_type_enum` | **ordinal** 0–8, so for this one the tag *is* the arm index |
+
+**`All_points` is the sparse one, and as far as the evidence goes it is the only
+one.** The other fifteen — `MiscData` at 48 arms, `Command_Type` at 8,
+`Trend_type` and `Duct_type` at 3 — have no selector enum that can be matched to
+their arm names, so their tag values remain **[OPEN]**. Ordinal is the natural
+guess and is right for `Alarm_object`; it is wrong for `All_points`, which is
+precisely why the guess must not be silent.
+
+> A single transcription discrepancy causes both failures at once. The arm
+> fields are spelled `lfmsl`/`lfmsp` and both the structures **and**
+> `Point_type_enum`'s members are spelled `lfmssl`/`lfmssp`. That one extra `S`
+> defeats the mechanical rule that resolves an arm to its structure *and* the
+> match that identifies a CHOICE's selector enum.
 
 **What does bite on the two-arm ones is arm order, and it is not uniform.** Of
-the 31 optional-presence CHOICEs, **25 put `NULL_` first** — so tag `0` means
-*absent* — and **6 put it second**, where tag `0` means *present*:
+the 42 optional-presence CHOICEs, **34 put `NULL_` first** — so tag `0` means
+*absent* — and **8 put it second**, where tag `0` means *present*:
 
 ```
-LocalOrRemote
-Physical_address_AI   Physical_address_AO   Physical_address_DI
-Physical_address_DO   Physical_address_PA
+LocalOrRemote          client_COV_Increment_   NetworkVariable_
+Physical_address_AI    Physical_address_AO     Physical_address_DI
+Physical_address_DO    Physical_address_PA
 ```
 
-Five of the six are the physical-address family of §10.4.2 — the most-used
+Five of the eight are the physical-address family of §10.4.2 — the most-used
 structures in the point model. An implementer who generalises "tag 0 means the
 field is absent" from the common case reads **every physical address backwards**,
 and gets a plausible parse rather than an error. Read the arm order from the
@@ -5027,8 +5046,8 @@ mistaking them for the point's own tail is the specific error that produced the
 decoder that assumes tag 0 means "has an address" is wrong here.
 
 Note which way round the exception runs, because it is the opposite of what the
-family suggests: measured across all 52 CHOICEs (§10.4.1), `NULL_`-first is the
-**majority** convention at 25 of 31, and `Physical_address_Lenum` follows it. It
+family suggests: measured across all 73 CHOICEs (§10.4.1), `NULL_`-first is the
+**majority** convention at 34 of 42, and `Physical_address_Lenum` follows it. It
 is `_AI`, `_AO`, `_DI`, `_DO` and `_PA` that are unusual. [S]
 
 `Point_extension2` is **not a fixed-width field**. It is a counted block: [W]
