@@ -1545,8 +1545,11 @@ answers, and a robust requester matches on that exact value against its set of o
 **Pipelining is real and confirmed.** Two overlapping live captures show the request `sequence` and
 the reverse-direction response `sequence` carrying the **identical** value range — the response echoes
 the request's `sequence` verbatim, which is exactly how a client matches a reply to its outstanding
-request — and up to **9 requests outstanding** observed before their responses arrive (9 is a
-capture-bound maximum, not a protocol limit; treat it as "at least 9"). A reply may therefore
+request — and up to **14 requests outstanding** observed before their responses arrive. Measured
+across the whole corpus (306,990 paired exchanges), the peak depth per connection is 1 for the
+large majority — 2,073 connections never exceed one outstanding request — with a tail through
+2, 3, 5, 9, 10 and a single connection reaching **14**. 14 remains a *capture-bound* maximum, not a
+protocol limit; treat it as "at least 14" and use a sliding-window matcher with no fixed depth. A reply may therefore
 lag a request by a small number of steps (never arrive ahead of it); a sliding-window matcher keyed on
 exact `sequence` is the correct implementation, not merely defensive accommodation. [W]
 
@@ -2003,6 +2006,47 @@ dozen concurrent P2 sessions indefinitely. [W]
 > whether sessions overlap before treating their count as a rate. The same
 > capture also shows 2,393 single-frame tuples against those 36 real sessions,
 > so a raw tuple count is not a session count either.
+
+#### 7.3.1 Response timing, measured
+
+Across **306,990 paired request/response exchanges** — every request matched to
+the response echoing its `sequence` on the reverse direction of the same
+connection: [W]
+
+| | |
+|---|---:|
+| median latency | **6.5 ms** |
+| p90 | 21.8 ms |
+| p99 | 161.6 ms |
+| maximum | 8.78 s |
+| requests with no response | **41 (0.01%)** |
+
+**A P2 request is essentially always answered.** Forty-one unanswered out of
+307,031 is the entire corpus-wide total, and that figure only becomes meaningful
+after excluding connections whose *reverse direction was never captured* — those
+contribute 7,224 requests whose replies the tap could not have seen. Counting
+them produces "2% unanswered", which measures the vantage and not the panel.
+Restricted to `EBLN_PING` on connections with both directions visible and 20 or
+more pings, **268 of 274 connections have zero unanswered**, and the six that do
+have exactly one each, in a capture taken across a deliberate power cycle.
+
+**Reaching through to an FLN device costs about 40× a panel-local read**, and a
+client must size its expectations accordingly: [W]
+
+| Operation | Median | n |
+|---|---:|---:|
+| `0x4640 EBLN_PING` | 6.0 ms | 101,294 |
+| `0x0981 UPL_ALL_POINT` | 10.5 ms | 12,545 |
+| `0x0220 POINT_LOG_VALUE` | 10.9 ms | 6,935 |
+| `0x0986 UPL_ALL_TEC` — the panel's **stored** TEC record | 15.7 ms | 1,047 |
+| `0x4200 TEC_LOG` | 33.8 ms | 248 |
+| **`0x4221 TEC_REMOTE_INIT_VALUE_LOG`** — the value **from the device** | **674.7 ms** | 1,173 |
+
+The `LOCAL` / `REMOTE` distinction in the `0x422x` names is exactly this: local
+reads the panel's copy, remote crosses the field bus. The remote form's p99 is
+3.7 s, which sits well inside the 30-second `ClientTrnxTimeout` of §4.6 — so a
+client should not treat a multi-second reply to an FLN-crossing opcode as a
+fault, and should not apply one timeout to every opcode.
 
 **The BLN is a full peer mesh.** Every node holds live P2 sessions with the supervisor **and** with
 every other node on the BLN — panel↔panel sessions run over `panel:5033` just like the supervisor's
