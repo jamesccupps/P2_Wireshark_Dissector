@@ -3800,6 +3800,12 @@ Two cautions an implementer should carry from this:
   something that is *not* a `TEC_body`, or fails. Nothing in this corpus has ever
   asked.
 
+  *Independently reproduced.* A later pass matched all 1,144 declared structures
+  against these bodies without reference to the opcode's name, and `Team_response
+  | TEC_body` was the **only** shape of the 1,144 that consumes all 60 responses,
+  with the request decoding as `user_profile | team_search | application_number`.
+  Two methods, one answer. [W]
+
 - **Some TEC requests use a fixed 220-byte zero-padded buffer.** Form B above and
   every one of `0x4221`'s 1,173 requests are exactly 220 bytes with the remainder
   zero-filled — `0x4221` consumes 44 and pads 176. The padding is not opaque
