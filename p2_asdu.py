@@ -1190,7 +1190,7 @@ CHOICE_TAGS = {
         },
     },
     'BAC_Point_Base': {
-        'complete': False,
+        'complete': True,
         'map': {
             0: 'analog_input',
             1: 'analog_output',
@@ -1200,6 +1200,7 @@ CHOICE_TAGS = {
             5: 'binary_value',
             13: 'multi_input',
             14: 'multi_output',
+            19: 'multi_value',
         },
     },
     'BAC_propertystatetype_Choice': {
@@ -1532,6 +1533,23 @@ CHOICE_TAGS = {
         'map': {
             0: 'all',
             1: 'specific',
+        },
+    },
+    'event_parameter_Tag_': {
+        'complete': True,
+        'map': {
+            1: 'change_of_state',
+            3: 'commandfailure',
+            4: 'Floating_limit',
+            5: 'out_of_range',
+        },
+    },
+    'localStateText_': {
+        'complete': True,
+        'map': {
+            0: 'no_text',
+            1: 'binary_pts',
+            2: 'enum_pt',
         },
     },
 }

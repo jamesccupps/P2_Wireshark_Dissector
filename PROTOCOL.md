@@ -4459,7 +4459,7 @@ the output looks like a successful decode:
 | Property | What a generated lookup does |
 |---|---|
 | **Enum values are sparse** (below) — 18 of 66 have gaps | an array-index lookup returns a different, valid name past the first gap |
-| **A CHOICE `tag_` is sometimes an enum value, not an ordinal** (§10.4.1, §10.4.3) | positional arm selection is right for 49 of the 53 CHOICEs whose numbering could be recovered, and silently wrong for the four where the arms mirror an external enumeration — `All_points`, the two BACnet point CHOICEs, and one 1-based case |
+| **A CHOICE `tag_` is sometimes an enum value, not an ordinal** (§10.4.1, §10.4.6) | positional arm selection is right for 24 of the 29 CHOICEs whose numbering is fully recovered, and silently wrong for the five where the arms mirror an external enumeration — `All_points`, the two BACnet point CHOICEs, the BACnet event-parameter CHOICE, and one 1-based case |
 | **`Name_space_enum` is defined twice, with incompatible values** — `0 system / 1 user / 65535 any`, and separately `1 LAO_actuator / 2 HOA` | whichever definition the generator loads last silently wins for every `Name_space` field |
 | **An enum's members can be bit positions, not values** — `Schedule_days` has 14 members and a 4-byte field | sizing the field from the enum's maximum gives one byte instead of four, and then decodes a mask as a value |
 
@@ -5236,53 +5236,6 @@ value, **9 of 9**. That enum happens to be contiguous from 0, so there the tag
 property of the enum, not of the protocol: read the enum, and only then note
 whether it happens to be dense. [S]
 
-#### 10.4.3 CHOICE tags in general — the rule and its exceptions
-
-§10.4.1 shows that `All_points`' tag is an enum value and not a position. The
-obvious next question is whether that is peculiar to point types or true of every
-CHOICE in the protocol, and it is answerable: the vendor's codec selects an arm
-by branching on the tag, so the numbering is stated in the code for every CHOICE
-it codes. **53 of the 87 CHOICE types yield a map.** [C]
-
-**The rule: the tag is the position in the declared arm list — unless the arm set
-mirrors an external enumeration, in which case it carries that enumeration's
-values.** Forty-nine of the fifty-three are positional. Four are not, and each of
-the four is a case where the arms are really something else's type codes: [C]
-
-| CHOICE | tag values | the numbering |
-|---|---|---|
-| `All_points` | 1, 2, 3, 4, 6, 7, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24 | the `Point_type` enum (§10.4.1) |
-| `BAC_Point_Base` | 0, 1, 2, 3, 4, 5, 13, 14 | the **BACnet object-type** enumeration |
-| `BAC_propertystatetype_Choice` | 3, 5, 13, 19 | the same |
-| `Pdl_display_data` | 1, 2 | positional but **1-based** |
-
-The two BACnet cases can be checked against a public standard rather than taken
-on trust, and they hold exactly: 0 analog-input, 1 analog-output, 2 analog-value,
-3 binary-input, 4 binary-output, 5 binary-value, 13 multi-state-input, 14
-multi-state-output, 19 multi-state-value — with the arm names matching
-one-for-one. An implementer decoding a BACnet-side CHOICE should treat the tag as
-a BACnet object type and not count arms. [C][I]
-
-`BAC_Point_Base`'s ninth arm, `multi_value`, has no tag in the recovered table.
-By the pattern it is **19**, the BACnet multi-state-value code, which is also the
-tag `BAC_propertystatetype_Choice` uses for its own `multistate_value` arm. That
-is an inference from two consistent sources rather than a read value, and it is
-the one place in this section where the distinction matters. [I]
-
-**A trap worth naming, because it nearly went into this document.** The tag is
-not the index into the arm list as the codec writes it: the generated selector
-switches on `tag - base`, with `base` the lowest tag value, so a reader that
-takes the jump-table index for the tag is off by `base` for the whole type.
-`All_points` has base 1, and read naively its sixteen tags all came back one too
-low — a self-consistent, entirely wrong map that only failed against the
-independently wire-derived values of §10.4.1. Where a decoder derives arm
-selection from any generated artifact, it must account for that offset. [C]
-
-**Two CHOICEs have no map at all**, because the vendor codec never codes them —
-`localStateText_` and `event_parameter_Tag_` carry a constructor and nothing
-else. Neither appears in any capture in this corpus. They are the last two
-entries in §10.9's blocked list and are marked `[OPEN]` rather than guessed. [OPEN]
-
 #### 10.4.2 The physical address, and how a TEC subpoint differs from a panel point
 
 Every point arm ends with a `Physical_address_*` field, and it is a CHOICE with
@@ -5371,7 +5324,7 @@ the same source). Two CHOICEs covering the same virtual/physical distinction
 number their tags oppositely because they *declare* them oppositely, not because
 either departs from a convention. What an implementer must not do is carry a tag
 assignment from one CHOICE to another that "means the same thing" — read each
-one's own arm order, or its entry in §10.4.3. [C][S]
+one's own arm order, or its entry in §10.4.6. [C][S]
 
 The distinction the flattening destroyed is also semantic and worth keeping: the
 digital-output boolean is `inverted` and the digital-input one is
@@ -5652,6 +5605,80 @@ the two offsets carry the weekday their own date falls on, 34 of 34** (§10.8).
 **[OPEN]** — the count reads `2` in all 17 samples, so the array reading is a
 structural fit rather than a demonstrated one, and the three `f32` per record
 are not individually named. Every sample is a supply fan. [W]
+
+#### 10.4.6 CHOICE tags in general — the rule and its exceptions
+
+§10.4.1 shows that `All_points`' tag is an enum value and not a position. The
+obvious next question is whether that is peculiar to point types or true of every
+CHOICE in the protocol, and it is answerable: the vendor's codec selects an arm
+by branching on the tag, so the numbering is stated in the code for every CHOICE
+it codes. Three places in the codec state it, and it took all three to finish the
+job: a CHOICE's own decoder; the decoder of the **parent** that holds it, for a
+CHOICE the compiler inlined into its only user; and the **encoder**, which writes
+the tag the decoder reads and is the sole place three of them compile the
+selection at all. **68 of the 73 CHOICE types yield a map, and 29 of those cover
+every declared arm** — which is the only kind a reader can use, since a map
+missing an arm cannot select the arm it is missing. [C]
+
+The encoder route was checked before being believed. On the twelve CHOICEs where
+both an encoder map and a decoder map exist it reproduced the decoder map
+**twelve times out of twelve with no contradiction**, and the single difference
+is a superset: `BAC_Point_Base`'s ninth arm, which its `Decode` never lays
+out. [C]
+
+**The rule: the tag is the position in the declared arm list — unless the arm set
+mirrors an external enumeration, in which case it carries that enumeration's
+values.** Twenty-four of the twenty-nine complete maps are positional. Five are
+not, and every one of the five is a case where the arms are really something
+else's type codes: [C]
+
+| CHOICE | tag values | the numbering |
+|---|---|---|
+| `All_points` | 1, 2, 3, 4, 6, 7, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24 | the `Point_type` enum (§10.4.1) |
+| `BAC_Point_Base` | 0, 1, 2, 3, 4, 5, 13, 14, 19 | the **BACnet object-type** enumeration |
+| `BAC_propertystatetype_Choice` | 3, 5, 13, 19 | the same |
+| `event_parameter_Tag_` | 1, 3, 4, 5 | the **BACnet event-type** enumeration |
+| `Pdl_display_data` | 1, 2 | positional but **1-based** |
+
+Three of these five can be checked against a public standard rather than taken on
+trust, and all three hold exactly. The object-type cases: 0 analog-input, 1
+analog-output, 2 analog-value, 3 binary-input, 4 binary-output, 5 binary-value,
+13 multi-state-input, 14 multi-state-output, 19 multi-state-value — arm names
+matching one-for-one, all nine of `BAC_Point_Base`'s arms among them. The
+event-type case is sharper still, because it is the *gap* that agrees:
+`event_parameter_Tag_` numbers its four arms 1 change-of-state, 3
+command-failure, 4 floating-limit, 5 out-of-range, skipping 2 — and ASHRAE 135
+numbers change-of-value 2, an event type this CHOICE declares no arm for. The
+encoder sends tag 2 to the default label. An implementer decoding a BACnet-side
+CHOICE should treat the tag as the BACnet code and not count arms. [C][I]
+
+**A trap worth naming, because it nearly went into this document.** The tag is
+not the index into the arm list as the codec writes it: the generated selector
+switches on `tag - base`, with `base` the lowest tag value, so a reader that
+takes the jump-table index for the tag is off by `base` for the whole type.
+`All_points` has base 1 and `event_parameter_Tag_` has base 1, and read naively
+`All_points`' sixteen tags all came back one too low — a self-consistent, entirely wrong map that only failed against the
+independently wire-derived values of §10.4.1. Where a decoder derives arm
+selection from any generated artifact, it must account for that offset. [C]
+
+**Three CHOICEs looked as though the codec never coded them, and it did.**
+`localStateText_`, `event_parameter_Tag_` and `scale_` carry a constructor and
+nothing else — no `Decode`, no `Encode` — and each blocked operations in §10.9
+for that reason. In every case the selection is compiled into the one type that
+holds the CHOICE: `scale_` into `Analog_Team_Scale`'s decoder (§11.5.1),
+`localStateText_` into `BACnet_MSTP_Extension`'s **encoder**, and
+`event_parameter_Tag_` into `BAC_EEO_Object`'s. A CHOICE having no methods says
+nothing about whether its numbering is recoverable; it says only that the
+compiler had a single call site to inline into. All three are read values, and
+none needed a capture. [C]
+
+One caution for anyone repeating this. A parent can hold **several** CHOICEs —
+`BAC_EEO_Object` holds two — and a reader that looks for "a switch preceded by a
+load of `tag_`" will attribute the first one it finds to whichever CHOICE it was
+asked about. Done that way this document would have carried a five-tag map for a
+two-arm CHOICE with every tag selecting the same arm. The load pair to match is
+`<field>` then `tag_`, and a map that sends two tags to one arm should be
+discarded rather than published. [C]
 
 ### 10.5 CABINET_DISPLAY — firmware / identity block (0x010C)
 
@@ -6031,26 +6058,36 @@ Of the **455 operations** that have a request and/or response structure:
 
 | | operations |
 |---|---:|
-| **Decodable** from widths and tag maps this document pins | **444 (98%)** |
-| Blocked on an unpinned CHOICE | 11 |
-| distinct blocking types | **3** |
+| **Decodable** from widths and tag maps this document pins | **455 (100%)** |
+| Blocked on an unpinned width or CHOICE | **0** |
 
-**Nothing is blocked on a width.** The three that remain are CHOICEs, which
-block for a different reason — a reader cannot tell which arm is present — and
-they need tag values, which §10.4.3 supplies for every CHOICE where they could
-be recovered. These three are what is left:
+**The table of blockers is empty, and that is the claim: every operation in the
+catalog that declares a request or a response can be turned into named fields
+from this document alone.** The register read 274 in its first edition and 384 in
+the edition before this one.
 
-| blocker | blocks | alone | why it is still open |
-|---|---:|---:|---|
-| `localStateText_` | 7 | **7** | arms `no_text` / `binary_pts` / `enum_pt`; the vendor codec never codes this type, and no body in the corpus carries it |
-| `BAC_Point_Base` | 2 | **2** | eight of nine arms recovered; `multi_value` has no tag in the table — almost certainly **19**, see §10.4.3, but inferred rather than read |
-| `event_parameter_Tag_` | 2 | **2** | as `localStateText_`; needs a BACnet event-enrollment object |
+The last eleven operations were blocked by three CHOICEs — `localStateText_` (7
+operations, and the only thing missing from all 7), `BAC_Point_Base` (2) and
+`event_parameter_Tag_` (2) — and a previous edition of this section named the
+capture each one needed: a `MEMBER_DESC_UPLOAD` response for the first, a BACnet
+event-enrollment object for the third. **Neither was taken.** All three were read
+out of the vendor codec's *encoder* methods, a place the earlier recovery passes
+had not looked because they read decoders (§10.4.6). Two of the three can be
+checked against ASHRAE 135 rather than against the vendor, and both hold.
 
-`localStateText_` is reached from `AP2_Member_Desc_Upload_Response`, so **one
-`MEMBER_DESC_UPLOAD` response closes it**. That capture was until recently worth
-taking for two reasons — the `scale_` CHOICE of §11.5.1 rode on the same
-response — but `scale_` has since been settled from the vendor codec without a
-capture, so `localStateText_` is now the whole of the case for it.
+Read that against the paragraph immediately below, which withdraws the same kind
+of claim about the enum widths. **Twice now a "needs new evidence" verdict in
+this register has fallen to evidence already in hand**, and in both cases what
+was missing was not data but a place in the existing material that nothing had
+read.
+
+One qualification the figure needs. Forty-four CHOICEs still have no complete tag
+map, and the register counts a **two-armed** CHOICE decodable without one: with
+two arms the body that follows determines which was sent, since the arms differ
+in length or in the first field's type. That is a stated modelling assumption,
+not a read value. It is the only assumption between this register and the wire,
+and a CHOICE where both arms are the same width would falsify it — none is
+known.
 
 **A claim this section used to make, withdrawn.** Earlier editions reported
 forty blockers, of which thirty-one were enum widths, and said of them: *"the
@@ -9681,30 +9718,39 @@ specific test that would confirm or falsify it.
    each known-polymorphic opcode, capture every distinct body shape against a lab
    panel and label the operation produced.
 
-7. **CHOICE tag→arm assignment — largely ANSWERED; two CHOICEs remain.**
+7. **CHOICE tag→arm assignment — ANSWERED for every CHOICE a decode depends
+   on.**
    *Was:* declaration order is a hypothesis, not a rule, and reading it the wrong
    way round parses cleanly whenever the two arms are a `NULL_` and a fixed-width
    record — the decoder consumes the wrong number of bytes only on the *other*
    tag value, which a single-valued corpus never produces. The sharpest case was
    `scale_` (§11.5.1), whose only carrier appears nowhere in the corpus, and the
    test asked for was a `MEMBER_DESC_UPLOAD` response.
-   *Now:* the numbering is read directly for **53 of the 87 CHOICEs** (§10.4.3).
-   Forty-nine are positional; four are not, and each of those four numbers its
-   arms by an external enumeration — the `Point_type` enum for `All_points`, and
-   the BACnet object-type enumeration for the two BACnet point CHOICEs, which
-   checks against a public standard rather than against the vendor. `scale_` is
-   settled with them: **tag `0` = `virtual_pt`, tag `1` = `physical_pt`**, so it
-   and `Physical_address_*` each follow their own declaration order and the
+   *Now:* the numbering is read directly for **68 of the 73 CHOICEs**, complete
+   for **29**, and complete for **every CHOICE a decode depends on** — §10.9's
+   register is at 455 of 455 with nothing blocked (§10.4.6). Twenty-four of the
+   twenty-nine are positional; five are not, and each of the five numbers its
+   arms by an external enumeration — the `Point_type` enum for `All_points`, the
+   BACnet object-type enumeration for the two BACnet point CHOICEs, and the
+   BACnet event-type enumeration for `event_parameter_Tag_`, which check against
+   a public standard rather than against the vendor. `scale_` is settled with
+   them: **tag `0` = `virtual_pt`, tag `1` = `physical_pt`**, so it and
+   `Physical_address_*` each follow their own declaration order and the
    inversion is in the declarations, not in one of them breaking a convention
-   (§11.5.1). No capture was needed.
-   *What is left:* **`localStateText_`** and **`event_parameter_Tag_`**, which
-   the vendor codec never codes — each carries a constructor and no decoder — and
-   which no body in the corpus exercises; and **`BAC_Point_Base`**, recovered for
-   eight of its nine arms, with `multi_value` almost certainly BACnet `19` but
-   inferred rather than read. *Test:* `localStateText_` still rides on a
-   `MEMBER_DESC_UPLOAD` response, so that capture remains worth taking — it now
-   closes one gap rather than two. `event_parameter_Tag_` needs a BACnet
-   event-enrollment object (`AP2_BNEEO_*`).
+   (§11.5.1).
+   **No capture was needed for any of it**, and two editions of this register
+   asked for two specific ones — a `MEMBER_DESC_UPLOAD` response for
+   `localStateText_`, a BACnet event-enrollment object for
+   `event_parameter_Tag_`. Both were answered by reading the vendor codec's
+   *encoders*, which write the same tag their decoders read and which the
+   earlier passes had not looked at. `BAC_Point_Base`'s ninth arm went the same
+   way: `multi_value` = **19** is now read rather than inferred from the
+   pattern.
+   *What is left:* forty-four CHOICEs have no complete map. Every one is either
+   two-armed — where §10.9 counts the operation decodable on the stated
+   assumption that the body distinguishes the arms — or unreachable from any
+   operation in the catalog. Neither blocks a decode, and neither is worth a
+   capture.
 
 ### Appendix E — Evidence-tag legend and lineage pointer
 
