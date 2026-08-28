@@ -1213,44 +1213,51 @@ CHOICE_TAGS = {
         },
     },
     'BACnet_FLNs_Settings': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'noBACnetFLNs',
             1: 'yesBACnetFLNs',
         },
     },
     'BACnet_MSTP_ALN_Settings': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'noMSTPALN',
             1: 'yesMSTPALN',
         },
     },
     'BACnet_MSTP_LAN_Settings': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'noMSTPLAN',
             1: 'yesMSTPLAN',
         },
     },
     'BACnet_Settings': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'noBacnet',
             1: 'yesBacnet',
         },
     },
     'Category_db_resp': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'ok_but_empty',
             1: 'first_one',
         },
     },
     'Category_resp': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'valid_but_empty',
             1: 'have_some',
         },
     },
     'Duct_available': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'no_duct',
             1: 'use_duct',
         },
     },
@@ -1263,32 +1270,37 @@ CHOICE_TAGS = {
         },
     },
     'ElementID': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'not_present',
             1: 'present',
         },
     },
     'Eqs_mode': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'all_modes',
             1: 'one_mode',
         },
     },
     'Eqs_name_value': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'value',
             1: 'name_suffix',
         },
     },
     'Eqs_start_where': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'beginning',
             1: 'last_mode',
         },
     },
     'Eqs_which_mode_entry': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'all_mode_entries',
             1: 'entry_ID',
         },
     },
@@ -1309,38 +1321,44 @@ CHOICE_TAGS = {
         },
     },
     'IsBacnet': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'BACnetNo',
             1: 'BACnetYes',
         },
     },
     'IsPanelLogging': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'loggerOff',
             1: 'loggerOn',
         },
     },
     'Lan_or_device': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'one_device',
             1: 'whole_lan',
         },
     },
     'LocalOrRemote': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'remote_is_set',
             1: 'local_is_set',
         },
     },
     'Node_Choice': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'all_nodes',
             1: 'single_node',
         },
     },
     'Other_port_stuff': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'none',
             1: 'port_record',
         },
     },
@@ -1352,38 +1370,44 @@ CHOICE_TAGS = {
         },
     },
     'Physical_address_AI': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'real_addr',
             1: 'virtual_addr',
         },
     },
     'Physical_address_AO': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'real_addr',
             1: 'virtual_addr',
         },
     },
     'Physical_address_DI': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'real_addr',
             1: 'virtual_addr',
         },
     },
     'Physical_address_DO': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'real_addr',
             1: 'virtual_addr',
         },
     },
     'Physical_address_Lenum': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'not_present',
             1: 'present',
         },
     },
     'Physical_address_PA': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'real_addr',
             1: 'virtual_addr',
         },
     },
@@ -1394,38 +1418,44 @@ CHOICE_TAGS = {
         },
     },
     'Point_totalizer': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'disabled',
             1: 'enabled',
         },
     },
     'Proof_option': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'no_proof',
             1: 'use_proof',
         },
     },
     'Set_point_type': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'point_name',
             1: 'value',
         },
     },
     'Setpoint_type': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'point_name',
             1: 'value',
         },
     },
     'Ssto_desop': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'value',
             1: 'name_suffix',
         },
     },
     'Subnet_Choice': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'all_subnets',
             1: 'single_subnet',
         },
     },
@@ -1440,8 +1470,9 @@ CHOICE_TAGS = {
         },
     },
     'Trend_By_Event': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'no_trigger',
             1: 'event_trigger',
         },
     },
@@ -1454,14 +1485,16 @@ CHOICE_TAGS = {
         },
     },
     'Which_Drop': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'all_drops',
             1: 'one_drop',
         },
     },
     'Which_Lan': {
-        'complete': False,
+        'complete': True,
         'map': {
+            0: 'all_lans',
             1: 'one_lan',
         },
     },
@@ -1550,6 +1583,41 @@ CHOICE_TAGS = {
             0: 'no_text',
             1: 'binary_pts',
             2: 'enum_pt',
+        },
+    },
+    'client_COV_Increment_': {
+        'complete': True,
+        'map': {
+            0: 'Real_Increment',
+            1: 'Default_Increment',
+        },
+    },
+    'dns_': {
+        'complete': True,
+        'map': {
+            0: 'xfixed',
+            1: 'dhcp_used',
+        },
+    },
+    'drop_choice_': {
+        'complete': True,
+        'map': {
+            0: 'all_drops',
+            1: 'single_drop',
+        },
+    },
+    'point_choice_': {
+        'complete': True,
+        'map': {
+            0: 'all_points',
+            1: 'single_point',
+        },
+    },
+    'smtp_server_': {
+        'complete': True,
+        'map': {
+            0: 'address',
+            1: 'name',
         },
     },
 }
