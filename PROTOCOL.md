@@ -6047,9 +6047,10 @@ be recovered. These three are what is left:
 | `event_parameter_Tag_` | 2 | **2** | as `localStateText_`; needs a BACnet event-enrollment object |
 
 `localStateText_` is reached from `AP2_Member_Desc_Upload_Response`, so **one
-`MEMBER_DESC_UPLOAD` response closes it** — and the same capture settles the
-`scale_` CHOICE of §11.5.1, which is a separate open question asking for exactly
-that operation.
+`MEMBER_DESC_UPLOAD` response closes it**. That capture was until recently worth
+taking for two reasons — the `scale_` CHOICE of §11.5.1 rode on the same
+response — but `scale_` has since been settled from the vendor codec without a
+capture, so `localStateText_` is now the whole of the case for it.
 
 **A claim this section used to make, withdrawn.** Earlier editions reported
 forty blockers, of which thirty-one were enum widths, and said of them: *"the
