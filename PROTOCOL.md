@@ -4616,11 +4616,13 @@ bodies from 91% to **99.2%** decoded (2,494 of 2,515): [W]
 
 | Rule | Evidence |
 |---|---|
-| **A trailing declared field may be absent.** A body ending exactly on a field boundary with fields still to come is truncated, not malformed — the library describes a **later firmware revision than a given panel emits**. Report what was not received; do not reject the body. | `0x0986 UPL_ALL_TEC` omits its final `is_bacnet` in **59 of 60** bodies; `0x010C CABINET_DISPLAY` stops short in all 60 |
+| **A trailing declared field may be absent.** A body ending exactly on a field boundary with fields still to come is truncated, not malformed — the library describes a **later firmware revision than a given panel emits**. Report what was not received; do not reject the body. | `0x0986 UPL_ALL_TEC` omits its final `is_bacnet` in **59 of 60** bodies |
 | **Request bodies are padded with zeros to a fixed size** — **220 bytes** at this site. Content of 2 to 65 bytes pads to the same total. | 174 bodies across 8 opcodes; `0x040A`'s entire declared body is one `SHORT_` and the frame carries `f8 2a` then 218 zeros |
 | **Some responses carry one or two bytes the library does not declare**, consistently per opcode. | 43 bodies: `0x0291` always +2, `0x0987` and `0x5038` always +1. **[OPEN]** — an undeclared trailing field, not padding |
 
-On the second: **[OPEN]** whether the constant is the body or the whole frame.
+**`0x010C CABINET_DISPLAY` is the opposite case, and worth separating from it.** It does not run out of body — it runs out of *structure*. All 60 responses walk **224 of 230 bytes** and stop at the tag of `BACnet_MSTP_LAN_Settings`, and the six bytes left over are `21 00 03 00 03 00` — **byte-identical in every one of the sixty**. A constant remainder is a fixed block, not data, so this is not truncation and not a short read: either one of the three BACnet CHOICEs in the declared tail is not positional, or the panel emits six bytes the type system does not declare. Everything before that point decodes, including both MAC addresses and `bacnetSettings.tag_ = 0` — this site has BACnet off — so **a `CABINET_DISPLAY` from a panel with BACnet actually configured is what would settle it**, by making those arms non-empty. [W][OPEN]
+
+On the trailing-byte rule above: **[OPEN]** whether the constant is the body or the whole frame.
 Every observed instance is one supervisor talking to one panel, so the routing
 slots are the same length throughout and the two readings cannot be told apart
 here. At a site with different node-name lengths a frame-sized buffer would give
@@ -6376,15 +6378,30 @@ Two cautions, both of which produce a decoder that looks correct on the bench:
 - **The `NULL_` arm is not decoration.** A reader that always consumes 20 bytes
   here desynchronises on the first virtual member it meets, and a virtual member
   is the common case in a team carrying computed values.
-- **Which tag selects which arm is [OPEN].** Declaration order puts
-  `virtual_pt` first, which would make tag `0` the empty arm — but the
-  `Physical_address_*` CHOICEs pair the same two concepts in the *opposite*
-  order (§10.4.2: there tag `0` is the arm that *has* an address). One of the
-  two inverts the convention and this document cannot yet say which, because the
-  only structure carrying `scale_` is `AP2_MEMBER_DESC_ADD_ANALOG` (0x4002) and
-  **neither it nor a `MEMBER_DESC_UPLOAD` response appears anywhere in the
-  corpus** — 0x4010 is present as 19 requests and no reply. Read the tag; do not
-  assume it. [S][OPEN]
+- **Which tag selects which arm — settled, and the two conventions really are
+  opposite.** Declaration order puts `virtual_pt` first, which would make tag
+  `0` the empty arm, while the `Physical_address_*` CHOICEs pair the same two
+  concepts the other way round (§10.4.2: there tag `0` is the arm that *has* an
+  address). Both are now attested rather than assumed: [C]
+
+  | CHOICE | tag `0` | tag `1` |
+  |---|---|---|
+  | `scale_` | `virtual_pt` — empty | `physical_pt` — the 20-byte scaling arm |
+  | `Physical_address_AI/AO/DI/DO/PA` | `real_addr` — the address | `virtual_addr` — empty |
+
+  So **each follows its own declaration order**, and the inversion is in the
+  declarations themselves, not in one of them breaking a convention. A decoder
+  cannot carry an assumption from one to the other: in `scale_` the *virtual*
+  case is tag `0`, and in a physical address the *physical* case is. [C][S]
+
+  This was `[OPEN]` for want of a capture — `scale_`'s only carrier,
+  `AP2_MEMBER_DESC_ADD_ANALOG` (0x4002), appears nowhere in the corpus and
+  0x4010 is present as 19 requests with no reply. It did not need one. The
+  vendor's codec selects the arm by branching on the tag, and while `scale_` has
+  no encoder of its own, its parent inlines the selection: `tag == 0` branches to
+  the `virtual_pt` arm and `tag == 1` to the block that reads `eng_units`,
+  `eng_cov_limit`, `si_units` and `si_cov_limit` — the physical arm's four
+  fields, in the declared order. [C]
 
 The units *strings* are not in this record. A point's own type (`LAI_type`,
 `LAO_type`, `LPACI_type`) carries a single `Analog_units = { eng_units: TEXT_,
@@ -9101,26 +9118,30 @@ specific test that would confirm or falsify it.
    each known-polymorphic opcode, capture every distinct body shape against a lab
    panel and label the operation produced.
 
-7. **CHOICE tag→arm assignment where declaration order is the only evidence.**
-   *Known:* the type system lists a CHOICE's arms in a fixed order, and for most
-   CHOICEs the wire tag is that ordinal. But **the `Physical_address_*` family
-   inverts it** — there tag `0` is `real_addr`, the arm that carries data, and
-   the `NULL_` arm is `1` (§10.4.2). So declaration order is a hypothesis, not a
-   rule, and reading it the wrong way round parses cleanly whenever the two arms
-   are a `NULL_` and a fixed-width record: the decoder consumes the wrong number
-   of bytes only on the *other* tag value, which a single-valued corpus never
-   produces. *Missing:* the tag values for every CHOICE not exercised on the
-   wire. The sharpest case is **`scale_`** (§11.5.1), the virtual/physical
-   selector on a team member's analog scaling: declaration order says tag `0` is
-   the empty `virtual_pt` arm, which is the *opposite* pairing to
-   `Physical_address_*` for the same virtual/physical distinction. Its only
-   carrier, `AP2_MEMBER_DESC_ADD_ANALOG` (0x4002), does not appear in the corpus
-   at all, and `AP2_MEMBER_DESC_UPLOAD` (0x4010) appears as 19 requests with no
-   reply. *Test:* one `MEMBER_DESC_UPLOAD` response for a team containing both a
-   virtual and a physical analog member settles it — the physical member's arm is
-   20 bytes and the virtual member's is zero, so the tag that precedes the
-   20 bytes is the answer. A `POINT_ADD_*` for a virtual analog point read back
-   with `MEMBER_DESC_UPLOAD` would produce it deliberately.
+7. **CHOICE tag→arm assignment — largely ANSWERED; two CHOICEs remain.**
+   *Was:* declaration order is a hypothesis, not a rule, and reading it the wrong
+   way round parses cleanly whenever the two arms are a `NULL_` and a fixed-width
+   record — the decoder consumes the wrong number of bytes only on the *other*
+   tag value, which a single-valued corpus never produces. The sharpest case was
+   `scale_` (§11.5.1), whose only carrier appears nowhere in the corpus, and the
+   test asked for was a `MEMBER_DESC_UPLOAD` response.
+   *Now:* the numbering is read directly for **53 of the 87 CHOICEs** (§10.4.3).
+   Forty-nine are positional; four are not, and each of those four numbers its
+   arms by an external enumeration — the `Point_type` enum for `All_points`, and
+   the BACnet object-type enumeration for the two BACnet point CHOICEs, which
+   checks against a public standard rather than against the vendor. `scale_` is
+   settled with them: **tag `0` = `virtual_pt`, tag `1` = `physical_pt`**, so it
+   and `Physical_address_*` each follow their own declaration order and the
+   inversion is in the declarations, not in one of them breaking a convention
+   (§11.5.1). No capture was needed.
+   *What is left:* **`localStateText_`** and **`event_parameter_Tag_`**, which
+   the vendor codec never codes — each carries a constructor and no decoder — and
+   which no body in the corpus exercises; and **`BAC_Point_Base`**, recovered for
+   eight of its nine arms, with `multi_value` almost certainly BACnet `19` but
+   inferred rather than read. *Test:* `localStateText_` still rides on a
+   `MEMBER_DESC_UPLOAD` response, so that capture remains worth taking — it now
+   closes one gap rather than two. `event_parameter_Tag_` needs a BACnet
+   event-enrollment object (`AP2_BNEEO_*`).
 
 ### Appendix E — Evidence-tag legend and lineage pointer
 

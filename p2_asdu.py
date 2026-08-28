@@ -1464,6 +1464,76 @@ CHOICE_TAGS = {
             1: 'one_lan',
         },
     },
+    'BACnet_MSTP_LAN_': {
+        'complete': True,
+        'map': {
+            0: 'no_bacnet',
+            1: 'mstp_lan',
+        },
+    },
+    'cov_limit_': {
+        'complete': True,
+        'map': {
+            0: 'xfixed',
+            1: 'dynamic',
+        },
+    },
+    'dhcp_': {
+        'complete': True,
+        'map': {
+            0: 'disabled',
+            1: 'enabled',
+        },
+    },
+    'dynamic_dns_': {
+        'complete': True,
+        'map': {
+            0: 'disabled',
+            1: 'enabled',
+        },
+    },
+    'invalidValueAvailable_': {
+        'complete': True,
+        'map': {
+            0: 'no',
+            1: 'yes',
+        },
+    },
+    'lan_choice_': {
+        'complete': True,
+        'map': {
+            0: 'all_lans',
+            1: 'single_lan',
+        },
+    },
+    'reset_what_': {
+        'complete': True,
+        'map': {
+            0: 'all_totalization',
+            1: 'single_totalization',
+        },
+    },
+    'resolved_': {
+        'complete': True,
+        'map': {
+            0: 'no_feedback_setpoint',
+            1: 'feedbacksetpoint_Resolved',
+        },
+    },
+    'scale_': {
+        'complete': True,
+        'map': {
+            0: 'virtual_pt',
+            1: 'physical_pt',
+        },
+    },
+    'which_trend_': {
+        'complete': True,
+        'map': {
+            0: 'all',
+            1: 'specific',
+        },
+    },
 }
 
 OPS = {
