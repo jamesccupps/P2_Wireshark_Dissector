@@ -5355,12 +5355,23 @@ if (tag == 0) {                    //  <-- tag 0 IS the real_addr arm
 ```
 
 So for this CHOICE family **tag `0` selects the arm that *has* an address**, and
-the empty `virtual_addr` arm is `1` — the inverse of the ordinary convention.
-That was inferred here from arm order and wire widths; it is now read off the
-code. It is also the reason §11.5.1's `scale_` tag assignment stays **[OPEN]**:
-`scale_` pairs the same virtual/physical concepts in the *opposite* declaration
-order, and this section proves the declaration order is not the thing to trust.
-[F]
+the empty `virtual_addr` arm is `1`. That was inferred here from arm order and
+wire widths; it is now read off the code, on both sides — the panel's encoder
+above, and the supervisor's decoder, which compares against `1` and takes
+`virtual_addr`. [F][C]
+
+**And it is declaration order after all**, which is worth saying because an
+earlier edition of this section drew the opposite conclusion. `Physical_address_*`
+declares `real_addr` first, so tag `0` being the address arm *is* the ordinal
+reading; what makes it look inverted is only that most other optional-presence
+CHOICEs declare the empty arm first. §11.5.1's `scale_` does exactly that — it
+declares `virtual_pt` first — and its tags follow **its** declaration order in
+turn: tag `0` empty, tag `1` the 20-byte scaling arm (§11.5.1, now settled from
+the same source). Two CHOICEs covering the same virtual/physical distinction
+number their tags oppositely because they *declare* them oppositely, not because
+either departs from a convention. What an implementer must not do is carry a tag
+assignment from one CHOICE to another that "means the same thing" — read each
+one's own arm order, or its entry in §10.4.3. [C][S]
 
 The distinction the flattening destroyed is also semantic and worth keeping: the
 digital-output boolean is `inverted` and the digital-input one is
