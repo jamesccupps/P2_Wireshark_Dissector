@@ -3188,6 +3188,11 @@ local function profile_at(tvb, off, last)
   if tvb(no+2,3):uint() ~= 0xFFFFFF then return nil end
   return s, l, no
 end
+-- Deliberately reads a SINGLE-byte length where 8.1 gives a u16: this walk
+-- tests every offset, so a false positive swallows the rest of the body while a
+-- false negative just falls through. Reading the full u16 unanchored accepts 186
+-- more positions across the reference corpus, every one a mid-structure landing
+-- with a non-printable payload. The anchored decoders above read the full width.
 local function tlv_walk(tvb, off, last, tree)
   local i = off
   while i + 3 <= last do
@@ -3212,13 +3217,13 @@ local function dissect_cov(tvb, off, last, tree)
   while off + 9 <= last do
     local rec = off
     off = off + 2                              -- name_space (u16; observed 00 00 = system)
-    if not (tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00) then break end
-    local l = tvb(off+2,1):uint(); if off+3+l > last then break end
+    if tvb(off,1):uint()~=0x01 then break end
+    local l = tvb(off+1,2):uint(); if off+3+l > last then break end   -- u16 length (8.1)
     local pt = tree:add(p2, tvb(rec,0), "COV point")
     pt:add(f.cov_point, tvb(off+3,l)); off = off + 3 + l
     -- suffix TLV: empty (01 00 00) for top-level points; non-empty for FLN subpoints
-    if off+3 <= last and tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00 then
-      local sl = tvb(off+2,1):uint()
+    if off+3 <= last and tvb(off,1):uint()==0x01 then
+      local sl = tvb(off+1,2):uint()
       if off+3+sl <= last then
         if sl > 0 then pt:add(f.cov_point, tvb(off+3,sl)) end
         off = off + 3 + sl
@@ -3241,8 +3246,8 @@ local function dissect_roster(tvb, off, last, tree)
   if off+8 > last then return end
   tree:add(f.r_tabver, tvb(off+4,2)); tree:add(f.r_count, tvb(off+6,2)); off = off + 8
   while off + 3 <= last do
-    if not (tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00) then break end
-    local l = tvb(off+2,1):uint(); if off+3+l > last then break end
+    if tvb(off,1):uint()~=0x01 then break end
+    local l = tvb(off+1,2):uint(); if off+3+l > last then break end   -- u16 length (8.1)
     local e = tree:add(p2, tvb(off,0), "Node entry")
     e:add(f.r_name, tvb(off+3,l)); off = off + 3 + l
     if off+4 <= last then e:add(f.r_ver, tvb(off,4)); off = off + 4 end
@@ -3251,8 +3256,8 @@ end
 local function dissect_identity(tvb, off, last, tree)
   local fl = { f.id_node, f.id_site, f.id_bln }; local idx = 1
   while off + 3 <= last and idx <= 3 do
-    if not (tvb(off,1):uint()==0x01 and tvb(off+1,1):uint()==0x00) then break end
-    local l = tvb(off+2,1):uint(); if off+3+l > last then break end
+    if tvb(off,1):uint()~=0x01 then break end
+    local l = tvb(off+1,2):uint(); if off+3+l > last then break end   -- u16 length (8.1)
     tree:add(fl[idx], tvb(off+3,l)); off = off + 3 + l; idx = idx + 1
   end
   if off < last then tlv_walk(tvb, off, last, tree) end

@@ -6721,8 +6721,37 @@ _COV_COND_FIELDS = ('point_priority', 'control_status', 'out_of_service', 'faile
 
 
 def _read_tlv(body: bytes, off: int):
-    """Read a string TLV `01 00 <len> <bytes>` at off. Returns (text, next_off) or
-    (None, off) if there is no TLV there."""
+    """Read a string TLV `01 <len:u16 BE> <bytes>` at off (PROTOCOL.md 8.1).
+    Returns (text, next_off) or (None, off) if there is no TLV there.
+
+    The length is two bytes. An earlier version read `01 00 <len:u8>`, requiring
+    the high byte to be zero, which silently refused every string of 256 bytes
+    or more -- the free-text band that carries message text, licence strings,
+    point descriptions and PPCL program lines.
+
+    Use this where the offset is known to hold a TLV. For an unanchored scan use
+    `_probe_tlv`, which is deliberately stricter."""
+    if off + 3 > len(body) or body[off] != 0x01:
+        return None, off
+    ln = (body[off + 1] << 8) | body[off + 2]
+    if off + 3 + ln > len(body):
+        return None, off
+    return body[off + 3:off + 3 + ln].decode('latin-1', 'replace'), off + 3 + ln
+
+
+def _probe_tlv(body: bytes, off: int):
+    """`_read_tlv` for an unanchored scan: the same TLV, but only a single-byte
+    length is accepted.
+
+    A scanning loop asks "is there a TLV here?" at every offset, so a false
+    positive swallows the rest of a body while a false negative merely falls
+    through to the next interpretation. Over the reference corpus, reading the
+    full u16 at unanchored offsets accepts 186 more positions than this does --
+    every one a mid-structure landing with a non-printable payload -- and gains
+    nothing, because no body there carries a string of 256 bytes or more. A body
+    that does will decode its long strings through `_read_tlv` at the anchored
+    call sites and simply not have them picked up by the generic scan, which is
+    the safe way round."""
     if off + 3 > len(body) or body[off] != 0x01 or body[off + 1] != 0x00:
         return None, off
     ln = body[off + 2]
@@ -6732,7 +6761,7 @@ def _read_tlv(body: bytes, off: int):
 
 
 def _consume_scope_tag(body: bytes, off: int) -> int:
-    """Skip an optional scope tag `01 00 <len> <SCOPE> <priority:1> <3F FF FF FF>`."""
+    """Skip an optional scope tag `01 <len:u16> <SCOPE> <priority:1> <3F FF FF FF>`."""
     s_, no = _read_tlv(body, off)
     if s_ in ('SYST', 'NONE', 'CC') and no + 5 <= len(body) \
             and body[no + 1:no + 5] == b'\x3f\xff\xff\xff':
@@ -6828,7 +6857,7 @@ def parse_alarm_report(body: bytes) -> Optional[Dict[str, Any]]:
     timestamps: List[str] = []
     while off < n:
         b0 = body[off]
-        tlv, no = _read_tlv(body, off)
+        tlv, no = _probe_tlv(body, off)
         if tlv is not None:
             if tlv and tlv not in ('SYST', 'NONE', 'CC'):
                 names.append(tlv)
