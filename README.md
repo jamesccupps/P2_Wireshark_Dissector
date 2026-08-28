@@ -74,6 +74,14 @@ Click a P2 packet and get:
 The Protocol column shows `P2` on TCP/5033 and TCP/5034 traffic. You can also load it
 ad hoc: `tshark -X lua_script:p2.lua -r capture.pcapng`.
 
+**If it loads but nothing decodes**, check that the protocol is not disabled.
+Wireshark remembers a disabled protocol across sessions, in
+`%APPDATA%\Wireshark\disabled_protos` (`~/.config/wireshark/disabled_protos`),
+and a disabled dissector still registers and is simply never called — so P2
+traffic decodes as plain `tcp:data` with no error anywhere. Re-enable it under
+**Analyze → Enabled Protocols**, remove the `p2` line from that file, or pass
+`--enable-protocol p2` to tshark.
+
 ## Ports
 
 - **TCP/5033** is the canonical, default P2 port — every field panel (and the
