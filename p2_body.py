@@ -88,8 +88,7 @@ def _scalar(b, i, w, typ):
 
 
 class _Walker(object):
-    def __init__(self, body, lao_trailer=True):
-        self.lao_trailer = lao_trailer
+    def __init__(self, body):
         self.b = body
         self.out = []
         self.truncated = False
@@ -115,13 +114,26 @@ class _Walker(object):
             return i + 3 + n
 
         if typ == "Point_extension2":
+            # `nrOftypes` is an ENTRY COUNT, not a byte length, and each entry
+            # is self-describing: tag_ 1 | size_of_extension u16 | payload.
+            # An earlier version read the u16 as a byte length -- a fitted
+            # guess that also forced a compensating two-byte trailer on the
+            # `lao` point arm. Both are gone; see PROTOCOL.md 10.4.1.
             if i + 2 > len(b):
-                raise _Fail("truncated extension length at %d (%s)" % (i, path))
+                raise _Fail("truncated extension count at %d (%s)" % (i, path))
             n = int.from_bytes(b[i:i + 2], "big")
-            if i + 2 + n > len(b):
-                raise _Fail("extension at %d runs past the body" % i)
-            self.add(path, typ, i, 2 + n, bytes(b[i + 2:i + 2 + n]))
-            return i + 2 + n
+            start, j = i, i + 2
+            for k in range(n):
+                if j + 3 > len(b):
+                    raise _Fail("extension entry %d at %d is truncated" % (k, j))
+                size = int.from_bytes(b[j + 1:j + 3], "big")
+                if j + 3 + size > len(b):
+                    raise _Fail("extension entry %d at %d runs past the body" % (k, j))
+                self.add("%s.types[%d]" % (path, k), "Point_extension2_type",
+                         j, 3 + size, (b[j], bytes(b[j + 3:j + 3 + size])))
+                j += 3 + size
+            self.add(path + ".nrOftypes", "UNSIGNED16", start, 2, n)
+            return j
 
         if typ == "real_addr_":
             w = A.REALW.get(parent)
@@ -154,17 +166,6 @@ class _Walker(object):
             if arm is None or arm not in arms:
                 raise _Fail("point type %d is not a declared arm (%s)" % (tag, path))
             i = self.read(i, arms[arm], "%s.%s" % (path, arm), depth + 1)
-            if arm == "lao" and self.lao_trailer:
-                # Two wire-observed bytes follow an lao arm that the declared
-                # structure does not account for (PROTOCOL.md 10.4.1). The rule
-                # is real but not universal: 104 bodies across five operations
-                # consume to the byte only with them counted and none contradict
-                # it, while the trend responses 0x0294/0x0295 carry 42 lao bodies
-                # that have no such trailer -- reading it there stops the walk a
-                # few bytes into the trend block. Pass lao_trailer=False for
-                # those rather than have the library guess from the opcode.
-                self.add(path + ".lao_trailer", "bytes", i, 2, bytes(b[i:i + 2]))
-                i += 2
             if i > len(b):
                 raise _Fail("point arm %s runs past the body" % arm)
             return i
@@ -261,14 +262,11 @@ def structure_for(opcode, direction):
     return ent[0] if direction == "req" else ent[1]
 
 
-def decode(opcode, direction, body, struct_name=None, lao_trailer=True):
+def decode(opcode, direction, body, struct_name=None):
     """Walk `body` as the structure declared for (opcode, direction).
 
     `direction` is "req" for a request or push and "rsp" for a response.
     `struct_name` overrides the lookup, for a body whose operation is unknown.
-    `lao_trailer` counts the two undeclared bytes that follow an `lao` point arm
-    (PROTOCOL.md 10.4.1); set it False for the trend responses `0x0294`/`0x0295`,
-    which are the one measured exception.
 
     Returns a Result. `error` is None on a clean walk; `consumed` is how far the
     walk got either way, so a partial decode is still usable. `truncated` says
@@ -280,7 +278,7 @@ def decode(opcode, direction, body, struct_name=None, lao_trailer=True):
     if not name:
         return Result(None, [], 0, len(body),
                       "no structure is declared for %#06x %s" % (opcode, direction), False)
-    w = _Walker(bytes(body), lao_trailer=lao_trailer)
+    w = _Walker(bytes(body))
     try:
         n = w.read(0, name, "", 0, None)
     except _Fail as e:
