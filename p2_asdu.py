@@ -28,6 +28,10 @@ that consumes it is `p2_body.py`, which is hand-written and not generated.
                is OBSERVED. Each was identified by content, not fitted to a
                length, and each rescues every body of its opcode: without them
                342 bodies stop one or two bytes short. See PROTOCOL.md 10.1.
+  STRUCT_SKIPS {"Struct.field": n} -- undeclared bytes that sit BETWEEN two
+               declared fields rather than after the last. One entry,
+               `AP2_Cabinet_Display_Response`, whose constant `0x21` is the only
+               thing between its declared tail and a clean walk of all 60.
 """
 
 WIDTHS = {
@@ -2097,6 +2101,10 @@ OP_TAILS = {
     'rsp:0x098e': [['state_text_table', 'State_text_table']],
     'rsp:0x098f': [['state_text_table', 'State_text_table']],
     'rsp:0x5038': [['<undeclared bool>', 'BOOLEAN_']],
+}
+
+STRUCT_SKIPS = {
+    'AP2_Cabinet_Display_Response.BACnetMSTPLANSettings': 1,
 }
 
 NESTED = {

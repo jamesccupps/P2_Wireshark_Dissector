@@ -228,7 +228,17 @@ class _Walker(object):
     def _fields(self, i, typ, fields, path, depth):
         b = self.b
         count = None
+        skips = getattr(A, "STRUCT_SKIPS", {})
         for fname, ftype in fields:
+            n = skips.get("%s.%s" % (typ, fname))
+            if n and i + n <= len(b):
+                # Bytes the structure library does not declare, sitting BETWEEN
+                # two declared fields rather than after the last one -- see
+                # p2_asdu.OP_SKIPS and PROTOCOL.md 10.1. Named and emitted, not
+                # silently stepped over.
+                self.add("%s.<undeclared>" % (path or typ), "bytes", i, n,
+                         bytes(b[i:i + n]), "not declared; before " + fname)
+                i += n
             if i == len(b):
                 # the body ended exactly at a field boundary: truncation, which
                 # is a normal way for a short response to end, not corruption
@@ -296,5 +306,13 @@ def decode(opcode, direction, body, struct_name=None):
         return Result(name, w.out, n, len(body), str(e), w.truncated)
     err = None
     if n < len(body):
-        err = "%d trailing bytes the structure does not account for" % (len(body) - n)
+        # An all-zero remainder is padding, not records -- 174 request bodies in
+        # the reference corpus are padded to a fixed 220 bytes, and calling that
+        # "trailing bytes" makes a well-formed request look defective. The two
+        # are worth telling apart; PROTOCOL.md 10.1 does, and now so does this.
+        rest = bytes(body[n:])
+        if not any(rest):
+            err = "%d bytes of zero padding after the structure" % len(rest)
+        else:
+            err = "%d trailing bytes the structure does not account for" % len(rest)
     return Result(name, w.out, n, len(body), err, w.truncated)
