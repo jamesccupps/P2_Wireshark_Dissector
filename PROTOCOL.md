@@ -1951,6 +1951,23 @@ modem path, and both may use this same encoding.
 bytes already parsed into fields, so start/sync delimiting and any CRC are
 stripped by a lower layer this code does not contain.
 
+**Two layers above the wire have been checked and neither adds the three bytes
+that precede the group selector.** The supervisor's protocol adapter builds the
+request object, points it at a 600-byte buffer, calls the encoder — which writes
+the group byte at offset 0 — and hands *that same buffer and the encoder's own
+length* to the transmit call, with nothing prepended. The link component beneath
+it is a transport: ports, partners, sequence numbers, a socket path and a modem
+path, and no P2 header assembly. [C] So on the supervisor's send path a message
+begins at the group byte, and the `node | ? | ?` prefix is either added below
+both of them or is not present on that path at all.
+
+That second possibility is worth stating because it is testable and would
+explain the shape: the panel-side header is described by code that **forwards a
+message whose address byte is not its own** (`0x0136`), which is a routing
+concern. A directly-addressed message may simply not carry it. This document
+does not choose between the two — it records that the two layers where the
+prefix would most naturally be added do not add it. [C][OPEN]
+
 > **A note on the ~256-byte figure.** §6.7 records, correctly, that the ~256-byte
 > number in vendor connection-test material is a *ping* size and not a maximum
 > P2 data-packet cap — TCP frames run to 1,622 bytes. That stands. But a
@@ -9492,7 +9509,7 @@ The string encoding selector (8.4). [S]
 | 4 | `LON_ELEMENT_TYPE_CP` |
 
 #### license_error  `license_error_enum`
-**2 bytes on the wire.** The failure reasons the licence-manager operations return. [S]
+**2 bytes on the wire.** The failure reasons the licence-manager operations return. The five `LM_MV_*` members are 0xFFD6-0xFFFE - small negative numbers as they would be written in source, stored and matched as unsigned; a decoder compares the bytes, not the sign. [S]
 
 | Value | Name |
 |---|---|
