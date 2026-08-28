@@ -5929,32 +5929,58 @@ Of the **455 operations** that have a request and/or response structure:
 
 | | operations |
 |---|---:|
-| **Decodable** from widths this document pins | **384 (84%)** |
-| Blocked on at least one unstated width or unpinned CHOICE | 71 |
-| distinct blocking types | **40** |
+| **Decodable** from widths this document pins | **433 (95%)** |
+| Blocked on an unpinned CHOICE | 22 |
+| distinct blocking types | **8** |
 
-**The blockers are concentrated, and a few are worth far more than the rest.**
-"Blocks" counts operations the type appears in; "alone" counts operations for
-which it is the *only* thing missing — pin it and those become decodable
-immediately:
+**Every remaining blocker is a CHOICE, and not one of them is a width.** A
+CHOICE blocks because a reader cannot tell which arm is present, not because an
+arm's length is unknown — §10.4.1 shows why the tag cannot be read as an
+ordinal in general. "Blocks" counts operations the type appears in; "alone"
+counts operations for which it is the only thing missing:
 
 | blocker | blocks | alone | what it is |
 |---|---:|---:|---|
-| `Duct_type` (CHOICE) | 8 | 0 | 3 arms — but all three are 8 B, so this blocks the *labels*, not the walk (§10.4.1) |
-| `Device_type` | 7 | **7** | the highest single-fix left in the table |
-| `User_access_*`, `User_command_priority`, `Language_ID` | 7 each | 0 | the user-account family, which travels together |
-| `Reference_Type`, `Pattern_type` | 7 each | 0 | team-member description |
-| `Date_type` | 5 | 5 | the calendar — and see below, this one is *unmeasurable here* |
+| `Duct_type` | 8 | **8** | 3 arms, all 8 B — so this blocks the *labels*, not the walk (§10.4.1) |
+| `localStateText_` | 7 | 0 | point state text |
+| `Extended_team_member` | 7 | 0 | team-member description, which travels with the above |
+| `Extended_team_desc` | 3 | **3** | the same family's descriptor |
+| `Team_Member_Upload` | 2 | 0 | team upload |
+| `BAC_Point_Base` | 2 | **2** | the BACnet point base |
+| `BAC_propertystatetype_Choice` | 2 | 0 | BACnet property state |
+| `event_parameter_Tag_` | 2 | 0 | event parameters |
 
-**What the remaining list is made of matters more than its length.** Thirty-one
-of the forty are **enum widths**, and §10.9's dead rule means each has to be
-measured against a body rather than derived. Of the 71 blocked operations, only
-five have any body in this corpus at all, and the one with a clean single
-blocker — `AP2_CAL_DB_GET_OTHER` (`0x0606`, `Date_type`) — returns a two-byte
-empty response nineteen times over, because **this site keeps no calendar
-entries**. That is the honest ceiling: the rest cannot be closed by looking
-harder at this capture set, only by a capture from a system that exercises those
-features. They are listed rather than guessed.
+**A claim this section used to make, withdrawn.** Earlier editions reported
+forty blockers, of which thirty-one were enum widths, and said of them: *"the
+rest cannot be closed by looking harder at this capture set, only by a capture
+from a system that exercises those features."* That was wrong, and the way it
+was wrong is worth more than the correction. **All thirty-one are now pinned,
+and no new capture was involved.**
+
+They were closed by one edge in the vendor's own type graph that nothing had
+followed. A type that states no width of its own states a **base type**, and
+following that chain ends at a primitive whose width this document has stated
+all along: `Device_type` → `ENUMERATED8` → `UNSIGNED_8`, one byte;
+`Baud_rate` → `ENUMERATED16` → `UNSIGNED_16`, two; `Node_complete_state` →
+`BITSTRING16`, two. The information was in the type system from the beginning;
+what was missing was the step from an enum to its base. [S]
+
+Four checks were run before adopting it, because a result that convenient
+deserves suspicion. **Thirty-seven** of the types the chain resolves are also
+pinned independently elsewhere in this document — thirty-seven agreements and
+**zero** disagreements, each tested with its own value withheld. `Baud_rate` = 2
+and `Sensor_type` = 1 come back at the values the wire and the panel firmware
+gave them separately (§16.1.3). The vendor's generated encoder reserves exactly
+these widths before writing each field, which states the leaf widths in code
+rather than in a name. [C] And over the whole body corpus the parse outcome is
+**unchanged** — no body that parsed before fails now. That last one cannot
+*confirm* the widths, because the corpus does not exercise these types (which is
+why they were blocked in the first place); it can only falsify them, and it does
+not.
+
+The lesson generalises past this table: **a claim that something needs new
+evidence should be tested against the evidence already in hand before it is
+written down.** This one survived three editions.
 
 `Baud_rate` topped this table at 11 operations until §16.1.3 measured it, and
 how it fell is worth more than the twelve operations it took with it — see the
@@ -6031,9 +6057,19 @@ The twenty-one agreements were a **selection effect**, and the shape of it
 generalises past enums: a field gets measured when someone finds a structure
 tight enough to pin it, and the structures tight enough to pin anything are the
 densely packed point records — which are packed to the byte. The sample was
-never "enums"; it was "enums that live in point bodies". Enum width in P2 is a
-property of the field, not of the type, and every one of the 46 remaining
-blockers has to be measured the slow way. [W][I]
+never "enums"; it was "enums that live in point bodies". [W][I]
+
+**And the reason the shortcut fails is now visible, which is the useful part.**
+Width is not derived from an enum's value range because the type system
+*declares* it: every enum extends either `ENUMERATED8` or `ENUMERATED16`, and
+the choice between them is the vendor's, made once per type. `Baud_rate` is the
+case that killed the rule and it is also the demonstration — thirteen members
+topping out at 12, comfortably a byte, and declared `ENUMERATED16`. No amount of
+looking at its values could have told you that; its declaration says it outright.
+So enum width in P2 is a property of the **declared type**, not of the value
+range and not of the field — and reading the declaration is the fast way that
+the earlier text, which said every remaining blocker "has to be measured the slow
+way", wrongly ruled out. [S]
 
 ### 10.10 The full structure set is enumerable
 
