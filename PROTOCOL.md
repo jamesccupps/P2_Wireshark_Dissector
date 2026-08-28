@@ -5094,11 +5094,27 @@ against it**. [W] The trend responses are the exception. `0x0294` and `0x0295`
 carry 42 `lao` bodies between them, and reading the two bytes there stops the
 walk dead a few bytes into the trend block, where the count that should follow
 reads as zero and the next field lands mid-timestamp; skipping them instead
-walks the whole body to within 1–3 bytes of its end. So the two bytes are
-**real where they are documented and absent in the trend responses**, and a
-decoder must key them to the operation rather than to the arm. What occupies
-the last 1–3 bytes of a trend response is **[OPEN]**, and it is a small,
-located gap rather than a general doubt about arm interiors. [W][OPEN]
+walks the body. So the two bytes are **real where they are documented and absent
+in the trend responses**, and a decoder must key them to the operation rather
+than to the arm. [W]
+
+**How far the trend walk actually gets, measured.** An earlier edition said
+"within 1–3 bytes of its end" and left the residue `[OPEN]`. That predates the
+field-level walker, and it does not reproduce:
+
+| opcode | side | bodies | consume to zero | what is left over |
+|---|---|---:|---:|---|
+| `0x0294 TREND_SETUP_LOG` | response | 52 | **48** | 17 bytes on 4 |
+| `0x0295 TREND_DATA_DISPLAY` | request | 60 | **60** | — |
+| `0x0295` | response | 60 | 34 | 233, 458/459, 1410/1411 bytes |
+
+The `0x0294` response is in better shape than the document claimed. The `0x0295`
+response is in worse, and its residue is **not unknown content**: 458 − 10 =
+28 × 16 and 1410 − 10 = 28 × 50, and `Trend_data` sizes to 28 bytes. That is the
+signature of a declared count being read short — the records are there and the
+walk stops before them — not of an undocumented trailer. Naming it as such is
+as far as this section goes; running it down belongs to the capture re-mine,
+where every operation gets the same treatment rather than this one. [W]
 
 The mapping is corroborated by an authority independent of both the structure
 definition and the enum — the **point descriptors**, free text written by
@@ -5266,8 +5282,12 @@ silent. Two of the fifteen are now settled anyway, by other means:
   **8 bytes** — `Rectangle {height, width}`, `Circle {pad, diameter}`,
   `Oval {height, diameter}`, two `f32` each — so the tag cannot change the
   framing, only the labels on the two floats. Of 60 `0x0986` TEC responses, 59
-  carry `no_duct` and one carries a duct, tagged `1`. The *labels* stay
-  **[OPEN]** on a single observation; the *walk* does not depend on them. [S][W]
+  carry `no_duct` and one carries a duct, tagged `1`. An earlier edition left the
+  *labels* open on that single observation; the tag map is read from the codec's
+  own jump table (§10.4.6) and `Duct_type` is `0` `Rectangle`, `1` `Circle`,
+  `2` `Oval`, so the one duct in this corpus is a **`Circle`** and its two floats
+  are `pad` and `diameter`. One observation was never the evidence that
+  mattered. [S][C][W]
 
 > A single transcription discrepancy causes both failures at once. The arm
 > fields are spelled `lfmsl`/`lfmsp` and both the structures **and**
@@ -5660,10 +5680,39 @@ enhanced_analog_  55 = Alarm_object_data 37 + 18
 
 The analog pair reads as the alarm band §13.3 describes: a chilled-water
 temperature at 150 / 35, a discharge-air point at 120 / 35, mixed-air at 75 / 45,
-supply-air sensors at 85 / 40 and 85 / 50. The enhanced arm's extra 18 bytes
-begin with two `u16` delays and contain two `f32`, consistent with the
-`level_delay` / `mode_delay` / `differential` set §10.8 names for the alarm-mode
-record, but with three samples the field boundaries there are **[OPEN]**. [W]
+supply-air sensors at 85 / 40 and 85 / 50.
+
+**Every arm's interior, named.** An earlier edition left the enhanced arm's extra
+18 bytes open and guessed from three samples that they "begin with two `u16`
+delays and contain two `f32`". They do not: they begin with a one-byte priority,
+and there is one `f32`. The catalog names all of them, and the same read supplies
+the six arms this corpus never produced. Offsets are from the start of the arm;
+the seven arms above the rule open with `Alarm_object_data` (0–36) and the two
+BACnet arms do not carry it at all: [S]
+
+| arm | total | fields after `Alarm_object_data` |
+|---|---:|---|
+| `std_digital_` | 38 | +37 `alarm_priority` |
+| `std_single_analog_` | 42 | +37 `alarm_priority`, +38 `high_limit` f32 |
+| `std_analog_` | 47 | +37 `alarm_priority`, +38 `high_limit` f32, +42 `low_limit` f32, +46 `high_alarm_if_in_alarm` |
+| `enhanced_digital_` | 48 | +37 `alarm_priority`, +38 `mode_delay` u16, +40 `level_delay` u16, +42 `alarm_mode_type`, +43…+47 `category0`–`category3` and `extracategory` |
+| `enhanced_lenum_` | 50 | as `enhanced_digital_`, then +48 `current_level` u16 |
+| `enhanced_analog_` | 55 | as `enhanced_lenum_`, then +50 `differential` f32, +54 `above_setpoint` |
+| `bacnet_alarm_analog_` | 16 | **no `Alarm_object_data`** — +0 `inalarm`, `introuble`, `inalarm_by_command`, `proofing`, +4 `high_limit` f32, +8 `low_limit` f32, +12 `alarm_priority`, +13 `msg_no` u16, +15 `high_alarm` |
+| `bacnet_alarm_digital_` | 7 | **no `Alarm_object_data`** — +0 `inalarm`, `introuble`, `inalarm_by_command`, `proofing`, +4 `alarm_priority`, +5 `msg_no` u16 |
+
+Three of these were measured from the wire before the catalog was read —
+`std_digital_` 38, `std_analog_` 47, `enhanced_analog_` 55 — and the catalog
+computes the same three, field by field, with the decomposition this section
+already published: `47 = 37 + 1 + f32 + f32 + 1` is exactly `alarm_priority`,
+`high_limit`, `low_limit`, `high_alarm_if_in_alarm`. Three agreements out of
+three, from sources that could have disagreed. [W][S]
+
+The family also reads as a progression rather than a list: every non-BACnet arm
+opens with `alarm_priority`; the analog arms add limits; the enhanced arms drop
+the limits for the alarm-mode machinery (`mode_delay`, `level_delay`,
+`alarm_mode_type`, five category bytes), and `enhanced_lenum_` and
+`enhanced_analog_` extend that by two and seven bytes respectively. [S]
 
 **Taken together with §10.4.1–§10.4.3 the point body is closed: 5,795 of 5,807
 walked points (99.8%) consume with zero remainder.** [W]
@@ -5689,9 +5738,36 @@ structure library implies with `includeInCount2` and `enable_almcnt2`.
 Both `DATE_TIME` positions are confirmed the cheap way: **all 34 stamps across
 the two offsets carry the weekday their own date falls on, 34 of 34** (§10.8).
 
-**[OPEN]** — the count reads `2` in all 17 samples, so the array reading is a
-structural fit rather than a demonstrated one, and the three `f32` per record
-are not individually named. Every sample is a supply fan. [W]
+**The record is declared, and the array is not a fit.** An earlier edition left
+this open because the count reads `2` in all 17 samples, which cannot demonstrate
+a counted array, and because the three `f32` per record had no names. The catalog
+supplies both: [S]
+
+```
+Point_totalizer.enabled_
+    total_rate              : Total_rate            1
+    nrOfstage_totalization  : UNSIGNED_16           2
+    stage_totalization      : Stage_totalization[]  20 each
+
+Stage_totalization
+    stage       : FLOAT_       4
+    total_value : FLOAT_       4
+    reset_value : FLOAT_       4
+    reset_time  : DATE_TIME    8
+```
+
+`nrOfstage_totalization` is a declared u16 count in front of a declared array,
+which is §10.1's counted-array convention stated rather than inferred, and
+`1 + 2 + 2 × 20 = 43` is the arm width independently derived elsewhere. The three
+`f32` are `stage`, `total_value` and `reset_value`, which names the reading this
+section already had — the running total is the second — and adds the two it did
+not: the first is the stage the accumulator belongs to, and the value near 2,244
+on rate-1 points is `reset_value`, the total at the last reset. The 8 bytes after
+them are a `DATE_TIME`, `reset_time`. [S][W]
+
+What the corpus still cannot show is a totalizer with a count other than 2, or
+any point type other than a supply fan. Neither is needed to read the record.
+[W]
 
 #### 10.4.6 CHOICE tags in general — the rule and its exceptions
 
