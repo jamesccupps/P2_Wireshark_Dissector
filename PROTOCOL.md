@@ -8981,6 +8981,540 @@ normal commands).
 | 70 | `WHOPDEFINE` |
 | 71 | `WHOPSTATE` |
 
+#### Enumerations completed from the type system
+The tables above were transcribed from an earlier enum dump that did not carry
+every enumeration the type system declares. These are the remaining **41**,
+reproduced in full and ordered by value, because a reader holds a byte and wants
+a name. Where §10.9's register pins the field's wire width, it is given with the
+table — the width and the values are what a decoder needs together, and looking
+them up in two places is how they get combined wrongly. [S]
+
+#### AP2_Racs_Partner_Add_Error  `AP2_Racs_Partner_Add_Error_enum`
+**2 bytes on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `no_ram_available` |
+| 2 | `invalid_partner_number` |
+| 9 | `partner_already_here` |
+
+#### AP2_Racs_Partner_Modify_Error  `AP2_Racs_Partner_Modify_Error_enum`
+**2 bytes on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `no_ram` |
+| 2 | `invalid_partner_number` |
+| 3 | `partner_not_found` |
+
+#### Alarm_mode_type  `Alarm_mode_type_enum`
+**1 byte on the wire.** The alarm-mode set a point can be in. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `night` |
+| 1 | `day` |
+| 2 | `special2` |
+| 3 | `special3` |
+| 4 | `special4` |
+| 5 | `special5` |
+
+#### BAC_Application_ID  `BAC_Application_ID_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `ppcl` |
+| 5 | `pdl` |
+| 10 | `schedule` |
+| 30 | `tec_config` |
+| 32 | `emer` |
+| 34 | `smoke` |
+| 35 | `oper` |
+
+#### BAC_Baud_rate  `BAC_Baud_rate_enum`
+**2 bytes on the wire.** MS/TP line speeds on a BACnet trunk. [S]
+
+| Value | Name |
+|---|---|
+| 6 | `baud9600` |
+| 7 | `baud19200` |
+| 8 | `baud38400` |
+| 10 | `baud115p2k` |
+| 12 | `baud76800` |
+
+#### BAC_DaysOfWeek  `BAC_DaysOfWeek_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `monday` |
+| 1 | `tuesday` |
+| 2 | `wednesday` |
+| 3 | `thursday` |
+| 4 | `friday` |
+| 5 | `saturday` |
+| 6 | `sunday` |
+
+#### BAC_Transitions  `BAC_Transitions_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `to_offnormal` |
+| 1 | `to_fault` |
+| 2 | `to_normal` |
+
+#### Bln_global_data_changemask  `Bln_global_data_changemask_enum`
+**2 bytes on the wire.** Bit positions in the BLN global-data change mask. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `change_password_high` |
+| 1 | `change_password_low` |
+| 2 | `change_mass_primary` |
+| 3 | `change_mass_secondary` |
+| 4 | `change_alarm_node1` |
+| 5 | `change_alarm_node2` |
+| 6 | `change_alarm_node3` |
+| 7 | `change_node_to_call_host` |
+| 8 | `change_report_node` |
+
+#### Cabinet_report_config  `Cabinet_report_config_enum`
+**1 byte on the wire.** Which port a cabinet's reports are sent to. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `reports_to_port0` |
+| 1 | `reports_to_port1` |
+| 2 | `reports_to_port2` |
+| 3 | `reports_to_port3` |
+| 4 | `reports_to_port4` |
+
+#### Control_status  `Control_status_enum`
+**1 byte on the wire.** How a point's current command is being held. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `remote` |
+| 1 | `tool_override` |
+| 2 | `by_priority` |
+| 3 | `config_only` |
+| 4 | `input_only` |
+| 5 | `manual_override` |
+| 6 | `undefined` |
+
+#### Date_type  `Date_type_enum`
+**1 byte on the wire.** How a calendar date entry behaves: a special day, a shift of the schedule to a named weekday, or one of seven replacement slots. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `special` |
+| 1 | `spare` |
+| 2 | `shift_to_SUN` |
+| 3 | `shift_to_MON` |
+| 4 | `shift_to_TUE` |
+| 5 | `shift_to_WED` |
+| 6 | `shift_to_THU` |
+| 7 | `shift_to_FRI` |
+| 8 | `shift_to_SAT` |
+| 9 | `replacement1` |
+| 10 | `replacement2` |
+| 11 | `replacement3` |
+| 12 | `replacement4` |
+| 13 | `replacement5` |
+| 14 | `replacement6` |
+| 15 | `replacement7` |
+
+#### Device_type  `Device_type_enum`
+**1 byte on the wire.** The RACS device kinds a partner record can name. [S]
+
+| Value | Name |
+|---|---|
+| 1 | `insight` |
+| 2 | `primary_printer` |
+| 3 | `secondary1_printer` |
+| 4 | `secondary2_printer` |
+| 5 | `secondary3_printer` |
+| 6 | `report_printer` |
+| 7 | `other_device` |
+
+#### Failed_status  `Failed_status_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `normal` |
+| 1 | `returning` |
+| 2 | `unknown` |
+| 3 | `failed` |
+
+#### Global_IO_Module_Info  `Global_IO_Module_Info_enum`
+**2 bytes on the wire.** Termination-module kinds a panel reports. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `TXM1_8D` |
+| 1 | `TXM1_16D` |
+| 2 | `TXM1_8U` |
+| 3 | `TXM1_8U_ML` |
+| 4 | `TXM1_8X` |
+| 5 | `TXM1_8X_ML` |
+| 6 | `TXM1_6R` |
+| 7 | `TXM1_6R_M` |
+| 65535 | `TXM1_UNKNOWN` |
+
+#### Grain_Type  `Grain_Type_enum`
+**1 byte on the wire.** The replication grain kinds (cross-ref 5.3). [S]
+
+| Value | Name |
+|---|---|
+| 0 | `unknown` |
+| 1 | `node_list_entry` |
+| 2 | `storage_node_db` |
+| 3 | `rpt_printer_db` |
+| 4 | `user_acc_entry` |
+| 5 | `access_grp_db` |
+| 6 | `categ_entry` |
+| 7 | `error_msg_entry` |
+| 8 | `dst_cal_db` |
+| 9 | `holiday_cal_db` |
+| 10 | `txt_tbl_entry` |
+| 11 | `dr_trnk_set_db` |
+| 12 | `hosttbl_entry` |
+| 13 | `addresstbl_entry` |
+| 14 | `appl_pri_entry` |
+
+#### Language_ID  `Language_ID_enum`
+**2 bytes on the wire.** Windows locale identifiers (LCIDs), not an index. [S]
+
+| Value | Name |
+|---|---|
+| 1030 | `DANISH` |
+| 1031 | `GERMAN` |
+| 1033 | `ENGLISH_AMERICAN` |
+| 1034 | `SPANISH` |
+| 1035 | `FINNISH_FINNISH` |
+| 1036 | `FRENCH` |
+| 1039 | `ICELANDIC` |
+| 1040 | `ITALIAN` |
+| 1043 | `DUTCH_DUTCH` |
+| 1044 | `NORWEGIAN_BOKMAL` |
+| 1046 | `PORTUGUESE_BRAZILIAN` |
+| 1053 | `SWEDISH` |
+| 2055 | `GERMAN_SWISS` |
+| 2057 | `ENGLISH_BRITISH` |
+| 2058 | `SPANISH_MEXICAN` |
+| 2060 | `FRENCH_BELGIAN` |
+| 2064 | `ITALIAN_SWISS` |
+| 2067 | `DUTCH_BELGIAN` |
+| 2068 | `NORWEGIAN_NYNORSK` |
+| 2070 | `PORTUGUESE` |
+| 3079 | `GERMAN_AUSTRIAN` |
+| 3081 | `ENGLISH_AUSTRALIAN` |
+| 3082 | `SPANISH_MODERN` |
+| 3084 | `FRENCH_CANADIAN` |
+| 4105 | `ENGLISH_CANADIAN` |
+| 4108 | `FRENCH_SWISS` |
+| 5129 | `ENGLISH_NEWZEALAND` |
+| 6153 | `ENGLISH_IRELAND` |
+
+#### LonDeviceStatus  `LonDeviceStatus_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `Normal` |
+| 1 | `Returning` |
+| 2 | `Unknown` |
+| 3 | `Failed` |
+
+#### Mii_Duplex  `Mii_Duplex_enum`
+**1 byte on the wire.** Ethernet duplex as the panel reports it. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `auto_detect` |
+| 1 | `half` |
+| 2 | `full` |
+
+#### Mii_Speed  `Mii_Speed_enum`
+**1 byte on the wire.** Ethernet link speed as the panel reports it (0 = auto-negotiate). [S]
+
+| Value | Name |
+|---|---|
+| 0 | `auto_detect` |
+| 1 | `tenMBit` |
+| 2 | `hundredMBit` |
+| 3 | `thousandMBit` |
+
+#### Name_space  `Name_space_enum`
+**2 bytes on the wire.** The namespace selector that precedes a name (3.6). [S]
+
+| Value | Name |
+|---|---|
+| 0 | `system` |
+| 1 | `LAO_actuator` |
+| 1 | `user` |
+| 2 | `HOA` |
+| 65535 | `any` |
+
+#### Node_table_event  `Node_table_event_enum`
+**1 byte on the wire.** What changed in a node table, on a routing push. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `node_added` |
+| 1 | `remote_removed` |
+| 2 | `node_removed` |
+| 3 | `node_failed` |
+| 4 | `node_ostracized` |
+| 5 | `node_in_service` |
+| 6 | `node_coldstarted` |
+| 7 | `node_made_online` |
+| 8 | `node_made_offline` |
+| 9 | `node_made_ext_timeout` |
+| 10 | `node_made_normal_timeout` |
+| 11 | `node_multi_status_change` |
+| 12 | `node_make_ready` |
+| 13 | `node_enable_TIU_cabinet` |
+| 14 | `node_disable_TIU_cabinet` |
+
+#### Occurrence  `Occurrence_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `one_time` |
+| 1 | `weekly` |
+| 2 | `replacement` |
+
+#### Pattern_type  `Pattern_type_enum`
+**1 byte on the wire.** LonWorks object patterns on an FLN device. [S]
+
+| Value | Name |
+|---|---|
+| 1 | `LONMARK_SENSOR_OBJECT` |
+| 2 | `LONMARK_ACTUATOR_OBJECT` |
+| 3 | `NV_IO_PAIR` |
+| 4 | `NV_INPUT` |
+| 5 | `NV_OUTPUT` |
+| 6 | `UNASSOCIATED_CP` |
+| 7 | `NV_IO_PAIR_TIME` |
+| 8 | `NV_INPUT_TIME` |
+| 9 | `NV_OUTPUT_TIME` |
+| 10 | `UNASSOCIATED_CP_TIME` |
+
+#### Port_number  `Port_number_enum`
+**1 byte on the wire.** The panel's five physical ports. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `port0` |
+| 1 | `port1` |
+| 2 | `port2` |
+| 3 | `port3` |
+| 4 | `port4` |
+
+#### Reference_Type  `Reference_Type_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `input` |
+| 1 | `output` |
+| 2 | `not_allowed` |
+
+#### Repl_Cmd_Type  `Repl_Cmd_Type_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `unknown_cmd` |
+| 1 | `add_cmd` |
+| 2 | `delete_cmd` |
+
+#### Representation  `Representation_enum`
+**1 byte on the wire.** How an analog value is to be displayed, not how it is encoded. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `float_repr` |
+| 1 | `integer_repr` |
+| 2 | `time_of_day_repr` |
+| 3 | `date_repr` |
+| 4 | `date_time_repr` |
+
+#### Schedule_days  `Schedule_days_enum`
+**4 bytes on the wire.** Day selectors; these are **bit positions**, not values (cross-ref 10.1's warning about sizing a field from an enum maximum). [S]
+
+| Value | Name |
+|---|---|
+| 0 | `Sunday` |
+| 1 | `Monday` |
+| 2 | `Tuesday` |
+| 3 | `Wednesday` |
+| 4 | `Thursday` |
+| 5 | `Friday` |
+| 6 | `Saturday` |
+| 7 | `Replacement1` |
+| 8 | `Replacement2` |
+| 9 | `Replacement3` |
+| 10 | `Replacement4` |
+| 11 | `Replacement5` |
+| 12 | `Replacement6` |
+| 13 | `Replacement7` |
+
+#### Ssto_amd  `Ssto_amd_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `neither_heatg_or_coolg` |
+| 1 | `heating_only` |
+| 2 | `cooling_only` |
+| 3 | `heating_or_cooling` |
+| 4 | `use_virtual_time` |
+
+#### Ssto_desop_value  `Ssto_desop_value_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `neither_heatg_or_coolg` |
+| 1 | `heating_only` |
+| 2 | `cooling_only` |
+| 3 | `heating_or_cooling` |
+
+#### Ssto_zo_mod_cl  `Ssto_zo_mod_cl_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `fix_time_shift_estmtr` |
+| 1 | `basic_estmtr` |
+| 2 | `adv_estmtr` |
+
+#### Ssto_zo_mod_ht  `Ssto_zo_mod_ht_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `fix_time_shift_estmtr` |
+| 1 | `basic_estmtr` |
+| 2 | `adv_estmtr` |
+
+#### TEC_valid  `TEC_valid_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `no` |
+| 1 | `yes` |
+| 2 | `maybe` |
+
+#### TextType  `TextType`
+The string encoding selector (8.4). [S]
+
+| Value | Name |
+|---|---|
+| 0 | `UNICODE` |
+| 1 | `ASCII` |
+| 2 | `DBCS` |
+
+#### Total_rate  `Total_rate_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `seconds` |
+| 1 | `minutes` |
+| 2 | `hours` |
+| 3 | `days` |
+
+#### Uc_failed_status  `Uc_failed_status_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `normal` |
+| 1 | `returning` |
+| 2 | `unknown` |
+| 3 | `failed` |
+
+#### Uc_is_valid  `Uc_is_valid_enum`
+**1 byte on the wire.** [S]
+
+| Value | Name |
+|---|---|
+| 0 | `no` |
+| 1 | `yes` |
+| 2 | `maybe` |
+
+#### User_access_functions  `User_access_functions_enum`
+**1 byte on the wire.** The per-account function permissions. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `POINT` |
+| 1 | `ALARM` |
+| 3 | `TREND` |
+| 4 | `APPLICATION` |
+| 5 | `APPL_PPCL` |
+| 6 | `APPL_FLN` |
+| 7 | `APPL_EQS` |
+| 8 | `APPL_PDL` |
+| 9 | `APPL_LOOP` |
+| 19 | `SYSTEM` |
+| 20 | `SYS_DIAGNOSTICS` |
+| 21 | `SYS_USERS` |
+| 22 | `SYS_HARDWARE` |
+
+#### User_access_priority  `User_access_priority_enum`
+**1 byte on the wire.** The account's command-authority band. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `NONE` |
+| 1 | `VIEW` |
+| 2 | `COMMAND` |
+| 3 | `CONFIGURE` |
+
+#### Variable_type  `Variable_type_enum`
+**1 byte on the wire.** LonWorks network-variable classes. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `LON_ELEMENT_TYPE_UNKNOWN` |
+| 1 | `LON_ELEMENT_TYPE_NVI` |
+| 2 | `LON_ELEMENT_TYPE_NVO` |
+| 3 | `LON_ELEMENT_TYPE_NCI` |
+| 4 | `LON_ELEMENT_TYPE_CP` |
+
+#### license_error  `license_error_enum`
+**2 bytes on the wire.** The failure reasons the licence-manager operations return. [S]
+
+| Value | Name |
+|---|---|
+| 0 | `LM_SUCCESS` |
+| 1 | `LM_BADCODE_ERR` |
+| 2 | `LM_HOSTTEXT_ERR` |
+| 3 | `LM_PARAM_ERR` |
+| 4 | `LM_EXPIRED_ERR` |
+| 5 | `LM_VERSION_ERR` |
+| 6 | `LM_SERIALNO_ERR` |
+| 7 | `LM_VENDORNAME_ERR` |
+| 8 | `LM_GENERAL_ERR` |
+| 9 | `LM_NON_FEATURE_OVERWRITE` |
+| 10 | `LM_EXTRA_PARAM_ERR` |
+| 11 | `LM_TOO_MANY_LICENSES_ERR` |
+| 12 | `LM_SERVICEDEMO_ERR` |
+| 65494 | `LM_MV_BADPARAM` |
+| 65515 | `LM_MV_OLD_VERSION` |
+| 65526 | `LM_MV_EXPIRED` |
+| 65528 | `LM_MV_BAD_KEY` |
+| 65534 | `LM_MV_BADFILE` |
+
 ### Appendix B — Opcode-family index
 
 The 2-byte AP2 function code (§9.1) groups by its high byte/range into operation
