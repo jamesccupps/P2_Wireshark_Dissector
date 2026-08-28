@@ -212,6 +212,41 @@ MSG_TYPES = {
 DIR_BYTES = {0x00: "Request", 0x01: "Success", 0x05: "Error"}
 
 
+DECODE = False
+DUMP_LIMIT = 0
+
+try:
+    import p2_body
+except ImportError:                        # the catalog is optional
+    p2_body = None
+
+# --decode collectors
+decode_stats = Counter()
+decode_errors = Counter()
+decode_dump = []
+
+
+def decode_body(opcode, body):
+    """Walk a request body against its declared structure and tally the result."""
+    if p2_body is None:
+        return
+    r = p2_body.decode(opcode, "req", body)
+    if r.struct is None:
+        decode_stats["no structure declared"] += 1
+        return
+    if r.error is None:
+        decode_stats["decoded, whole body consumed"] += 1
+    elif r.error.endswith("does not account for"):
+        decode_stats["decoded, trailing bytes"] += 1
+    elif r.truncated:
+        decode_stats["truncated at a field boundary"] += 1
+    else:
+        decode_stats["stopped early"] += 1
+        decode_errors[r.error[:70]] += 1
+    if len(decode_dump) < DUMP_LIMIT:
+        decode_dump.append((opcode, r))
+
+
 def parse_routing(payload):
     """Skip 4 null-terminated strings, return body offset."""
     if not payload:
@@ -277,6 +312,8 @@ def process_p2_frame(frame, src_ip, src_port, dst_ip, dst_port):
         # listener, so an opcode appearing on 5034 just means that site
         # runs a co-installed supervisor on the bumped port.
         opcode_by_port[dst_port][opcode] += 1
+        if DECODE:
+            decode_body(opcode, body[2:])
         if opcode not in KNOWN_OPCODES and len(unknown_opcode_samples[opcode]) < 3:
             unknown_opcode_samples[opcode].append({
                 "frame_len": total_len,
@@ -319,13 +356,25 @@ def consume_segment(segment_data, src_ip, src_port, dst_ip, dst_port):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: analyze_pcap.py <pcap_file>", file=sys.stderr)
+    global DECODE, DUMP_LIMIT
+    args = [a for a in sys.argv[1:]]
+    DECODE = "--decode" in args or any(a.startswith("--decode-dump") for a in args)
+    for a in list(args):
+        if a.startswith("--decode-dump"):
+            DUMP_LIMIT = int(a.split("=", 1)[1]) if "=" in a else 5
+        if a.startswith("--"):
+            args.remove(a)
+    if not args:
+        print("Usage: analyze_pcap.py <pcap_file> [--decode] [--decode-dump=N]",
+              file=sys.stderr)
         print("", file=sys.stderr)
         print("Inventories opcodes, error codes, frame-size distribution,", file=sys.stderr)
         print("and message-type counts in a P2 capture. Requires tshark on PATH.", file=sys.stderr)
+        print("--decode walks each request body against its declared structure", file=sys.stderr)
+        print("(needs p2_asdu.py and p2_body.py); --decode-dump=N also prints the", file=sys.stderr)
+        print("first N bodies field by field.", file=sys.stderr)
         sys.exit(2)
-    pcap = sys.argv[1]
+    pcap = args[0]
     if not os.path.isfile(pcap):
         print(f"[ERROR] pcap not found: {pcap}", file=sys.stderr)
         sys.exit(2)
@@ -424,6 +473,30 @@ def main():
             # Wrap hex at 60 chars per line for readability
             for i in range(0, len(body), 60):
                 print(f"      {body[i:i+60]}")
+
+    report_decode()
+
+
+def report_decode():
+    if not DECODE:
+        return
+    if p2_body is None:
+        print("\n[!] --decode needs p2_asdu.py and p2_body.py beside this script")
+        return
+    total = sum(decode_stats.values())
+    print(f"\n=== body decode against the declared structures ({total} request bodies) ===")
+    for k, v in decode_stats.most_common():
+        print(f"  {v:7d}  {k}")
+    if decode_errors:
+        print("\n  where it stopped early:")
+        for k, v in decode_errors.most_common(12):
+            print(f"  {v:7d}  {k}")
+    for opcode, r in decode_dump:
+        print(f"\n  ── 0x{opcode:04X} {r.struct} — {r.consumed}/{r.length} bytes"
+              f"{'' if r.error is None else '  (' + r.error + ')'}")
+        for f in r.fields:
+            v = f.value if not isinstance(f.value, (bytes, bytearray)) else f.value.hex()
+            print(f"      +{f.offset:<5d} {f.width:<4d} {f.type:<20.20} {f.path:<44.44} {v!r}")
 
 
 if __name__ == "__main__":

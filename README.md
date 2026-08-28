@@ -169,6 +169,40 @@ considerations — with every claim evidence-tagged (`[W]` wire-observed / `[S]`
 struct-derived / `[D]` vendor-doc / `[I]` inferred / `[OPEN]`). Start with its **Summary**
 for the one-screen overview.
 
+## Decoding a body into named fields
+
+`PROTOCOL.md` documents the body structure of 455 operations. Two modules make that
+machine-readable, so a tool does not have to guess at a body's shape:
+
+- **`p2_asdu.py`** — the structure catalog, generated and embedded: field order and type
+  for 1,019 structures (3,525 fields), every pinned type width, the parent-qualified
+  types whose layout depends on what encloses them, and the recovered CHOICE tag maps.
+  Data only; do not hand-edit it.
+- **`p2_body.py`** — the walker that reads it. Hand-written, and kept separate so
+  regenerating the catalog cannot overwrite it.
+
+```python
+from p2_body import decode
+
+r = decode(0x0981, "rsp", body)          # "req" for a request or push
+print(r.struct, r.consumed, "of", r.length, r.error)
+for f in r.fields:
+    print(f.path, f.type, f.offset, f.width, f.value)
+```
+
+`decode` never raises: an unexpected body returns the fields it managed to read plus an
+`error` saying where it stopped, because a partial decode is more useful than an
+exception and a malformed body is a normal thing to meet on a wire. Where a CHOICE's tag
+map is not known, the arm is selected positionally and the field is **marked as such** —
+`PROTOCOL.md` §10.4.1 shows that reading is wrong for four CHOICEs, so a caller has to be
+able to tell a known selection from a guessed one.
+
+`analyze_pcap.py --decode` runs it over every request body in a capture and reports how
+far the declared structures got; `--decode-dump=N` prints the first N bodies field by
+field. Over a 3,983-request reference capture: 3,835 bodies fully consumed, 144 with
+trailing bytes the structure does not account for, 4 with no declared structure, and no
+failures.
+
 ## P2 Scanner (companion active tool)
 
 Alongside the passive dissector, this repository includes an **active** P2 scanner — a
