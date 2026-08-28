@@ -281,6 +281,16 @@ def decode(opcode, direction, body, struct_name=None):
     w = _Walker(bytes(body))
     try:
         n = w.read(0, name, "", 0, None)
+        # Fields the structure library does not declare that this one operation
+        # nevertheless carries -- see p2_asdu.OP_TAILS and PROTOCOL.md 10.1.
+        # Nine operations, 342 bodies, every one of which stops one or two bytes
+        # short without them. They are appended after the declared structure and
+        # named so a reader can see they are observed rather than declared.
+        for fname, ftype in getattr(A, "OP_TAILS", {}).get(
+                "%s:%#06x" % (direction, opcode), []):
+            if n >= len(body):
+                break
+            n = w.read(n, ftype, fname, 0, name)
     except _Fail as e:
         n = w.out[-1].offset + w.out[-1].width if w.out else 0
         return Result(name, w.out, n, len(body), str(e), w.truncated)

@@ -4722,7 +4722,44 @@ bodies from 91% to **99.2%** decoded (2,494 of 2,515): [W]
 |---|---|
 | **A trailing declared field may be absent.** A body ending exactly on a field boundary with fields still to come is truncated, not malformed — the library describes a **later firmware revision than a given panel emits**. Report what was not received; do not reject the body. | `0x0986 UPL_ALL_TEC` omits its final `is_bacnet` in **59 of 60** bodies |
 | **Request bodies are padded with zeros to a fixed size** — **220 bytes** at this site. Content of 2 to 65 bytes pads to the same total. | 174 bodies across 8 opcodes; `0x040A`'s entire declared body is one `SHORT_` and the frame carries `f8 2a` then 218 zeros |
-| **Some responses carry one or two bytes the library does not declare**, consistently per opcode. | 43 bodies: `0x0291` always +2, `0x0987` and `0x5038` always +1. **[OPEN]** — an undeclared trailing field, not padding |
+| **Some responses carry one or two bytes the library does not declare**, consistently per opcode. | **402 bodies across 9 operations**, tabulated below — an undeclared trailing field, not padding |
+
+**The undeclared tails, recounted.** An earlier edition of the row above said
+"43 bodies: `0x0291` always +2, `0x0987` and `0x5038` always +1". Walked
+field-by-field there are nine operations and 402 bodies, and they are two
+different things that should not be counted together: [W]
+
+| operation | bodies | tail | what it is |
+|---|---:|---|---|
+| `0x0291` `TREND_SETUP_DELETE` | 14 | 2 B, always `00 00` | an **empty `Point_extension2`** — entry count zero (§10.4.2) |
+| `0x02A8` `TREND_EVENT_ARC_SETUP` | 8 | 2 B, always `00 00` | the same |
+| `0x0987` `UPL_ALL_EQS_ZONE` | 60 | 1 B | a boolean: `1` on 59, `0` on 1 |
+| `0x5038` `EQS_ZONE_LOG` | 20 | 1 B | a boolean: `0` on all 20 |
+| `0x0989` `UPL_ALL_EQS_MODE_SCHED` | 60 | 2 B | a **state-text table id**: `-1005` on 36, `-2005` on 24 |
+| `0x098C`–`0x098F` `UPL_ALL_SSTO_*` | 60 each | 2 B | the same two ids, `-1005` on 45 and `-2005` on 15 in each |
+
+The last five are not really undeclared. `-1005` and `-2005` are the two
+state-text tables this site defines, and a **sibling structure in the same
+library declares the field**: `AP2_Upl_Added_SSTO_Start_Response` carries
+`state_text_id : SHORT_` where `AP2_Upl_All_SSTO_Start_Response` declares
+nothing. The wire carries it in both. So this is the same *"a trailing declared
+field may be absent"* asymmetry as the first rule, seen from the other side — the
+library is inconsistent between an operation and its `_Added_` variant, not
+silent about a field. [S][W]
+
+The first four are genuinely undeclared, and two of those four are now explained:
+an empty `Point_extension2` is exactly two bytes, so `0x0291` and `0x02A8` carry
+a field the library forgot on a structure that its neighbours all have. What
+remains open is narrow — **the meaning of the two single-byte booleans** on
+`0x0987` and `0x5038`. Their width and position are not in doubt. [W][OPEN]
+
+**These are in the published package.** `p2_asdu.OP_TAILS` carries all nine and
+`p2_body.py` applies them after the declared structure, naming them so a reader
+can see they are observed rather than declared. Until this pass the reference
+model applied them and the shipped walker did not, so 342 bodies this document
+reports as fully decoded stopped one or two bytes short for anyone using the
+package — a gap between what the document measured and what it shipped. Model
+and walker now both consume **3,803 of 4,063** bodies to exactly zero. [W]
 
 **`0x010C CABINET_DISPLAY` is the opposite case, and worth separating from it.** It does not run out of body — it runs out of *structure*. All 60 responses walk **224 of 230 bytes** and stop at the tag of `BACnet_MSTP_LAN_Settings`, and the six bytes left over are `21 00 03 00 03 00` — **byte-identical in every one of the sixty**. A constant remainder is a fixed block, not data, so this is not truncation and not a short read: either one of the three BACnet CHOICEs in the declared tail is not positional, or the panel emits six bytes the type system does not declare. Everything before that point decodes, including both MAC addresses and `bacnetSettings.tag_ = 0` — this site has BACnet off — so **a `CABINET_DISPLAY` from a panel with BACnet actually configured is what would settle it**, by making those arms non-empty. [W][OPEN]
 

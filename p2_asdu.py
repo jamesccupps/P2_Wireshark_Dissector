@@ -21,6 +21,13 @@ that consumes it is `p2_body.py`, which is hand-written and not generated.
   POINT_TAGS   All_points tag -> arm
   CHOICE_TAGS  {choice: {"complete": bool, "map": {tag: arm}}}
   OPS          {opcode: (request structure or None, response structure or None)}
+  OP_TAILS     {("req"|"rsp", opcode): [[field, type], ...]} -- fields the
+               structure library does not declare that the wire nevertheless
+               carries, consistently, for that one operation. Kept separate from
+               STRUCTS so that what is DECLARED stays distinguishable from what
+               is OBSERVED. Each was identified by content, not fitted to a
+               length, and each rescues every body of its opcode: without them
+               342 bodies stop one or two bytes short. See PROTOCOL.md 10.1.
 """
 
 WIDTHS = {
@@ -2078,6 +2085,18 @@ OPS = {
     0x5354: ['AP2_Hoa_Map_Look_Request', 'AP2_Hoa_Map_Look_Response'],
     0x5355: ['AP2_Hoa_Map_Add_Request', None],
     0x700c: ['AP2_WS_APOGEEEDIT_GET_STATE_Request', 'AP2_WS_APOGEEEDIT_GET_STATE_Response'],
+}
+
+OP_TAILS = {
+    'rsp:0x0291': [['<undeclared>', 'Point_extension2']],
+    'rsp:0x02a8': [['<undeclared>', 'Point_extension2']],
+    'rsp:0x0987': [['<undeclared bool>', 'BOOLEAN_']],
+    'rsp:0x0989': [['state_text_table', 'State_text_table']],
+    'rsp:0x098c': [['state_text_table', 'State_text_table']],
+    'rsp:0x098d': [['state_text_id', 'State_text_table']],
+    'rsp:0x098e': [['state_text_table', 'State_text_table']],
+    'rsp:0x098f': [['state_text_table', 'State_text_table']],
+    'rsp:0x5038': [['<undeclared bool>', 'BOOLEAN_']],
 }
 
 NESTED = {
